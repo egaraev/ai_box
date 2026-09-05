@@ -17,6 +17,10 @@ spec:
       labels:
         name: nvidia-device-plugin-ds
     spec:
+      # k3s only registers "nvidia" as an available RuntimeClass, it does NOT
+      # set it as the default container runtime — pods must opt in explicitly
+      # or they run under plain runc and can't see the driver's NVML library.
+      runtimeClassName: nvidia
       tolerations:
       - key: nvidia.com/gpu
         operator: Exists
