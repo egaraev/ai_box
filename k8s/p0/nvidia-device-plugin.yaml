@@ -1,0 +1,40 @@
+# Official NVIDIA k8s-device-plugin DaemonSet — advertises nvidia.com/gpu as an
+# allocatable resource on the node so pods can request it. Without this, the
+# GPU is usable at the containerd/runtime level but invisible to the scheduler.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-daemonset
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: nvidia-device-plugin-ds
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        name: nvidia-device-plugin-ds
+    spec:
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      priorityClassName: "system-node-critical"
+      containers:
+      - image: nvcr.io/nvidia/k8s-device-plugin:v0.20.0
+        name: nvidia-device-plugin-ctr
+        env: []
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: kubelet-device-plugins-dir
+          mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+      - name: kubelet-device-plugins-dir
+        hostPath:
+          path: /var/lib/kubelet/device-plugins
+          type: Directory
