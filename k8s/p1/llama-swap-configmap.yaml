@@ -27,30 +27,28 @@ data:
     models:
 
       qwen3.8-27b-Expert:
-        # 2026-09-05: -c dropped 90000 -> 65536 on aibox (XFCE desktop holds ~530MB
-        # VRAM at all times -- Xorg/Chromium GPU process -- eating into the same
-        # razor-thin headroom the Windows benchmark already had at 85k context).
-        # 65536 is a hard floor, not just a preference: Hermes Agent enforces a
-        # 64K minimum context window, so this can't be cut further to make room
-        # for anything else -- do not lower -c below 65536 again.
-        # --mmproj was dropped, then restored: an earlier OOM turned out to be
-        # VRAM fragmentation from repeated crashed CUDA contexts during debugging,
-        # not a real ceiling -- a fresh pod loaded fine text-only at 65536.
-        # BUT with --mmproj back in, confirmed live on a genuinely fresh pod that
-        # weights + mmproj (~14.5GB) leave too little room for KV cache + compute
-        # buffers at 65536 ("cudaMalloc failed: out of memory" specifically on the
-        # ~885MB mmproj buffer). Since -c can't move, added --parallel 1 instead:
-        # the server was defaulting to n_slots=4 (seen live in its startup log)
-        # even though nothing asked for multiple parallel slots -- pinning it to
-        # 1 (matching what the MTP variant below already does) should shrink the
-        # per-slot compute-buffer/KV overhead without touching context width.
-        # If this still OOMs, the next lever is the desktop's ~530MB VRAM
-        # baseline itself (planned nvidia-drm.modeset=0 / no-GUI switch), or
-        # closing GPU-heavy desktop apps before use.
+        # 2026-09-05: multiple rounds of VRAM tuning on aibox (RTX 5070 Ti 16GB,
+        # XFCE desktop holding ~530MB VRAM at all times -- Xorg/Chromium GPU
+        # process -- eating into the same razor-thin headroom the Windows
+        # benchmark already had at 85k context):
+        #   - text-only at -c 65536, no --mmproj: confirmed working, 44.8 t/s
+        #     decode (matches the Windows benchmark for this quant).
+        #   - --mmproj (vision) added back at -c 65536: reproducible OOM on a
+        #     genuinely fresh pod, specifically failing to allocate the ~885MB
+        #     mmproj buffer -- not fragmentation, a real shortfall.
+        #   - tried --parallel 1 (server was defaulting to n_slots=4 per its own
+        #     startup log) to claw back headroom for --mmproj while keeping
+        #     -c 65536 (a hard floor: Hermes Agent enforces a 64K minimum context
+        #     window) -- still OOM'd.
+        # Given vision has to lose to context+text-quality here, dropped --mmproj
+        # again (multimodal stays covered by the dedicated qwen3-vl-30b role once
+        # its files exist) and pushed -c back up to the original Windows value of
+        # 90000 now that mmproj's ~885MB isn't competing for room. If this OOMs
+        # too, the real fix is freeing the desktop's ~530MB VRAM baseline
+        # (planned nvidia-drm.modeset=0 / no-GUI switch), not more config tuning.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B-MTP/Qwen3.8-27B-UD-IQ4_XS.gguf
-          --mmproj /models/qwen3.8-27B-MTP/mmproj-F16.gguf
           --port ${PORT}
           --host 0.0.0.0
           --jinja
@@ -59,7 +57,7 @@ data:
           --no-mmap
           --parallel 1
           -fa on
-          -c 65536 -ctk q4_0 -ctv q4_0
+          -c 90000 -ctk q4_0 -ctv q4_0
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
           --presence-penalty 1.5 --repeat-penalty 1.0
           --reasoning-budget 4096
