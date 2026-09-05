@@ -1,0 +1,67 @@
+# llama-swap: the GPU model-serving layer for P1. Runs the
+# ghcr.io/mostlygeek/llama-swap:unified-cuda image (bundles a CUDA-built
+# llama-server + llama-swap in one container), reads its model roster from
+# the ConfigMap in llama-swap-config.yaml, and reads GGUF files from
+# /data/models on the host (hostPath — fine for a single-node cluster).
+#
+# NOTE: the ConfigMap is mounted via subPath, so a `kubectl apply` /
+# ArgoCD sync of a config change updates the file on disk but does NOT
+# restart the running llama-swap process automatically. After editing the
+# config, roll the deployment: `kubectl rollout restart deployment/llama-swap -n ai-models`
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-swap
+  namespace: ai-models
+  labels:
+    app: llama-swap
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # only one process may hold the GPU at a time
+  selector:
+    matchLabels:
+      app: llama-swap
+  template:
+    metadata:
+      labels:
+        app: llama-swap
+    spec:
+      runtimeClassName: nvidia
+      containers:
+        - name: llama-swap
+          image: ghcr.io/mostlygeek/llama-swap:unified-cuda
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: config
+              mountPath: /etc/llama-swap/config/config.yaml
+              subPath: config.yaml
+            - name: models
+              mountPath: /models
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: llama-swap-config
+        - name: models
+          hostPath:
+            path: /data/models
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-swap
+  namespace: ai-models
+spec:
+  selector:
+    app: llama-swap
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http

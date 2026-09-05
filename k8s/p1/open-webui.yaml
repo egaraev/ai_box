@@ -1,0 +1,73 @@
+# Open WebUI — first chat interface for P1, talking to llama-swap's
+# OpenAI-compatible endpoint over the cluster network. Single-user home
+# setup, so auth is left at its default (WEBUI_AUTH true) — the first
+# account created on first visit becomes the admin; there's no public
+# ingress yet, so it's only reachable from your LAN via the NodePort below.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: open-webui-data
+  namespace: ai-gateway
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-webui
+  namespace: ai-gateway
+  labels:
+    app: open-webui
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: open-webui
+  template:
+    metadata:
+      labels:
+        app: open-webui
+    spec:
+      containers:
+        - name: open-webui
+          image: ghcr.io/open-webui/open-webui:main
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: OPENAI_API_BASE_URL
+              value: "http://llama-swap.ai-models.svc.cluster.local:8080/v1"
+            - name: OPENAI_API_KEY
+              value: "none"
+            # llama-swap has no concept of "installed models" until a model is
+            # actually requested once — this just stops Open WebUI from also
+            # trying to reach Ollama, which isn't part of this stack.
+            - name: ENABLE_OLLAMA_API
+              value: "false"
+          volumeMounts:
+            - name: data
+              mountPath: /app/backend/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: open-webui-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: open-webui
+  namespace: ai-gateway
+spec:
+  type: NodePort
+  selector:
+    app: open-webui
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30080
+      name: http
