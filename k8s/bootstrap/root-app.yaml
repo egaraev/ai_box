@@ -10,8 +10,7 @@ metadata:
 spec:
   project: default
   source:
-    # TODO: set to your git remote, e.g. https://github.com/<you>/aibox-platform.git
-    repoURL: REPLACE_ME
+    repoURL: https://github.com/egaraev/ai_box.git
     targetRevision: main
     path: k8s/p0
   destination:
