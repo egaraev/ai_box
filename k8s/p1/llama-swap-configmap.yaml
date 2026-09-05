@@ -27,6 +27,15 @@ data:
     models:
 
       qwen3.8-27b-Expert:
+        # 2026-09-05: -c dropped 90000 -> 65536 on aibox. The Windows benchmark for
+        # this exact quant already ran with only ~250-350MB VRAM headroom at 85k
+        # context; on aibox the XFCE desktop itself (Xorg/xfwm4/Chromium GPU
+        # process) holds ~530MB of the 16GB card at all times, which was enough to
+        # push CUDA's compute-buffer allocation over the edge ("cudaMalloc failed:
+        # out of memory" right after model weights loaded). 65536 restores real
+        # headroom. Raise this back up once the desktop's VRAM usage goes away
+        # (e.g. after the planned nvidia-drm.modeset=0 / no-GUI switch) or once
+        # re-benchmarked live on aibox with the desktop running.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B-MTP/Qwen3.8-27B-UD-IQ4_XS.gguf
@@ -38,7 +47,7 @@ data:
           -t 16
           --no-mmap
           -fa on
-          -c 90000 -ctk q4_0 -ctv q4_0
+          -c 65536 -ctk q4_0 -ctv q4_0
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
           --presence-penalty 1.5 --repeat-penalty 1.0
           --reasoning-budget 4096
