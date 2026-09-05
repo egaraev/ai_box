@@ -1,0 +1,25 @@
+# The one manifest you apply by hand (kubectl apply -f). Everything after this
+# flows through ArgoCD. This is the P0 Application — add p1-app.yaml, p2-app.yaml,
+# etc. as each phase is actually built out, rather than pre-declaring all of them
+# (matches the plan's "each phase leaves a working system" approach).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aibox-p0
+  namespace: argocd
+spec:
+  project: default
+  source:
+    # TODO: set to your git remote, e.g. https://github.com/<you>/aibox-platform.git
+    repoURL: REPLACE_ME
+    targetRevision: main
+    path: k8s/p0
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
