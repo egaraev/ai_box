@@ -27,23 +27,20 @@ data:
     models:
 
       qwen3.8-27b-Expert:
-        # 2026-09-05: -c dropped 90000 -> 65536 on aibox. The Windows benchmark for
-        # this exact quant already ran with only ~250-350MB VRAM headroom at 85k
-        # context; on aibox the XFCE desktop itself (Xorg/xfwm4/Chromium GPU
-        # process) holds ~530MB of the 16GB card at all times, which was enough to
-        # push CUDA's compute-buffer allocation over the edge ("cudaMalloc failed:
-        # out of memory" right after model weights loaded).
-        # 2026-09-05 (round 2): even at 65536, weights+KV cache alone now fill the
-        # card -- confirmed live: it got all the way through model+context load
-        # (previously died much earlier) and only failed allocating the ~885MB
-        # --mmproj buffer. Dropped --mmproj here entirely: this variant is now
-        # text-only, multimodal stays covered by the dedicated qwen3-vl-30b role
-        # below once its files are in place. Raise context back up and/or restore
-        # --mmproj once the desktop's VRAM usage goes away (e.g. after the planned
-        # nvidia-drm.modeset=0 / no-GUI switch).
+        # 2026-09-05: -c dropped 90000 -> 65536 on aibox (XFCE desktop holds ~530MB
+        # VRAM at all times -- Xorg/Chromium GPU process -- eating into the same
+        # razor-thin headroom the Windows benchmark already had at 85k context).
+        # --mmproj was dropped and then restored the same day: turned out the real
+        # cause of the OOM crashes wasn't a hard memory ceiling but VRAM
+        # fragmentation from repeated crashed CUDA contexts inside one long-lived
+        # pod during debugging -- a full pod recreate (fresh CUDA context) loaded
+        # fine even WITH --mmproj at 65536. Restored here; if OOM ever recurs,
+        # recreate the pod first (`kubectl delete pod -n ai-models -l
+        # app=llama-swap`) before assuming it's a real capacity problem again.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B-MTP/Qwen3.8-27B-UD-IQ4_XS.gguf
+          --mmproj /models/qwen3.8-27B-MTP/mmproj-F16.gguf
           --port ${PORT}
           --host 0.0.0.0
           --jinja
