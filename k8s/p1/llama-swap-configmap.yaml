@@ -30,13 +30,23 @@ data:
         # 2026-09-05: -c dropped 90000 -> 65536 on aibox (XFCE desktop holds ~530MB
         # VRAM at all times -- Xorg/Chromium GPU process -- eating into the same
         # razor-thin headroom the Windows benchmark already had at 85k context).
-        # --mmproj was dropped and then restored the same day: turned out the real
-        # cause of the OOM crashes wasn't a hard memory ceiling but VRAM
-        # fragmentation from repeated crashed CUDA contexts inside one long-lived
-        # pod during debugging -- a full pod recreate (fresh CUDA context) loaded
-        # fine even WITH --mmproj at 65536. Restored here; if OOM ever recurs,
-        # recreate the pod first (`kubectl delete pod -n ai-models -l
-        # app=llama-swap`) before assuming it's a real capacity problem again.
+        # 65536 is a hard floor, not just a preference: Hermes Agent enforces a
+        # 64K minimum context window, so this can't be cut further to make room
+        # for anything else -- do not lower -c below 65536 again.
+        # --mmproj was dropped, then restored: an earlier OOM turned out to be
+        # VRAM fragmentation from repeated crashed CUDA contexts during debugging,
+        # not a real ceiling -- a fresh pod loaded fine text-only at 65536.
+        # BUT with --mmproj back in, confirmed live on a genuinely fresh pod that
+        # weights + mmproj (~14.5GB) leave too little room for KV cache + compute
+        # buffers at 65536 ("cudaMalloc failed: out of memory" specifically on the
+        # ~885MB mmproj buffer). Since -c can't move, added --parallel 1 instead:
+        # the server was defaulting to n_slots=4 (seen live in its startup log)
+        # even though nothing asked for multiple parallel slots -- pinning it to
+        # 1 (matching what the MTP variant below already does) should shrink the
+        # per-slot compute-buffer/KV overhead without touching context width.
+        # If this still OOMs, the next lever is the desktop's ~530MB VRAM
+        # baseline itself (planned nvidia-drm.modeset=0 / no-GUI switch), or
+        # closing GPU-heavy desktop apps before use.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B-MTP/Qwen3.8-27B-UD-IQ4_XS.gguf
@@ -47,6 +57,7 @@ data:
           -ngl 99
           -t 16
           --no-mmap
+          --parallel 1
           -fa on
           -c 65536 -ctk q4_0 -ctv q4_0
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
