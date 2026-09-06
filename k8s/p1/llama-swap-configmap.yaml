@@ -86,7 +86,13 @@ data:
         # quality tradeoff vs Expert's IQ4_XS applies in principle (Q3_K_XL is
         # a smaller quant), but no quality regression observed in testing so
         # far. --parallel 1 kept for the same reason as Expert (avoid the
-        # default n_slots=4 overhead).
+        # default n_slots=4 overhead). 2026-09-06: --reasoning-effort bumped
+        # from medium to high (tried xhigh first, settled on high) to test
+        # whether more reasoning improves output quality on this box -- watch
+        # decode speed, this is untested. Note: --reasoning-budget is still
+        # capped at 4096 tokens, which caps how much effort levels above
+        # medium can actually use -- raise the budget too if higher effort
+        # doesn't seem to change anything.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B-MTP/Qwen3.8-27B-UD-Q3_K_XL.gguf
@@ -103,7 +109,7 @@ data:
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
           --presence-penalty 1.5 --repeat-penalty 1.0
           --reasoning-budget 4096
-          --reasoning-effort medium
+          --reasoning-effort high
         ttl: 300
 
       qwen3.8-27b-Atomic:
