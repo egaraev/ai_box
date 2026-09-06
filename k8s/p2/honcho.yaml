@@ -40,7 +40,9 @@ data:
   LOG_LEVEL: "INFO"
   NAMESPACE: "honcho"
 
-  DB_CONNECTION_URI: "postgresql+psycopg://postgres:postgres@postgres:5432/postgres"
+  # DB_CONNECTION_URI is deliberately NOT here -- it embeds the Postgres
+  # password, so it comes from postgres-secret (envFrom on both Deployments
+  # below) instead of this ConfigMap. See k8s/secrets/README.md.
 
   CACHE_ENABLED: "true"
   CACHE_URL: "redis://redis:6379/0?suppress=true"
@@ -127,6 +129,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: honcho-config
+            - secretRef:
+                name: postgres-secret
       # No initContainer wait-for-postgres here: the entrypoint script's own
       # migration step (provision_db.py) will retry/fail fast and the
       # Deployment will just restart the pod -- acceptable for a single-node
@@ -170,3 +174,5 @@ spec:
           envFrom:
             - configMapRef:
                 name: honcho-config
+            - secretRef:
+                name: postgres-secret

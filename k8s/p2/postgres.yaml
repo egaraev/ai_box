@@ -6,11 +6,17 @@
 # rather than deviating.
 #
 # NOTE (home-lab security posture, matches the rest of this project so far):
-# POSTGRES_HOST_AUTH_METHOD=trust + a fixed postgres/postgres password is
-# exactly what Honcho's own docker-compose.yml.example ships (their comment:
-# "Do NOT use this in production"). Fine for a single-node home cluster with
-# no public ingress, same trust level as llama-swap/Open WebUI today. Revisit
-# with real Secrets once P8 (Istio mTLS/observability hardening) happens.
+# POSTGRES_HOST_AUTH_METHOD=trust means Postgres doesn't actually check this
+# password -- that's exactly what Honcho's own docker-compose.yml.example
+# ships (their comment: "Do NOT use this in production"), fine for a
+# single-node home cluster with no public ingress, same trust level as
+# llama-swap/Open WebUI today. Revisit with real per-service auth once P8
+# (Istio mTLS/observability hardening) happens.
+#
+# The password value itself still doesn't belong in git (GitHub's push
+# protection flags this kind of thing, and it's just good hygiene) -- it
+# comes from a Secret named postgres-secret, created directly on the cluster
+# via kubectl, never committed. See k8s/secrets/README.md.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -63,7 +69,10 @@ spec:
             - name: POSTGRES_USER
               value: "postgres"
             - name: POSTGRES_PASSWORD
-              value: "postgres"
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: password
             - name: POSTGRES_HOST_AUTH_METHOD
               value: "trust"
             - name: PGDATA

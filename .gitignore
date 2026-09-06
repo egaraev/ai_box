@@ -1,0 +1,15 @@
+# Real credential values never get committed. Anything under k8s/secrets/
+# is applied directly to the cluster with `kubectl apply -f` -- outside
+# ArgoCD's watched paths (k8s/p0, p1, p2, p3, ...) -- so it's never part of
+# a git diff or push in the first place. See k8s/secrets/README.md for what
+# needs to exist and how to (re)create it.
+k8s/secrets/*
+!k8s/secrets/README.md
+
+# Generic fallback patterns, in case a real secret ever gets written
+# somewhere else by mistake.
+*.secret.yaml
+.env
+.env.*
+*.pem
+*.key
