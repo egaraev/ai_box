@@ -112,6 +112,57 @@ data:
           --reasoning-effort high
         ttl: 300
 
+      # ── NEW (P2, 2026-09-06): CPU-only models supporting the Honcho memory
+      # layer. Both run -ngl 0 (no GPU layers) so they never contend with
+      # Open WebUI's GPU chat models via llama-swap's model-swap mechanism --
+      # Honcho's background deriver/embedding calls can fire at any time,
+      # including mid-conversation, without disrupting whatever's loaded on
+      # the GPU. ttl: 0 (like arch-router-1.5b) keeps them always resident
+      # since they cost no VRAM either way.
+      nomic-embed-text-v1.5:
+        # Embeddings-only model for Honcho's EMBED_MESSAGES pipeline (see
+        # k8s/p2/honcho.yaml). Q8_0 quant, ~140MB. --pooling mean is
+        # nomic-embed-text-v1.5's documented setting for llama.cpp serving.
+        # Known minor quality caveat: nomic-embed-text-v1.5 is trained with
+        # task-instruction prefixes ("search_query: ...", "search_document:
+        # ...") for best retrieval quality -- Honcho's embedding calls won't
+        # send these, so embeddings will work but may be somewhat less
+        # precise than the model's benchmarked numbers. Not a blocker.
+        cmd: |
+          llama-server
+          -m /models/nomic-embed-text-v1.5/nomic-embed-text-v1.5.Q8_0.gguf
+          --port ${PORT}
+          --host 0.0.0.0
+          --embedding
+          --pooling mean
+          -ngl 0
+          -t 4
+          -c 8192
+          -b 8192
+          -ub 8192
+        ttl: 0
+
+      qwen3-1.7b-cpu:
+        # Dedicated tiny CPU model for all of Honcho's non-embedding LLM
+        # calls (deriver extraction, dialectic, summary, dream) -- see
+        # k8s/p2/honcho.yaml's per-feature MODEL_CONFIG overrides, all
+        # pointed at this model name. Context capped at 32768; Honcho's
+        # DERIVER_MAX_INPUT_TOKENS/DIALECTIC_MAX_INPUT_TOKENS are reduced in
+        # honcho.yaml to fit inside this with headroom for output.
+        # Sampling params are Qwen3's own documented non-thinking defaults.
+        cmd: |
+          llama-server
+          -m /models/qwen3-1.7B/Qwen3-1.7B-Q8_0.gguf
+          --port ${PORT}
+          --host 0.0.0.0
+          --jinja
+          -ngl 0
+          -t 8
+          --no-mmap
+          -c 32768
+          --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0
+        ttl: 0
+
       qwen3.8-27b-Atomic:
         cmd: |
           llama-server

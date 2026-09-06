@@ -1,0 +1,99 @@
+# Postgres for Honcho — relational store for workspaces/peers/sessions/
+# messages. Uses the pgvector/pgvector image (Honcho's own compose default)
+# even though we're routing actual vector storage to Qdrant: Honcho's schema
+# still expects the `vector` extension to exist regardless of which
+# vector_store backend is active, so we keep this identical to upstream
+# rather than deviating.
+#
+# NOTE (home-lab security posture, matches the rest of this project so far):
+# POSTGRES_HOST_AUTH_METHOD=trust + a fixed postgres/postgres password is
+# exactly what Honcho's own docker-compose.yml.example ships (their comment:
+# "Do NOT use this in production"). Fine for a single-node home cluster with
+# no public ingress, same trust level as llama-swap/Open WebUI today. Revisit
+# with real Secrets once P8 (Istio mTLS/observability hardening) happens.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: ai-memory
+data:
+  init.sql: |
+    CREATE EXTENSION IF NOT EXISTS vector;
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: ai-memory
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: ai-memory
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg15
+          args: ["postgres", "-c", "max_connections=200"]
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: "postgres"
+            - name: POSTGRES_USER
+              value: "postgres"
+            - name: POSTGRES_PASSWORD
+              value: "postgres"
+            - name: POSTGRES_HOST_AUTH_METHOD
+              value: "trust"
+            - name: PGDATA
+              value: "/var/lib/postgresql/data/pgdata"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # subPath here is fine even though subPath mounts don't hot-reload
+            # on ConfigMap change: the Postgres image only ever runs this
+            # script once, on a freshly-initialized empty data dir.
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d/init.sql
+              subPath: init.sql
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+        - name: init
+          configMap:
+            name: postgres-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: ai-memory
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
