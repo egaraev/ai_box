@@ -152,8 +152,18 @@ data:
         # Sampling params are Qwen3's own documented non-thinking defaults.
         # 2026-09-06: -t bumped 8->16 (aibox has 16 cores, this was only
         # using half) after the first real smoke test showed ~82-92s per
-        # deriver extraction call -- worth confirming this actually helps
-        # before considering a smaller/less tool-calling-reliable model.
+        # deriver extraction call. Confirmed via re-test: only a modest,
+        # inconsistent improvement (avg ~77s across 5 calls, range 42-106s)
+        # -- thread count wasn't the dominant bottleneck. The likely real
+        # cause: Qwen3 dense models think by default (emit reasoning_content
+        # before the actual answer/tool-call) unless told not to, and this
+        # model never had --reasoning-budget set, unlike every GPU model in
+        # this roster. On CPU, token *generation* speed is the bottleneck,
+        # and thinking mode can multiply generated tokens well past what
+        # Honcho's deriver actually needs (a structured
+        # extraction/tool-call, not visible reasoning) -- so
+        # --reasoning-budget 0 added to disable it. Re-test after this
+        # change before concluding a smaller model is needed.
         cmd: |
           llama-server
           -m /models/qwen3-1.7B/Qwen3-1.7B-Q8_0.gguf
@@ -165,6 +175,7 @@ data:
           --no-mmap
           -c 32768
           --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0
+          --reasoning-budget 0
         ttl: 0
 
       qwen3.8-27b-Atomic:
