@@ -136,7 +136,7 @@ data:
           --embedding
           --pooling mean
           -ngl 0
-          -t 4
+          -t 8
           -c 8192
           -b 8192
           -ub 8192
@@ -150,6 +150,10 @@ data:
         # DERIVER_MAX_INPUT_TOKENS/DIALECTIC_MAX_INPUT_TOKENS are reduced in
         # honcho.yaml to fit inside this with headroom for output.
         # Sampling params are Qwen3's own documented non-thinking defaults.
+        # 2026-09-06: -t bumped 8->16 (aibox has 16 cores, this was only
+        # using half) after the first real smoke test showed ~82-92s per
+        # deriver extraction call -- worth confirming this actually helps
+        # before considering a smaller/less tool-calling-reliable model.
         cmd: |
           llama-server
           -m /models/qwen3-1.7B/Qwen3-1.7B-Q8_0.gguf
@@ -157,7 +161,7 @@ data:
           --host 0.0.0.0
           --jinja
           -ngl 0
-          -t 8
+          -t 16
           --no-mmap
           -c 32768
           --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0
