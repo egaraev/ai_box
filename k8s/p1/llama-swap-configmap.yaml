@@ -17,10 +17,11 @@ data:
     #                                            (hostPath /data/models on aibox,
     #                                            mounted into the container at /models)
     #
-    # P1 only has qwen3.8-27b-Expert's GGUF files actually present on aibox so
-    # far — every other entry below is carried over structurally (matching the
-    # Windows config 1:1) but won't serve anything until its files are copied
-    # into the matching /data/models/<dir>/ subfolder.
+    # P1 only has qwen3.8-27b-Expert's and qwen3.8-27b-Expert-Vision's GGUF
+    # files actually present on aibox so far — every other entry below is
+    # carried over structurally (matching the Windows config 1:1) but won't
+    # serve anything until its files are copied into the matching
+    # /data/models/<dir>/ subfolder.
     healthCheckTimeout: 300
     logLevel: info
 
@@ -63,7 +64,29 @@ data:
           --reasoning-effort medium
         ttl: 300
 
-      qwen3.8-27b-Test:
+      qwen3.8-27b-Expert-Vision:
+        # 2026-09-06: LOCKED. Started life as "qwen3.8-27b-Test" -- a lighter
+        # Q3_K_XL quant (~1.1GB smaller than Expert's IQ4_XS) tried specifically
+        # to see whether the VRAM savings alone (holding context at Expert's
+        # proven-safe 65536, not cutting it further) would be enough to also fit
+        # --mmproj (vision) on this GPU. Empirically confirmed on aibox, clean
+        # pod, no leftover processes:
+        #   - 65536, with --mmproj: WORKS. No OOM. 68.62 t/s prompt / 47.17 t/s
+        #     decode -- actually faster than Expert's 44.8-45.1 t/s, and has
+        #     vision where Expert doesn't. Confirmed end-to-end via Open WebUI
+        #     with a real image (model correctly described it), not just a
+        #     clean load.
+        #   - 100000, with --mmproj: OOM, same 884.62 MiB short on the mmproj
+        #     buffer as Expert hit at 65536 -- confirms the shortfall scales
+        #     with context, not quant alone; 65536 is still the ceiling for
+        #     vision on this box until the desktop's ~530MB baseline is freed.
+        # Renamed from "Test" to "Expert-Vision" now that it's confirmed as the
+        # go-to vision-capable model, better than Expert on every axis measured
+        # here (speed, vision) for the same 65536 context. Same lower-bit-quant
+        # quality tradeoff vs Expert's IQ4_XS applies in principle (Q3_K_XL is
+        # a smaller quant), but no quality regression observed in testing so
+        # far. --parallel 1 kept for the same reason as Expert (avoid the
+        # default n_slots=4 overhead).
         cmd: |
           llama-server
           -m /models/qwen3.8-27B-MTP/Qwen3.8-27B-UD-Q3_K_XL.gguf
@@ -368,10 +391,11 @@ data:
         qvl:  qwen3-vl-30b
         arch: arch-router-1.5b
         qwe:  qwen3.8-27b-Expert
+        qwv:  qwen3.8-27b-Expert-Vision
 
       sets:
 
         # arch-router (tiny, ~1GB) stays co-resident alongside whichever heavy
         # model is serving, so "auto" classification never forces a swap.
         # (no more "& q7" here -- the 7B autocomplete model was dropped, see above)
-        resident_router: "arch & (a1 | orn | qpg | qw6 | goss | q8 | med | qvl | qwe)"
+        resident_router: "arch & (a1 | orn | qpg | qw6 | goss | q8 | med | qvl | qwe | qwv)"
