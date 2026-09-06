@@ -51,14 +51,32 @@
 # if this happens, the fix is a custom image layer (pip install honcho-ai),
 # the same "durable installs" pattern Hermes's own docker.md documents.
 #
-# config.yaml and honcho.json are mounted read-only from a ConfigMap
-# (subPath, same pattern as llama-swap-configmap.yaml/honcho.yaml) --
-# GitOps controls them, not the agent itself. Remember the kubelet
-# ConfigMap-volume cache when editing these: `kubectl delete pod` after an
-# apply, per the aibox-config-restart-verify skill. Everything else under
-# /opt/data (sessions/, memories/, skills/, SOUL.md, logs/, profiles/) is
-# normal PVC state the agent manages itself and that persists across
+# config.yaml, honcho.json, and .env are SEED-ONCE, not read-only. Earlier
+# revisions of this file mounted them read-only from the ConfigMap/Secret via
+# subPath, matching the llama-swap/Honcho pattern -- but that broke Hermes
+# itself: config.yaml/.env aren't passive config to Hermes, they're state it
+# expects to freely read AND write at runtime (the interactive `hermes model`
+# picker, `hermes setup`, `hermes doctor --fix`'s auto-migration, and the web
+# dashboard's settings screens all write to these files directly). A
+# read-only mount made every one of those fail identically -- blank model
+# resolution ("no model id could be identified"), `[Errno 30] Read-only file
+# system` from doctor --fix, and 500s from the dashboard's settings API.
+#
+# The fix: an initContainer below copies config.yaml/honcho.json (from the
+# ConfigMap) and .env (from the Secret) into the /opt/data PVC only if they
+# don't already exist there (idempotent -- `[ -f ... ] || cp ...`). From then
+# on they're normal writable files inside the PVC, exactly like sessions/,
+# memories/, skills/, SOUL.md -- Hermes manages them itself and they survive
 # restarts/upgrades.
+#
+# Trade-off (accepted -- confirmed via AskUserQuestion): editing config.yaml
+# in this file after first deploy no longer reaches the running pod
+# automatically, since the seed only fires when the file is missing. To push
+# a git-side change, delete the stale file from the PVC first --
+# `kubectl exec -n ai-agents deploy/hermes-agent -- rm /opt/data/config.yaml`
+# (or honcho.json / .env) -- then `kubectl delete pod` to force Recreate +
+# re-seed. Day-to-day config changes (model picker, dashboard settings,
+# `hermes setup`) don't need any of this -- they just work now.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -167,10 +185,26 @@ spec:
       initContainers:
         - name: init-workspace
           image: busybox:1.36
-          command: ["sh", "-c", "mkdir -p /opt/data/workspace"]
+          # Seed-once: only copies a file in if it isn't already sitting in
+          # the PVC from a previous boot. See the top-of-file comment for why
+          # these can't stay read-only subPath mounts.
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /opt/data/workspace
+              [ -f /opt/data/config.yaml ] || cp /seed/config/config.yaml /opt/data/config.yaml
+              [ -f /opt/data/honcho.json ] || cp /seed/config/honcho.json /opt/data/honcho.json
+              [ -f /opt/data/.env ] || cp /seed/env/.env /opt/data/.env
           volumeMounts:
             - name: data
               mountPath: /opt/data
+            # Seed sources only -- not mounted into the main container.
+            - name: config
+              mountPath: /seed/config
+            - name: env-file
+              mountPath: /seed/env
       containers:
         - name: hermes-agent
           image: nousresearch/hermes-agent:latest
@@ -192,18 +226,13 @@ spec:
           envFrom:
             - secretRef:
                 name: hermes-env
+          # No config/env-file subPath mounts here anymore -- config.yaml,
+          # honcho.json, and .env are seeded once into the PVC by the
+          # initContainer above and then live as plain writable files under
+          # this single "data" mount, same as everything else Hermes manages.
           volumeMounts:
             - name: data
               mountPath: /opt/data
-            - name: config
-              mountPath: /opt/data/config.yaml
-              subPath: config.yaml
-            - name: config
-              mountPath: /opt/data/honcho.json
-              subPath: honcho.json
-            - name: env-file
-              mountPath: /opt/data/.env
-              subPath: .env
             - name: dshm
               mountPath: /dev/shm
           resources:
