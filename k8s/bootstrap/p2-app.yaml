@@ -1,6 +1,8 @@
-# P2 Application — memory layer (Qdrant + Honcho: API server + Deriver +
-# Postgres + Redis). Same pattern as aibox-p0/aibox-p1: ArgoCD watches
+# P2 Application — memory layer (Honcho: API server + Deriver + Postgres
+# w/ pgvector + Redis). Same pattern as aibox-p0/aibox-p1: ArgoCD watches
 # k8s/p2/ in this repo and keeps the cluster in sync automatically.
+# (Originally planned with Qdrant as the vector store too -- dropped, see
+# the comment at the top of honcho.yaml for why.)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

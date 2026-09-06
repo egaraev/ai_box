@@ -4,6 +4,16 @@
 # the same Dockerfile their docker-compose.yml.example builds locally), so
 # no in-cluster image build is needed, same as llama-swap/Open WebUI.
 #
+# Vector store: pgvector (Postgres), NOT Qdrant. Originally planned to route
+# vectors to Qdrant (Honcho has native VECTOR_STORE_TYPE=qdrant support), but
+# the published image doesn't bundle the qdrant-client Python package (it's
+# a real optional extra in Honcho's pyproject.toml, just not one their
+# Dockerfile's build-arg exposes) -- using it crashes both the API and
+# scripts/configure_embeddings.py with ModuleNotFoundError. Fixing that would
+# mean building/maintaining a custom image, which isn't worth it just to use
+# Qdrant instead of the pgvector Honcho already needs anyway for relational
+# data. The qdrant.yaml deployment was removed from this directory.
+#
 # LLM routing: Honcho requires an LLM provider for memory extraction
 # (deriver), dialectic chat, summarization, and dream consolidation, PLUS a
 # separate embeddings endpoint (EMBED_MESSAGES=true by default). All of it is
@@ -41,8 +51,7 @@ data:
   # llama-swap via an explicit OVERRIDES__BASE_URL, which ignores API keys.
   LLM_OPENAI_API_KEY: "none"
 
-  VECTOR_STORE_TYPE: "qdrant"
-  VECTOR_STORE_QDRANT_URL: "http://qdrant:6333"
+  VECTOR_STORE_TYPE: "pgvector"
 
   EMBED_MESSAGES: "true"
   EMBEDDING_VECTOR_DIMENSIONS: "768"
