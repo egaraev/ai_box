@@ -76,7 +76,7 @@ data:
           --no-mmap
           --parallel 1
           -fa on
-          -c 100000 -ctk q4_0 -ctv q4_0
+          -c 65536 -ctk q4_0 -ctv q4_0
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
           --presence-penalty 1.5 --repeat-penalty 1.0
           --reasoning-budget 4096
