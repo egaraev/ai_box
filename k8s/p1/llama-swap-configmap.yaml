@@ -436,6 +436,25 @@ data:
       # was carried over without checking that against how this model would
       # actually be called; every other GPU model in this roster already
       # runs --jinja for the same reason.
+      #
+      # --chat-template chatml ADDED 2026-09-07 (second bug, found right
+      # after the --jinja fix): with --jinja alone (using this quant's own
+      # embedded GGUF chat-template metadata), the model never actually
+      # stopped generating -- it kept emitting literal "<|im_end|>"/
+      # "<|im_start|>" as plain text and looping the same answer over and
+      # over instead of the server recognizing end-of-turn (Eldar hit this
+      # live, had to interrupt a genuinely correct medical answer that just
+      # wouldn't stop repeating). The output format is textbook ChatML, not
+      # Gemma's native <start_of_turn>/<end_of_turn> -- this specific
+      # unsloth quant's embedded template metadata appears mismatched with
+      # its actual stop-token wiring. Forcing llama.cpp's own built-in,
+      # correctly-wired "chatml" template (a real named preset, confirmed
+      # via llama.cpp's own template-support docs) instead of trusting the
+      # GGUF's embedded one fixes the stop condition while --jinja still
+      # covers the tools requirement above. NOT YET CONFIRMED on aibox --
+      # if this doesn't fully resolve it, the fallback is dropping --mmproj
+      # (there's a known llama.cpp bug where --mmproj can affect chat-
+      # template handling) at the cost of vision on this specific model.
       medgemma-1.5-4b:
         cmd: |
           llama-server
@@ -448,6 +467,7 @@ data:
           --no-mmap
           --flash-attn on
           --jinja
+          --chat-template chatml
           -c 32768
         ttl: 300
 
