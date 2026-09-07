@@ -50,6 +50,16 @@
 # dynamically-issued virtual keys / persisted spend tracking / the admin
 # UI, none of which this single-user home setup needs. One static
 # master_key checked against every request is enough.
+#
+# KNOWN QUIRK (hit 2026-09-07, Hermes -> "HTTP 400: No connected db."):
+# even with a correct master_key and no DB configured, LiteLLM's auth layer
+# still attempts a DB-backed virtual-key lookup on some request paths and
+# raises this misleading error instead of just proceeding -- confirmed a
+# real LiteLLM bug/quirk (litellm#4880, litellm#2532, litellm#12273), not an
+# actual outage: Eldar verified the master_key matched byte-for-byte in both
+# ai-models and ai-agents and Hermes's pod had OPENAI_API_KEY set correctly.
+# general_settings.allow_requests_on_db_unavailable: true (below) is
+# LiteLLM's own documented flag for exactly this DB-less deployment shape.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -108,6 +118,13 @@ data:
 
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
+      # See "KNOWN QUIRK" in the top comment -- without this, some request
+      # paths raise "No connected db." even with a correct master_key,
+      # because there's no database for LiteLLM's auth layer to fall back
+      # to checking. Safe here: master_key is still the only thing that can
+      # ever authenticate, this just stops a missing DB from hard-failing
+      # requests that don't actually need one.
+      allow_requests_on_db_unavailable: true
 
   # Custom pre-call hook: LiteLLM's officially-documented extension point for
   # rewriting a request's target model before routing (see
