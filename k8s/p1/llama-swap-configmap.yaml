@@ -28,6 +28,10 @@ data:
     models:
 
       qwen3.8-27b-Expert:
+        # PATH UPDATED 2026-09-07: aibox's /data/models moved from a flat
+        # qwen3.8-27B-MTP/ folder holding everything to qwen3.8-27B/ (base
+        # model directly inside) + qwen3.8-27B/vision/ (the vision quant +
+        # its mmproj, kept separate since only Expert-Vision needs them).
         # 2026-09-05: LOCKED at -c 65536, no vision, on aibox (RTX 5070 Ti 16GB;
         # XFCE desktop holds ~530MB VRAM at all times -- Xorg/Chromium GPU process
         # -- eating into the same razor-thin headroom the Windows benchmark
@@ -48,7 +52,7 @@ data:
         # switch), not another value to try here.
         cmd: |
           llama-server
-          -m /models/qwen3.8-27B-MTP/Qwen3.8-27B-UD-IQ4_XS.gguf
+          -m /models/qwen3.8-27B/Qwen3.8-27B-UD-IQ4_XS.gguf
           --port ${PORT}
           --host 0.0.0.0
           --jinja
@@ -95,8 +99,8 @@ data:
         # doesn't seem to change anything.
         cmd: |
           llama-server
-          -m /models/qwen3.8-27B-MTP/Qwen3.8-27B-UD-Q3_K_XL.gguf
-          --mmproj /models/qwen3.8-27B-MTP/mmproj-F16.gguf
+          -m /models/qwen3.8-27B/vision/Qwen3.8-27B-UD-Q3_K_XL.gguf
+          --mmproj /models/qwen3.8-27B/vision/mmproj-F16.gguf
           --port ${PORT}
           --host 0.0.0.0
           --jinja
@@ -178,6 +182,11 @@ data:
           --reasoning-budget 0
         ttl: 0
 
+      # NOTE 2026-09-07: still inactive placeholders (no GGUF on aibox, per
+      # the top-of-file P1 comment) -- not touched as part of the
+      # qwen3.8-27B folder restructure below, so their -m/-mmproj paths
+      # still point at the now-gone qwen3.8-27B-MTP/ layout. Fix the paths
+      # for real if these are ever activated.
       qwen3.8-27b-Atomic:
         cmd: |
           llama-server
@@ -379,7 +388,14 @@ data:
           -c 131072
         ttl: 300
 
-      # ── NEW: small smart general (Qwen3-8B, dense) — "cheap" role ────────────────
+      # ── ACTIVATED 2026-09-07: wired into LiteLLM's semantic router as the
+      # "fast" route (see k8s/p1/litellm.yaml's custom_router_hook.py) --
+      # quick/simple questions that don't need the 27B model's full weight.
+      # STATUS: config only until the GGUF is actually on aibox. Real file,
+      # confirmed on Hugging Face at unsloth/Qwen3-8B-GGUF:
+      #   mkdir -p /data/models/qwen3-8B
+      #   cd /data/models/qwen3-8B
+      #   wget https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf
       qwen3-8b:
         cmd: |
           llama-server
@@ -397,7 +413,14 @@ data:
           --reasoning-budget 1024
         ttl: 300
 
-      # ── NEW: MedGemma 1.5 4B (multimodal, medical) — "medical" role ──────────────
+      # ── ACTIVATED 2026-09-07: wired into LiteLLM's semantic router as the
+      # "medical" route (see k8s/p1/litellm.yaml's custom_router_hook.py).
+      # STATUS: config only until both GGUF files are actually on aibox.
+      # Real files, confirmed on Hugging Face at unsloth/medgemma-1.5-4b-it-GGUF:
+      #   mkdir -p /data/models/medgemma-1.5-4B
+      #   cd /data/models/medgemma-1.5-4B
+      #   wget https://huggingface.co/unsloth/medgemma-1.5-4b-it-GGUF/resolve/main/medgemma-1.5-4b-it-Q5_K_M.gguf
+      #   wget https://huggingface.co/unsloth/medgemma-1.5-4b-it-GGUF/resolve/main/mmproj-F16.gguf
       medgemma-1.5-4b:
         cmd: |
           llama-server

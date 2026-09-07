@@ -19,16 +19,25 @@
 # custom_router_hook.py below is hand-rolled glue, not an official
 # integration, and needs updating by hand as new routes/models are added.
 #
-# TODAY'S REAL ROUTES: only two GPU models actually exist on aibox
-# (qwen3.8-27b-Expert, qwen3.8-27b-Expert-Vision), differing mainly by vision
-# support -- a deterministic fact_check_image (attached image present or
-# not), not something that really needs a semantic classifier. The
-# classifier call still fires for the general/vision split via the "other"
-# routes case below, both to exercise the real pipeline end-to-end now and
-# so growing the ROUTES list later (coder, medical, reasoning, cloud
-# fallback -- once those GGUF files actually land on aibox and get roster
-# entries in llama-swap-configmap.yaml) is a pure data change in
-# custom_router_hook.py, no new plumbing.
+# ROUTES (2026-09-07, Eldar's own naming): four real destinations --
+# vision (deterministic, image attached) -> qwen3.8-27b-Expert-Vision,
+# medical -> medgemma-1.5-4b, casual (quick/easy/regular messages) ->
+# qwen3-8b, reasoning (the default/catch-all) -> qwen3.8-27b-Expert. Eldar's
+# own call: the 27B model already covers most things on its own, so "casual"
+# and "medical" only need to catch the cases genuinely better served by a
+# smaller/specialist model, not become the common path -- "reasoning" stays
+# the safe default whenever the classifier is unsure. Growing this list
+# further (coder, reasoning, cloud fallback -- once those GGUF files land on
+# aibox and get roster entries in llama-swap-configmap.yaml) is a pure data
+# change in custom_router_hook.py, no new plumbing.
+#
+# DEPENDENCY: qwen3-8b and medgemma-1.5-4b's GGUF files must actually be on
+# aibox (see the "ACTIVATED 2026-09-07" comments in llama-swap-configmap.yaml
+# for the download commands) before this file is deployed -- otherwise the
+# classifier can pick a route whose backing llama-swap model doesn't exist,
+# and that request fails with a real user-facing error instead of falling
+# back gracefully (the hook's error handling only covers the *classifier*
+# call failing, not the *routed-to* model being unavailable).
 #
 # AUTH: general_settings.master_key is set (from the litellm-secret Secret,
 # created directly on the cluster -- see k8s/secrets/README.md, never
@@ -70,6 +79,16 @@ data:
       - model_name: nomic-embed-text-v1.5
         litellm_params:
           model: openai/nomic-embed-text-v1.5
+          api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
+          api_key: "none"
+      - model_name: qwen3-8b
+        litellm_params:
+          model: openai/qwen3-8b
+          api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
+          api_key: "none"
+      - model_name: medgemma-1.5-4b
+        litellm_params:
+          model: openai/medgemma-1.5-4b
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
 
@@ -127,17 +146,38 @@ data:
             ),
         },
         {
-            "name": "general",
+            "name": "medical",
             "description": (
-                "Anything else -- conversation, questions, writing, "
-                "reasoning, or coding with no image involved."
+                "The user is asking about a health condition, symptom, "
+                "medication, diagnosis, or other medical/clinical topic."
+            ),
+        },
+        {
+            "name": "casual",
+            "description": (
+                "A quick, simple, easy, or regular everyday message -- a "
+                "greeting, a lookup, a basic definition, small talk, or "
+                "anything else that clearly doesn't need deep reasoning or "
+                "careful judgment."
+            ),
+        },
+        {
+            "name": "reasoning",
+            "description": (
+                "Anything else -- writing, coding, planning, analysis, or "
+                "any request with real depth, complexity, or where being "
+                "wrong matters. This is the default: pick this whenever a "
+                "request doesn't clearly and obviously belong to one of the "
+                "other routes."
             ),
         },
     ]
 
     ROUTE_TO_MODEL = {
         "vision": "qwen3.8-27b-Expert-Vision",
-        "general": "qwen3.8-27b-Expert",
+        "medical": "medgemma-1.5-4b",
+        "casual": "qwen3-8b",
+        "reasoning": "qwen3.8-27b-Expert",
         "other": "qwen3.8-27b-Expert",
     }
 
