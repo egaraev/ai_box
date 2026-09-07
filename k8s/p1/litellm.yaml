@@ -240,11 +240,24 @@ data:
 
             route = "other"
             try:
+                # BUG FIXED 2026-09-07: this used to include every message
+                # verbatim -- including Hermes's own system message, which
+                # carries its full agent harness (SOUL.md, tool defs, skills)
+                # and alone runs into the tens of thousands of tokens (Eldar
+                # saw 13.1k/131.1k on Hermes's own status bar for a single
+                # "hey"). arch-router-1.5b only has an 8192-token context
+                # (-c 8192 in llama-swap-configmap.yaml) -- that overflow is
+                # exactly what caused every classification call to fail with
+                # "400 Bad Request" and silently fall back to "other" on
+                # every single message, defeating the router entirely.
+                # Arch-Router only needs the recent human/assistant turns to
+                # classify intent, not an agent's full system prompt -- drop
+                # system messages and cap to the last few turns.
                 convo = [
                     {"role": m.get("role"), "content": m.get("content")}
                     for m in messages
-                    if isinstance(m.get("content"), str)
-                ]
+                    if m.get("role") != "system" and isinstance(m.get("content"), str)
+                ][-6:]
                 prompt = SYSTEM_PROMPT.format(
                     routes=json.dumps(ROUTES), conversation=json.dumps(convo)
                 )
