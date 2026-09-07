@@ -433,22 +433,41 @@ data:
           --no-mmproj-offload
         ttl: 300
 
-      # ── Arch-Router-1.5B — semantic-router classifier for step16 "auto" routing ──
-      # step16_semantic_router calls this (CLASSIFIER_BACKEND="arch-router") to pick
-      # an intent for every model="auto" request. ttl:0 keeps it resident (~1GB) so
-      # classification never waits on a model swap.
+      # ── Arch-Router-1.5B — semantic-router classifier for LiteLLM's "auto"
+      # model (see k8s/p1/litellm.yaml's custom_router_hook.py). Called on
+      # every request routed through "auto", so two changes from the
+      # Windows-lab config this was carried over from:
+      #   1. -ngl 0 (CPU), not -ngl 99. The Windows box had GPU headroom to
+      #      spare; aibox's RTX 5070 Ti is already razor-thin at 65536
+      #      context for the main model (see qwen3.8-27b-Expert's own
+      #      comment above) -- a second GPU-resident model, even a small
+      #      one, isn't worth risking against a budget that OOMs on modest
+      #      context increases. Same reasoning as nomic-embed-text-v1.5 and
+      #      qwen3-1.7b-cpu below: CPU is fine for a ~1B-class classifier
+      #      that only needs to emit a few tokens of JSON.
+      #   2. Dropped from the "resident_router" matrix set (that set is for
+      #      GPU models that need to stay loaded alongside whatever's
+      #      swapped in) -- ttl: 0 alone is enough to keep a CPU-only model
+      #      always resident, exactly like the other two CPU entries.
+      #
+      # STATUS: config only -- Arch-Router-1.5B-Q4_K_M.gguf (~986MB, confirmed
+      # real file on Hugging Face at katanemo/Arch-Router-1.5B.gguf) has NOT
+      # been copied to aibox's /data/models yet. Before deploying litellm.yaml:
+      #   mkdir -p /data/models/arch-router-1.5B
+      #   cd /data/models/arch-router-1.5B
+      #   wget https://huggingface.co/katanemo/Arch-Router-1.5B.gguf/resolve/main/Arch-Router-1.5B-Q4_K_M.gguf
       arch-router-1.5b:
         cmd: |
           llama-server
           -m /models/arch-router-1.5B/Arch-Router-1.5B-Q4_K_M.gguf
           --port ${PORT}
           --host 0.0.0.0
-          --n-gpu-layers 99
+          --jinja
+          -ngl 0
           -t 8
           --no-mmap
-          --flash-attn on
-          --jinja
           -c 8192
+          --temp 0
         ttl: 0
 
     matrix:
@@ -467,7 +486,10 @@ data:
 
       sets:
 
-        # arch-router (tiny, ~1GB) stays co-resident alongside whichever heavy
-        # model is serving, so "auto" classification never forces a swap.
+        # arch-router is no longer in this GPU matrix -- it now runs CPU-only
+        # with ttl:0 (see its entry above), same as nomic-embed-text-v1.5 and
+        # qwen3-1.7b-cpu, so it's always resident independent of whatever's
+        # swapped in on the GPU. matrix var "arch" itself is still defined
+        # above in case it's ever needed for a GPU-side expression again.
         # (no more "& q7" here -- the 7B autocomplete model was dropped, see above)
-        resident_router: "arch & (a1 | orn | qpg | qw6 | goss | q8 | med | qvl | qwe | qwv)"
+        resident_router: "(a1 | orn | qpg | qw6 | goss | q8 | med | qvl | qwe | qwv)"

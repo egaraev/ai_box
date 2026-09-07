@@ -50,9 +50,10 @@ see the `aibox-config-restart-verify` skill).
 
 Backs the API-server bearer key and the web dashboard's basic-auth
 credentials in `k8s/p3/hermes-agent.yaml`, plus the `.env` file Hermes
-expects at `/opt/data/.env` (empty here — no external LLM provider keys are
-needed since Hermes is routed to our own llama-swap, and Honcho is
-self-hosted via `honcho.json`'s `baseUrl`, not `HONCHO_API_KEY`).
+expects at `/opt/data/.env` (empty here — Honcho is self-hosted via
+`honcho.json`'s `baseUrl`, not `HONCHO_API_KEY`, so no key is needed there.
+Hermes's actual LLM auth now comes from `litellm-secret` below, not this
+Secret — see its `OPENAI_API_KEY` env var in `hermes-agent.yaml`).
 
 ```sh
 API_KEY=$(openssl rand -hex 32)
@@ -69,12 +70,60 @@ kubectl create secret generic hermes-env \
 Rotating: re-run with new random values, then
 `kubectl delete pod -n ai-agents -l app=hermes-agent`.
 
+### Adding Telegram
+
+Two more keys in this same Secret turn on the Telegram gateway --
+`TELEGRAM_BOT_TOKEN` (from @BotFather) and `TELEGRAM_ALLOWED_USERS` (your
+numeric Telegram user ID, from @userinfobot -- comma-separated for more than
+one person). No manifest change needed: the Deployment already does
+`envFrom: secretRef: name: hermes-env`, and Hermes reads both as plain env
+vars, so adding the keys here is the whole change.
+
+```sh
+kubectl -n ai-agents patch secret hermes-env --type merge -p \
+  '{"stringData":{"TELEGRAM_BOT_TOKEN":"<token-from-botfather>","TELEGRAM_ALLOWED_USERS":"<your-numeric-id>"}}'
+kubectl delete pod -n ai-agents -l app=hermes-agent
+```
+
+`kubectl patch --type merge` only touches the keys you name -- the API
+server key and dashboard credentials already in the Secret are untouched.
+
+## litellm-secret (namespaces: ai-models, ai-gateway, ai-agents, ai-memory)
+
+Backs LiteLLM's `general_settings.master_key` (`k8s/p1/litellm.yaml`) -- the
+one bearer key every internal caller (Open WebUI, Hermes, Honcho) now needs
+to talk to LiteLLM instead of hitting llama-swap directly. Kubernetes
+Secrets don't cross namespaces, and each of those four callers lives in a
+different one, so the *same* value has to exist as a same-named Secret in
+all four -- there's no single shared object to point at.
+
+```sh
+LITELLM_KEY=$(openssl rand -hex 32)
+for ns in ai-models ai-gateway ai-agents ai-memory; do
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create secret generic litellm-secret \
+    --namespace "$ns" \
+    --from-literal=master_key="$LITELLM_KEY"
+done
+```
+
+Rotating: re-run the loop above with a fresh `LITELLM_KEY` (same value goes
+into all four namespaces -- a partial rotation just means some callers get
+rejected with a stale key), then restart everything that reads it:
+
+```sh
+kubectl delete pod -n ai-models -l app=litellm
+kubectl delete pod -n ai-gateway -l app=open-webui
+kubectl delete pod -n ai-agents -l app=hermes-agent
+kubectl delete pod -n ai-memory -l app=honcho-api -l app=honcho-deriver
+```
+
 ## Order of operations for a fresh cluster
 
-1. Run the two `kubectl create secret` blocks above (they also create the
+1. Run the three `kubectl create secret` blocks above (they also create the
    namespaces, so this can run before ArgoCD has synced anything).
-2. Let ArgoCD sync `k8s/p2` and `k8s/p3` as normal — the Deployments come up
-   referencing these Secrets by name.
+2. Let ArgoCD sync `k8s/p1`, `k8s/p2`, and `k8s/p3` as normal — the
+   Deployments come up referencing these Secrets by name.
 
 If a Secret doesn't exist yet when ArgoCD syncs, the pod just sits in
 `CreateContainerConfigError` until you create it — nothing fails

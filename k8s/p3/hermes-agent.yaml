@@ -29,11 +29,13 @@
 #    running pod, not a new Deployment.
 #
 # LLM routing: model.model below points at qwen3.8-27b-Expert-Vision (the
-# locked-in P1 GPU model, see llama-swap-configmap.yaml) via llama-swap's
-# OpenAI-compatible endpoint -- same pattern as Open WebUI. llama-swap still
-# only keeps one GPU model resident at a time, so Hermes and Open WebUI share
-# whatever's currently swapped in; that contention already existed between
-# WebUI sessions and isn't new here.
+# locked-in P1 GPU model, see llama-swap-configmap.yaml) via LiteLLM
+# (k8s/p1/litellm.yaml) rather than llama-swap directly -- same pattern as
+# Open WebUI and Honcho now. llama-swap still only keeps one GPU model
+# resident at a time, so Hermes and Open WebUI share whatever's currently
+# swapped in; that contention already existed between WebUI sessions and
+# isn't new here. LiteLLM being in the middle doesn't change that -- it's
+# still the same one GPU underneath.
 #
 # Memory: memory.provider: honcho in config.yaml + a self-hosted honcho.json
 # pointed at our in-cluster honcho-api service (P2), matching the "Minimal
@@ -110,8 +112,17 @@ data:
     model:
       provider: custom
       model: qwen3.8-27b-Expert-Vision
-      base_url: http://llama-swap.ai-models.svc.cluster.local:8080/v1
-      api_key: "none"
+      base_url: http://litellm.ai-models.svc.cluster.local:4000/v1
+      # api_key was "none" when Hermes talked to llama-swap directly, which
+      # took no auth. LiteLLM (k8s/p1/litellm.yaml) enforces a real
+      # master_key now. Left empty here on purpose -- Hermes's own
+      # documented fallback for a custom base_url is to use OPENAI_API_KEY
+      # from the environment when api_key isn't set (confirmed in Hermes's
+      # own docs/user-guide/configuration.md), and that env var is set on
+      # the Deployment below from litellm-secret. Keeps the real credential
+      # out of this ConfigMap entirely, consistent with everything else in
+      # k8s/secrets/README.md.
+      api_key: ""
 
     terminal:
       backend: local
@@ -279,6 +290,14 @@ spec:
               value: "0.0.0.0"
             - name: API_SERVER_CORS_ORIGINS
               value: "*"
+            # Auth for calling LiteLLM (k8s/p1/litellm.yaml) -- picked up by
+            # Hermes's documented api_key-falls-back-to-OPENAI_API_KEY
+            # behavior for a custom base_url. See config.yaml's comment above.
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master_key
           envFrom:
             - secretRef:
                 name: hermes-env

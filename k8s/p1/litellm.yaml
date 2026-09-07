@@ -1,0 +1,276 @@
+# LiteLLM — the L2.5 model router. Sits between every caller (Hermes,
+# Honcho, Open WebUI) and llama-swap, so callers stop hardcoding literal
+# GGUF-roster model names and instead call a stable name -- either a real
+# model passed straight through, or "auto", which a custom pre-call hook
+# resolves to a real model via Arch-Router-1.5B's semantic classification.
+#
+# ARCHITECTURAL DECISION (via AskUserQuestion): Arch-Router-1.5B's "official"
+# home is Katanemo's own gateway product (now rebranded Plano, formerly
+# Arch) -- a separate Envoy-based proxy purpose-built for this model. We
+# deliberately did NOT deploy that. Instead this file wires the classifier
+# in as a small custom LiteLLM pre-call hook (litellm_settings.callbacks,
+# an officially-documented LiteLLM extension point -- not a hack), calling
+# arch-router-1.5b as just one more CPU-only entry in the existing
+# llama-swap roster. Reasoning: this whole build has consistently avoided
+# adding infrastructure weight without a real reason (dropped Qdrant rather
+# than maintain a custom Honcho image, skipped Docker-in-Docker for Hermes'
+# terminal backend) -- a whole new Envoy-based gateway service just to route
+# between two GPU models today would be exactly that. Trade-off accepted:
+# custom_router_hook.py below is hand-rolled glue, not an official
+# integration, and needs updating by hand as new routes/models are added.
+#
+# TODAY'S REAL ROUTES: only two GPU models actually exist on aibox
+# (qwen3.8-27b-Expert, qwen3.8-27b-Expert-Vision), differing mainly by vision
+# support -- a deterministic fact_check_image (attached image present or
+# not), not something that really needs a semantic classifier. The
+# classifier call still fires for the general/vision split via the "other"
+# routes case below, both to exercise the real pipeline end-to-end now and
+# so growing the ROUTES list later (coder, medical, reasoning, cloud
+# fallback -- once those GGUF files actually land on aibox and get roster
+# entries in llama-swap-configmap.yaml) is a pure data change in
+# custom_router_hook.py, no new plumbing.
+#
+# AUTH: general_settings.master_key is set (from the litellm-secret Secret,
+# created directly on the cluster -- see k8s/secrets/README.md, never
+# committed). Every other internal service on aibox runs trust/no-auth
+# (Postgres, Honcho AUTH_USE_AUTH=false) since there's no public ingress --
+# LiteLLM gets a real key anyway because it's the one place multiple
+# unrelated callers (Hermes, Honcho, Open WebUI, eventually more agents)
+# converge, and LiteLLM's own docs default every real deployment example to
+# setting one. No database is configured -- DB is only needed for
+# dynamically-issued virtual keys / persisted spend tracking / the admin
+# UI, none of which this single-user home setup needs. One static
+# master_key checked against every request is enough.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: ai-models
+data:
+  config.yaml: |
+    model_list:
+      # Real models, passed straight through under the same names every
+      # caller already uses today -- repointing a service at LiteLLM instead
+      # of llama-swap directly needs no other config change on that service.
+      - model_name: qwen3.8-27b-Expert
+        litellm_params:
+          model: openai/qwen3.8-27b-Expert
+          api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
+          api_key: "none"
+      - model_name: qwen3.8-27b-Expert-Vision
+        litellm_params:
+          model: openai/qwen3.8-27b-Expert-Vision
+          api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
+          api_key: "none"
+      - model_name: qwen3-1.7b-cpu
+        litellm_params:
+          model: openai/qwen3-1.7b-cpu
+          api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
+          api_key: "none"
+      - model_name: nomic-embed-text-v1.5
+        litellm_params:
+          model: openai/nomic-embed-text-v1.5
+          api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
+          api_key: "none"
+
+      # "auto" -- semantic routing entry point. litellm_params below is only
+      # the FALLBACK target if custom_router_hook.py doesn't run or errors
+      # (proxy down, arch-router-1.5b not deployed yet, malformed classifier
+      # output, etc.) -- on the happy path the hook rewrites the model
+      # before this entry is ever actually used to serve the request.
+      - model_name: auto
+        litellm_params:
+          model: openai/qwen3.8-27b-Expert
+          api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
+          api_key: "none"
+
+    litellm_settings:
+      callbacks: ["custom_router_hook.proxy_handler_instance"]
+
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+
+  # Custom pre-call hook: LiteLLM's officially-documented extension point for
+  # rewriting a request's target model before routing (see
+  # docs.litellm.ai/docs/proxy/call_hooks). Mounted alongside config.yaml and
+  # made importable via PYTHONPATH (set on the Deployment below) rather than
+  # into the image's own /app, so it never risks shadowing LiteLLM's
+  # installed package files.
+  custom_router_hook.py: |
+    """Semantic router for LiteLLM's "auto" model, backed by Arch-Router-1.5B
+    (served as a plain CPU model in llama-swap -- see
+    k8s/p1/llama-swap-configmap.yaml). Called once per request routed
+    through "auto"; on any failure it falls back to general chat rather than
+    ever hard-failing the caller's actual request.
+    """
+    import json
+    import logging
+
+    import httpx
+    from litellm.integrations.custom_logger import CustomLogger
+
+    logger = logging.getLogger("custom_router_hook")
+
+    ARCH_ROUTER_URL = "http://llama-swap.ai-models.svc.cluster.local:8080/v1/chat/completions"
+    ARCH_ROUTER_MODEL = "arch-router-1.5b"
+
+    # Grow this list (and ROUTE_TO_MODEL below) as more GGUF files actually
+    # land on aibox and get real llama-swap-configmap.yaml roster entries --
+    # no other code changes needed.
+    ROUTES = [
+        {
+            "name": "vision",
+            "description": (
+                "The user attached or refers to a specific image, photo, "
+                "screenshot, or diagram and wants it looked at, described, "
+                "or read."
+            ),
+        },
+        {
+            "name": "general",
+            "description": (
+                "Anything else -- conversation, questions, writing, "
+                "reasoning, or coding with no image involved."
+            ),
+        },
+    ]
+
+    ROUTE_TO_MODEL = {
+        "vision": "qwen3.8-27b-Expert-Vision",
+        "general": "qwen3.8-27b-Expert",
+        "other": "qwen3.8-27b-Expert",
+    }
+
+    SYSTEM_PROMPT = """You are a helpful assistant designed to find the best suited route.
+    You are provided with route description within <routes></routes> XML tags:
+    <routes>
+    {routes}
+    </routes>
+
+    <conversation>
+    {conversation}
+    </conversation>
+
+    Analyze the conversation and pick exactly one route. Respond with only a
+    JSON object: {{"route": "route_name"}}, or {{"route": "other"}} if
+    nothing fits."""
+
+
+    def _has_image(messages):
+        for m in messages:
+            content = m.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        return True
+        return False
+
+
+    class ArchRouterHook(CustomLogger):
+        async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
+            if data.get("model") != "auto":
+                return data
+
+            messages = data.get("messages", [])
+
+            # Deterministic fast path: an attached image always needs the
+            # vision model. No reason to spend a classifier call on a signal
+            # we can just check for directly.
+            if _has_image(messages):
+                data["model"] = ROUTE_TO_MODEL["vision"]
+                return data
+
+            route = "other"
+            try:
+                convo = [
+                    {"role": m.get("role"), "content": m.get("content")}
+                    for m in messages
+                    if isinstance(m.get("content"), str)
+                ]
+                prompt = SYSTEM_PROMPT.format(
+                    routes=json.dumps(ROUTES), conversation=json.dumps(convo)
+                )
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(
+                        ARCH_ROUTER_URL,
+                        json={
+                            "model": ARCH_ROUTER_MODEL,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "temperature": 0,
+                            "max_tokens": 20,
+                        },
+                    )
+                    resp.raise_for_status()
+                    text = resp.json()["choices"][0]["message"]["content"]
+                    route = json.loads(text).get("route", "other")
+            except Exception as exc:  # noqa: BLE001 -- any failure just falls back
+                logger.warning("arch-router classification failed, defaulting to general chat: %s", exc)
+                route = "other"
+
+            data["model"] = ROUTE_TO_MODEL.get(route, ROUTE_TO_MODEL["other"])
+            return data
+
+
+    proxy_handler_instance = ArchRouterHook()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: ai-models
+  labels:
+    app: litellm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:main-latest
+          args: ["--config", "/litellm-extra/config.yaml", "--port", "4000"]
+          ports:
+            - containerPort: 4000
+              name: http
+          env:
+            - name: PYTHONPATH
+              value: "/litellm-extra"
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master_key
+          volumeMounts:
+            - name: config
+              mountPath: /litellm-extra
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: ai-models
+spec:
+  selector:
+    app: litellm
+  ports:
+    - port: 4000
+      targetPort: 4000
+      name: http

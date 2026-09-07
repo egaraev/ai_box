@@ -17,16 +17,18 @@
 # LLM routing: Honcho requires an LLM provider for memory extraction
 # (deriver), dialectic chat, summarization, and dream consolidation, PLUS a
 # separate embeddings endpoint (EMBED_MESSAGES=true by default). All of it is
-# routed to llama-swap's OpenAI-compatible endpoint via per-feature
-# OVERRIDES__BASE_URL, using two new CPU-only entries added to the llama-swap
-# roster (see k8s/p1/llama-swap-configmap.yaml):
+# routed through LiteLLM (k8s/p1/litellm.yaml) rather than straight to
+# llama-swap, via per-feature OVERRIDES__BASE_URL -- same two CPU-only
+# llama-swap roster entries as before, LiteLLM just now sits in between:
 #   - qwen3-1.7b-cpu          -- deriver/dialectic/summary/dream (tool-calling
 #     capable, dedicated to Honcho so background memory work never contends
 #     for GPU with an active Open WebUI chat session)
-#   - nomic-embed-text-v1.5   -- embeddings (Honcho's client SDK still
-#     requires *some* value in LLM_OPENAI_API_KEY to initialize even though
-#     every actual call is routed elsewhere -- "none" below is a placeholder,
-#     matching the same pattern already used for Open WebUI's OPENAI_API_KEY)
+#   - nomic-embed-text-v1.5   -- embeddings
+# LLM_OPENAI_API_KEY is no longer a "none" placeholder -- LiteLLM enforces a
+# real master_key (see litellm.yaml's top comment for why), so it's now an
+# explicit env: entry on both Deployments below, sourced from litellm-secret
+# (created directly on the cluster, same as postgres-secret -- see
+# k8s/secrets/README.md).
 #
 # DIALECTIC_MAX_INPUT_TOKENS/DERIVER_MAX_INPUT_TOKENS are reduced from
 # Honcho's defaults (100000/25000) to fit inside qwen3-1.7b-cpu's -c 32768
@@ -49,9 +51,8 @@ data:
 
   AUTH_USE_AUTH: "false"
 
-  # Placeholder only -- every actual LLM/embedding call below is routed to
-  # llama-swap via an explicit OVERRIDES__BASE_URL, which ignores API keys.
-  LLM_OPENAI_API_KEY: "none"
+  # LLM_OPENAI_API_KEY moved out of here -- it's now the real litellm-secret
+  # master_key, set as an explicit env: entry on both Deployments below.
 
   VECTOR_STORE_TYPE: "pgvector"
 
@@ -59,7 +60,7 @@ data:
   EMBEDDING_VECTOR_DIMENSIONS: "768"
   EMBEDDING_MODEL_CONFIG__TRANSPORT: "openai"
   EMBEDDING_MODEL_CONFIG__MODEL: "nomic-embed-text-v1.5"
-  EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://llama-swap.ai-models.svc.cluster.local:8080/v1"
+  EMBEDDING_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
 
   # This is the flag Eldar's aibox architecture notes flag as critical:
   # without it, the deriver batches work behind a token threshold and no
@@ -68,35 +69,35 @@ data:
   DERIVER_MAX_INPUT_TOKENS: "20000"
   DERIVER_MODEL_CONFIG__TRANSPORT: "openai"
   DERIVER_MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
-  DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://llama-swap.ai-models.svc.cluster.local:8080/v1"
+  DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
 
   SUMMARY_MODEL_CONFIG__TRANSPORT: "openai"
   SUMMARY_MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
-  SUMMARY_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://llama-swap.ai-models.svc.cluster.local:8080/v1"
+  SUMMARY_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
 
   DIALECTIC_MAX_INPUT_TOKENS: "28000"
   DIALECTIC_LEVELS__minimal__MODEL_CONFIG__TRANSPORT: "openai"
   DIALECTIC_LEVELS__minimal__MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
-  DIALECTIC_LEVELS__minimal__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://llama-swap.ai-models.svc.cluster.local:8080/v1"
+  DIALECTIC_LEVELS__minimal__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
   DIALECTIC_LEVELS__low__MODEL_CONFIG__TRANSPORT: "openai"
   DIALECTIC_LEVELS__low__MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
-  DIALECTIC_LEVELS__low__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://llama-swap.ai-models.svc.cluster.local:8080/v1"
+  DIALECTIC_LEVELS__low__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
   DIALECTIC_LEVELS__medium__MODEL_CONFIG__TRANSPORT: "openai"
   DIALECTIC_LEVELS__medium__MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
-  DIALECTIC_LEVELS__medium__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://llama-swap.ai-models.svc.cluster.local:8080/v1"
+  DIALECTIC_LEVELS__medium__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
   DIALECTIC_LEVELS__high__MODEL_CONFIG__TRANSPORT: "openai"
   DIALECTIC_LEVELS__high__MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
-  DIALECTIC_LEVELS__high__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://llama-swap.ai-models.svc.cluster.local:8080/v1"
+  DIALECTIC_LEVELS__high__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
   DIALECTIC_LEVELS__max__MODEL_CONFIG__TRANSPORT: "openai"
   DIALECTIC_LEVELS__max__MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
-  DIALECTIC_LEVELS__max__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://llama-swap.ai-models.svc.cluster.local:8080/v1"
+  DIALECTIC_LEVELS__max__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
 
   DREAM_DEDUCTION_MODEL_CONFIG__TRANSPORT: "openai"
   DREAM_DEDUCTION_MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
-  DREAM_DEDUCTION_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://llama-swap.ai-models.svc.cluster.local:8080/v1"
+  DREAM_DEDUCTION_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
   DREAM_INDUCTION_MODEL_CONFIG__TRANSPORT: "openai"
   DREAM_INDUCTION_MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
-  DREAM_INDUCTION_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://llama-swap.ai-models.svc.cluster.local:8080/v1"
+  DREAM_INDUCTION_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -126,6 +127,12 @@ spec:
           ports:
             - containerPort: 8000
               name: http
+          env:
+            - name: LLM_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master_key
           envFrom:
             - configMapRef:
                 name: honcho-config
@@ -171,6 +178,12 @@ spec:
           image: ghcr.io/plastic-labs/honcho:latest
           # Matches docker-compose's deriver service entrypoint exactly.
           command: ["/app/.venv/bin/python", "-m", "src.deriver"]
+          env:
+            - name: LLM_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master_key
           envFrom:
             - configMapRef:
                 name: honcho-config

@@ -1,8 +1,10 @@
-# Open WebUI — first chat interface for P1, talking to llama-swap's
-# OpenAI-compatible endpoint over the cluster network. Single-user home
-# setup, so auth is left at its default (WEBUI_AUTH true) — the first
-# account created on first visit becomes the admin; there's no public
-# ingress yet, so it's only reachable from your LAN via the NodePort below.
+# Open WebUI — first chat interface for P1. Talks to LiteLLM (k8s/p1/litellm.yaml)
+# now instead of llama-swap directly, so it gets the "auto" semantic-routing
+# model alongside the real ones, and so llama-swap's actual endpoint stops
+# being hardcoded into more than one place. Single-user home setup, so auth
+# is left at its default (WEBUI_AUTH true) — the first account created on
+# first visit becomes the admin; there's no public ingress yet, so it's only
+# reachable from your LAN via the NodePort below.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -41,9 +43,12 @@ spec:
               name: http
           env:
             - name: OPENAI_API_BASE_URL
-              value: "http://llama-swap.ai-models.svc.cluster.local:8080/v1"
+              value: "http://litellm.ai-models.svc.cluster.local:4000/v1"
             - name: OPENAI_API_KEY
-              value: "none"
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master_key
             # llama-swap has no concept of "installed models" until a model is
             # actually requested once — this just stops Open WebUI from also
             # trying to reach Ollama, which isn't part of this stack.
