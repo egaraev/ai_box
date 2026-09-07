@@ -415,16 +415,24 @@ data:
 
       # ── ACTIVATED 2026-09-07: wired into LiteLLM's semantic router as the
       # "medical" route (see k8s/p1/litellm.yaml's custom_router_hook.py).
-      # STATUS: config only until both GGUF files are actually on aibox.
-      # Real files, confirmed on Hugging Face at unsloth/medgemma-1.5-4b-it-GGUF:
+      # Files confirmed present on aibox 2026-09-07 via `kubectl exec ... ls
+      # /models/medgemma-1.5-4B/`. PATH FIXED same day: the -m filename was
+      # -Q5_K_M.gguf (matching the casing implied by the HF filename), but
+      # the file actually downloaded to aibox as -q5_k_m.gguf (lowercase) --
+      # Linux paths are case-sensitive, so llama-server couldn't find it and
+      # exited immediately with no useful error, which llama-swap could only
+      # report as the generic "upstream command exited prematurely" (root
+      # cause found via `kubectl logs -l app=llama-swap` + a real `ls` on
+      # the mounted /models path, not guessing from the wrapper error alone).
+      # mmproj-F16.gguf's casing already matched, no change needed there.
       #   mkdir -p /data/models/medgemma-1.5-4B
       #   cd /data/models/medgemma-1.5-4B
-      #   wget https://huggingface.co/unsloth/medgemma-1.5-4b-it-GGUF/resolve/main/medgemma-1.5-4b-it-Q5_K_M.gguf
+      #   wget https://huggingface.co/unsloth/medgemma-1.5-4b-it-GGUF/resolve/main/medgemma-1.5-4b-it-Q5_K_M.gguf -O medgemma-1.5-4b-it-q5_k_m.gguf
       #   wget https://huggingface.co/unsloth/medgemma-1.5-4b-it-GGUF/resolve/main/mmproj-F16.gguf
       medgemma-1.5-4b:
         cmd: |
           llama-server
-          -m /models/medgemma-1.5-4B/medgemma-1.5-4b-it-Q5_K_M.gguf
+          -m /models/medgemma-1.5-4B/medgemma-1.5-4b-it-q5_k_m.gguf
           --mmproj /models/medgemma-1.5-4B/mmproj-F16.gguf
           --port ${PORT}
           --host 0.0.0.0
