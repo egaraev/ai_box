@@ -261,7 +261,20 @@ data:
                 prompt = SYSTEM_PROMPT.format(
                     routes=json.dumps(ROUTES), conversation=json.dumps(convo)
                 )
-                async with httpx.AsyncClient(timeout=10.0) as client:
+                # timeout bumped 10.0 -> 30.0 2026-09-07: arch-router-1.5b
+                # runs ttl:0 (always resident) once started, but the very
+                # first call after a llama-swap/litellm restart has to cold-
+                # start its llama-server process (load the ~986MB GGUF from
+                # disk) before it can answer at all -- 10s wasn't enough and
+                # every classification call failed with an httpx.ReadTimeout
+                # right after a restart. httpx timeout exceptions stringify
+                # to "" (a real Python gotcha), which is why the previous log
+                # line showed "...defaulting to general chat: " with nothing
+                # after the colon -- not a logging bug, a genuinely empty
+                # message. type(exc).__name__ added below so this is
+                # diagnosable from the log line itself next time, without
+                # having to guess.
+                async with httpx.AsyncClient(timeout=30.0) as client:
                     resp = await client.post(
                         ARCH_ROUTER_URL,
                         json={
@@ -275,7 +288,10 @@ data:
                     text = resp.json()["choices"][0]["message"]["content"]
                     route = json.loads(text).get("route", "other")
             except Exception as exc:  # noqa: BLE001 -- any failure just falls back
-                logger.warning("arch-router classification failed, defaulting to general chat: %s", exc)
+                logger.warning(
+                    "arch-router classification failed (%s: %s), defaulting to general chat",
+                    type(exc).__name__, exc,
+                )
                 route = "other"
 
             data["model"] = ROUTE_TO_MODEL.get(route, ROUTE_TO_MODEL["other"])
