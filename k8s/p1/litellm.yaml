@@ -101,6 +101,26 @@ data:
           model: openai/medgemma-1.5-4b
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
+          # ADDED 2026-09-07: this specific unsloth medgemma-1.5-4b GGUF
+          # never stops generating on its own -- it keeps emitting literal
+          # "<|im_end|>"/"<|im_start|>" as plain text and re-runs the whole
+          # exchange, and two different --chat-template choices on the
+          # llama-swap side (chatml, then gemma) both failed to fix it (see
+          # the long comment above medgemma-1.5-4b in
+          # llama-swap-configmap.yaml for the full history -- gemma actually
+          # made it worse, producing incoherent output, since --jinja
+          # doesn't have a jinja source for every legacy template name).
+          # Suspected root cause: this quant's GGUF metadata may simply be
+          # missing correct EOS/EOG token wiring, which no --chat-template
+          # choice can fix since that flag only controls prompt formatting,
+          # not the server's stop condition. This "stop" list is forced into
+          # every request to this model regardless of what the caller
+          # (Hermes) sends, and is matched as literal text against the
+          # generated stream by llama-server's OpenAI-compatible endpoint --
+          # token-agnostic, so it works even if "<|im_end|>" was never a
+          # real special token in this quant's vocab. NOT YET CONFIRMED on
+          # aibox.
+          stop: ["<|im_end|>", "<|im_start|>"]
 
       # "auto" -- semantic routing entry point. litellm_params below is only
       # the FALLBACK target if custom_router_hook.py doesn't run or errors

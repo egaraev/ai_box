@@ -464,31 +464,45 @@ data:
       # embedded GGUF chat-template metadata), the model never actually
       # stopped generating -- it kept emitting literal "<|im_end|>"/
       # "<|im_start|>" as plain text and looping the same answer over and
-      # over instead of the server recognizing end-of-turn. FIRST ATTEMPT
-      # (chatml) DID NOT WORK -- same live-tested and still looped, emitting
-      # literal "<|im_end|>"/"<|im_start|>user" as text and re-running the
-      # whole exchange. That retest is the actual root-cause signal: MedGemma
-      # is a Google Gemma-3-derived checkpoint, and Gemma's real, trained
-      # turn/stop tokens are <start_of_turn>/<end_of_turn>, not ChatML's
-      # <|im_start|>/<|im_end|>. This unsloth GGUF's embedded chat-template
-      # metadata was apparently mislabeled as ChatML by the conversion
-      # tooling, but the underlying weights were never trained on ChatML
-      # control tokens -- so prompting it in genuine ChatML (either via the
-      # GGUF's own mislabeled metadata, or by explicitly forcing --chat-
-      # template chatml, which is what we just tried) makes the model
-      # imitate the ChatML shape as plain sub-word text it has no special
-      # stopping behavior bound to, instead of ever emitting its real EOS
-      # special token. CHANGED 2026-09-07 to --chat-template gemma (also a
-      # real llama.cpp built-in named preset) so the prompt is built in the
-      # model's actual native <start_of_turn>/<end_of_turn> format, letting
-      # it emit its genuine, correctly-wired EOS token. NOT YET CONFIRMED on
-      # aibox -- if this still loops, the fallback is dropping --mmproj
-      # (known llama.cpp bug where --mmproj can affect chat-template
-      # handling) at the cost of vision on this specific model, and/or
-      # grepping the model's startup log line for "EOS token"/"chat
-      # template" (`kubectl logs -l app=llama-swap | grep -A2 -i "eos
-      # token\|chat template"` right after it loads) to see the token
-      # llama-server actually resolved, rather than guessing again.
+      # over instead of the server recognizing end-of-turn.
+      #
+      # ATTEMPT 1 (--chat-template chatml) DID NOT WORK -- live-retested,
+      # still looped, same literal "<|im_end|>"/"<|im_start|>user" text.
+      #
+      # ATTEMPT 2 (--chat-template gemma, reasoning: MedGemma is a Gemma-3
+      # checkpoint, so its real trained stop tokens should be
+      # <start_of_turn>/<end_of_turn>, not ChatML's) WAS WORSE, NOT BETTER --
+      # live-retested, produced completely incoherent output (a hallucinated
+      # HuggingFace README for an unrelated "gemma-7b-it Italian" model, no
+      # relation to the actual question asked). Root cause: llama-server's
+      # --jinja engine does not have a jinja source for every legacy
+      # --chat-template preset name -- "gemma" is a legacy/non-jinja-only
+      # preset, so combining --jinja with --chat-template gemma produced a
+      # broken/near-empty prompt instead of the intended Gemma turn format,
+      # and the model free-completed on garbage context. REVERTED to chatml.
+      #
+      # REAL FIX (2026-09-07, after two failed template guesses): stop
+      # guessing at chat-template names and instead force an explicit,
+      # token-agnostic stop condition. llama-server's OpenAI-compatible API
+      # honors a "stop" list from the REQUEST body as literal substring
+      # matches against the generated text stream -- this works regardless
+      # of whether "<|im_end|>" is wired as a real special/EOS token in this
+      # quant's vocab (which is the actual suspected root cause: this
+      # specific unsloth GGUF conversion may simply be missing correct EOS
+      # metadata, which no --chat-template choice can fix, since chat-
+      # template only controls how the PROMPT is built, not how llama.cpp
+      # decides to stop generating). The fix is on the LiteLLM side, not
+      # here: litellm.yaml's medgemma-1.5-4b model_list entry now sets
+      # litellm_params.stop: ["<|im_end|>", "<|im_start|>"], forced into
+      # every request regardless of what Hermes itself sends. --chat-
+      # template stays at chatml here since it produced coherent (if non-
+      # terminating) output -- the stop list is what should now actually
+      # end the turn. NOT YET CONFIRMED on aibox. If this still doesn't
+      # stop it, the next real diagnostic (not another guess) is:
+      # `kubectl logs -l app=llama-swap -n ai-models | grep -A2 -i "eos
+      # token\|chat template"` right after medgemma loads, to see what
+      # EOS/EOG token(s) llama-server actually resolved from this GGUF's
+      # metadata -- if none, the quant itself needs re-converting upstream.
       medgemma-1.5-4b:
         cmd: |
           llama-server
@@ -501,7 +515,7 @@ data:
           --no-mmap
           --flash-attn on
           --jinja
-          --chat-template gemma
+          --chat-template chatml
           -c 32768
         ttl: 300
 
