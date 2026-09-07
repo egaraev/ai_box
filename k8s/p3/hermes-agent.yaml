@@ -111,7 +111,13 @@ data:
   config.yaml: |
     model:
       provider: custom
-      model: qwen3.8-27b-Expert-Vision
+      # BUG FIXED 2026-09-07: this key was "model:" (a leftover guess from
+      # before checking the real schema), which Hermes does NOT recognize --
+      # confirmed via Hermes's own configuring-models.md and providers.md,
+      # both of which document this key as "default:". "model.model" was
+      # silently ignored, leaving the model id empty and causing LiteLLM to
+      # reject every request with "Invalid model name passed in model=."
+      default: qwen3.8-27b-Expert-Vision
       base_url: http://litellm.ai-models.svc.cluster.local:4000/v1
       # api_key was "none" when Hermes talked to llama-swap directly, which
       # took no auth. LiteLLM (k8s/p1/litellm.yaml) enforces a real
