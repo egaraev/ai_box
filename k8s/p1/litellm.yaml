@@ -170,6 +170,18 @@ data:
     # Grow this list (and ROUTE_TO_MODEL below) as more GGUF files actually
     # land on aibox and get real llama-swap-configmap.yaml roster entries --
     # no other code changes needed.
+    # BUG FIXED 2026-09-07: with only abstract descriptions (no example
+    # utterances), arch-router-1.5b routed genuinely plain greetings like
+    # "what's up" to "reasoning" a real fraction of the time (Eldar tested
+    # a batch of only-casual messages via kubectl logs and caught it
+    # directly). Root cause: "reasoning"'s old wording told the classifier
+    # to pick it "whenever a request doesn't clearly and obviously belong
+    # to one of the other routes" -- for a 1.5B model with nothing concrete
+    # to anchor on, that phrasing itself nudges borderline-but-actually-
+    # simple messages toward reasoning too easily. Fix (Katanemo's own
+    # recommended technique for Arch-Router): give each route a few example
+    # utterances, not just an abstract description, so the model has real
+    # anchors instead of guessing at the boundary from prose alone.
     ROUTES = [
         {
             "name": "vision",
@@ -183,7 +195,11 @@ data:
             "name": "medical",
             "description": (
                 "The user is asking about a health condition, symptom, "
-                "medication, diagnosis, or other medical/clinical topic."
+                "medication, diagnosis, or other medical/clinical topic. "
+                "Examples: 'I've had a headache and sore throat for two "
+                "days, could this be a cold?', 'what's a normal resting "
+                "heart rate for a 40 year old?', 'is it safe to take "
+                "ibuprofen with this medication?'"
             ),
         },
         {
@@ -192,17 +208,28 @@ data:
                 "A quick, simple, easy, or regular everyday message -- a "
                 "greeting, a lookup, a basic definition, small talk, or "
                 "anything else that clearly doesn't need deep reasoning or "
-                "careful judgment."
+                "careful judgment. Examples: 'hey', 'what's up', 'morning, "
+                "how's it going', 'thanks!', 'all good, you?', 'lol nice', "
+                "'what time is it in Tokyo'. A short greeting or casual "
+                "remark belongs here even if it isn't a perfect textbook "
+                "example -- don't escalate a plain hello just because "
+                "it's brief or informal."
             ),
         },
         {
             "name": "reasoning",
             "description": (
-                "Anything else -- writing, coding, planning, analysis, or "
-                "any request with real depth, complexity, or where being "
-                "wrong matters. This is the default: pick this whenever a "
-                "request doesn't clearly and obviously belong to one of the "
-                "other routes."
+                "A request with real depth, complexity, or substance -- "
+                "writing, coding, planning, analysis, multi-step tasks, or "
+                "anything where being wrong actually matters. Examples: "
+                "'plan a 3-day trip to Tbilisi with a rough budget', "
+                "'write a Python function that merges overlapping "
+                "intervals', 'what's the tradeoff between Postgres and "
+                "SQLite here'. This is the fallback ONLY when a request "
+                "genuinely has real substance to it and doesn't fit "
+                "vision/medical/casual -- not a default for short or "
+                "casual-sounding messages just because the classifier "
+                "isn't fully certain."
             ),
         },
     ]
