@@ -50,6 +50,24 @@ data:
         # actually freeing VRAM, not more context tuning -- the real lever is the
         # desktop's ~530MB baseline (planned nvidia-drm.modeset=0 / no-GUI
         # switch), not another value to try here.
+        #
+        # -t 16 -> 8 CHANGED 2026-09-07: found via real timeouts, not
+        # guessed. Once the matrix fix (see arch-router-1.5b/nomic-embed-
+        # text-v1.5/qwen3-1.7b-cpu below) forced those three to always stay
+        # resident alongside whichever GPU model is active, aibox's 16
+        # logical cores (nproc confirmed: 8 physical/16 virtual) were being
+        # asked for up to 8+8+16+16=48 threads at once whenever this model
+        # was actively decoding a long response -- arch-router-1.5b's own
+        # classification calls (which run on literally every single
+        # message, on the hot path) started missing its 30s httpx timeout
+        # under that contention, silently defaulting every route to
+        # "other" (confirmed live: 3 classification calls in a row hit
+        # genuine httpx.ReadTimeout right after two back-to-back reasoning-
+        # route responses kept this model busy). This model is fully GPU-
+        # offloaded (-ngl 99) -- its CPU threads mainly cover prompt
+        # processing/sampling overhead, not the actual layer compute -- so
+        # halving to 8 should cost little decode speed while giving arch-
+        # router-1.5b real headroom. NOT YET CONFIRMED on aibox.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B/Qwen3.8-27B-UD-IQ4_XS.gguf
@@ -57,7 +75,7 @@ data:
           --host 0.0.0.0
           --jinja
           -ngl 99
-          -t 16
+          -t 8
           --no-mmap
           --parallel 1
           -fa on
@@ -97,6 +115,12 @@ data:
         # capped at 4096 tokens, which caps how much effort levels above
         # medium can actually use -- raise the budget too if higher effort
         # doesn't seem to change anything.
+        #
+        # -t 16 -> 8 CHANGED 2026-09-07: same CPU-thread-oversubscription
+        # fix as qwen3.8-27b-Expert above (see that model's comment for the
+        # full diagnosis) -- this model is also ANDed into resident_router
+        # below, so it hits the exact same contention with arch-router-1.5b
+        # whenever the vision route is active. NOT YET CONFIRMED on aibox.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B/vision/Qwen3.8-27B-UD-Q3_K_XL.gguf
@@ -105,7 +129,7 @@ data:
           --host 0.0.0.0
           --jinja
           -ngl 99
-          -t 16
+          -t 8
           --no-mmap
           --parallel 1
           -fa on
@@ -147,6 +171,18 @@ data:
         # time CUDA contention/fragmentation issue, not a simple aggregate
         # shortage). CUDA_VISIBLE_DEVICES="" forces this process to never
         # initialize CUDA at all -- genuinely CPU-only, not just -ngl 0.
+        #
+        # -t 8 -> 2 CHANGED 2026-09-07: this model being permanently
+        # resident (ttl: 0, ANDed into resident_router below) alongside
+        # arch-router-1.5b and whichever GPU model is active meant up to
+        # 48 threads were being requested at once on aibox's 16 logical
+        # cores -- confirmed as the real cause of arch-router-1.5b's
+        # classification calls hitting genuine httpx.ReadTimeout under load
+        # (see qwen3.8-27b-Expert's comment for the full diagnosis). A
+        # ~140MB embeddings-only model doing simple mean-pooling forward
+        # passes doesn't need 8 threads to itself; trimmed to free real
+        # headroom for arch-router-1.5b, which is on the hot path for
+        # every single chat message. NOT YET CONFIRMED on aibox.
         cmd: |
           llama-server
           -m /models/nomic-embed-text-v1.5/nomic-embed-text-v1.5.Q8_0.gguf
@@ -155,7 +191,7 @@ data:
           --embedding
           --pooling mean
           -ngl 0
-          -t 8
+          -t 2
           -c 8192
           -b 8192
           -ub 8192
@@ -188,6 +224,20 @@ data:
         # env: CUDA_VISIBLE_DEVICES="" ADDED 2026-09-07: see the identical
         # comment on nomic-embed-text-v1.5 above -- same fix, same reason
         # (this model being ANDed into resident_router is what surfaced it).
+        #
+        # -t 16 -> 4 CHANGED 2026-09-07: the 2026-09-06 bump to 16 already
+        # measured only a modest, inconsistent improvement (see comment
+        # above) -- thread count was never the dominant bottleneck for this
+        # model. Now that it's permanently resident (ttl: 0) alongside
+        # arch-router-1.5b and whichever GPU model is active, that unused
+        # headroom is actively harmful: up to 48 threads were being
+        # requested at once on aibox's 16 logical cores, which is the
+        # confirmed cause of arch-router-1.5b's classification calls
+        # hitting genuine httpx.ReadTimeout under load (full diagnosis on
+        # qwen3.8-27b-Expert's comment above). Trimmed to 4 -- frees real
+        # headroom for arch-router-1.5b (every chat message's hot path)
+        # while costing this model little, since 16 threads were barely
+        # helping it anyway. NOT YET CONFIRMED on aibox.
         cmd: |
           llama-server
           -m /models/qwen3-1.7B/Qwen3-1.7B-Q8_0.gguf
@@ -195,7 +245,7 @@ data:
           --host 0.0.0.0
           --jinja
           -ngl 0
-          -t 16
+          -t 4
           --no-mmap
           -c 32768
           --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0
@@ -418,6 +468,17 @@ data:
       #   mkdir -p /data/models/qwen3-8B
       #   cd /data/models/qwen3-8B
       #   wget https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf
+      # -c 32768 -> 65536 CHANGED 2026-09-07: preemptive fix, same class of
+      # bug just confirmed live on medgemma-1.5-4b (see its own comment
+      # below for the full "ContextWindowExceededError, 44516 tokens"
+      # diagnosis) -- the router hook forwards Hermes's full, untouched
+      # request (system prompt/tool harness + conversation history) to
+      # whichever model gets picked, and Hermes's documented minimum is
+      # 64K. This route just hasn't been hit by a long enough conversation
+      # yet; matched to 65536 like every other active router destination
+      # before it actually breaks mid-conversation. -ctk/-ctv q8_0 already
+      # in place, so the larger context should be cheap. NOT YET CONFIRMED
+      # on aibox (no live failure here yet to retest against).
       qwen3-8b:
         cmd: |
           llama-server
@@ -431,7 +492,7 @@ data:
           --jinja
           -ctk q8_0
           -ctv q8_0
-          -c 32768
+          -c 65536
           --reasoning-budget 1024
         ttl: 300
 
@@ -503,6 +564,23 @@ data:
       # token\|chat template"` right after medgemma loads, to see what
       # EOS/EOG token(s) llama-server actually resolved from this GGUF's
       # metadata -- if none, the quant itself needs re-converting upstream.
+      #
+      # -c 32768 -> 65536 (+ -ctk/-ctv q4_0) CHANGED 2026-09-07: real error
+      # hit live -- "ContextWindowExceededError ... request (44516 tokens)
+      # exceeds the available context size (32768 tokens)". The router hook
+      # only trims/caps the message list it sends to arch-router-1.5b for
+      # its OWN classification call -- the actual full, untouched request
+      # (Hermes's complete system prompt/tool harness + conversation
+      # history) still gets forwarded as-is to whichever model gets
+      # chosen. qwen3.8-27b-Expert/Expert-Vision were already sized to
+      # 65536 specifically because that's Hermes's documented 64K minimum
+      # context requirement -- medgemma-1.5-4b (and qwen3-8b, the casual
+      # route, same latent bug) were left at 32768 and just hadn't been hit
+      # by a long enough conversation yet. Matched to 65536 with quantized
+      # KV cache (this is a small 4B model, plenty of VRAM headroom vs the
+      # razor-thin 27B, but quantizing anyway since it costs nothing and
+      # every other GPU model in the roster already does the same). NOT
+      # YET CONFIRMED on aibox.
       medgemma-1.5-4b:
         cmd: |
           llama-server
@@ -516,7 +594,7 @@ data:
           --flash-attn on
           --jinja
           --chat-template chatml
-          -c 32768
+          -c 65536 -ctk q4_0 -ctv q4_0
         ttl: 300
 
       # ── NEW: Qwen3-VL 30B-A3B (multimodal MoE, OCR/doc/vision) — "vision" role ───
