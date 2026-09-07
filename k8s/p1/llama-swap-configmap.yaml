@@ -483,14 +483,20 @@ data:
       #      context increases. Same reasoning as nomic-embed-text-v1.5 and
       #      qwen3-1.7b-cpu below: CPU is fine for a ~1B-class classifier
       #      that only needs to emit a few tokens of JSON.
-      #   2. Dropped from the "resident_router" matrix set (that set is for
-      #      GPU models that need to stay loaded alongside whatever's
-      #      swapped in) -- ttl: 0 alone is enough to keep a CPU-only model
-      #      always resident, exactly like the other two CPU entries.
+      #   2. BUG (2026-09-07, now fixed -- see the matrix "sets" comment
+      #      below): originally dropped from the "resident_router" matrix
+      #      set on the assumption that ttl: 0 alone keeps a CPU-only model
+      #      always resident regardless of GPU swaps. That's false -- real
+      #      llama-swap behavior confirmed it gets evicted every time a
+      #      model in that set starts, and vice versa. It's back in the set
+      #      (ANDed in with "& arch"), which is what actually keeps it
+      #      concurrent. ttl: 0 only controls idle-unload timing, nothing
+      #      to do with concurrency.
       #
-      # STATUS: config only -- Arch-Router-1.5B-Q4_K_M.gguf (~986MB, confirmed
-      # real file on Hugging Face at katanemo/Arch-Router-1.5B.gguf) has NOT
-      # been copied to aibox's /data/models yet. Before deploying litellm.yaml:
+      # STATUS: real file confirmed present on aibox 2026-09-07 (was
+      # speculative when this comment was first written). Arch-Router-1.5B-
+      # Q4_K_M.gguf (~986MB), from Hugging Face at katanemo/Arch-Router-1.5B.gguf.
+      # Original download commands, for reference:
       #   mkdir -p /data/models/arch-router-1.5B
       #   cd /data/models/arch-router-1.5B
       #   wget https://huggingface.co/katanemo/Arch-Router-1.5B.gguf/resolve/main/Arch-Router-1.5B-Q4_K_M.gguf
@@ -529,13 +535,33 @@ data:
         arch: arch-router-1.5b
         qwe:  qwen3.8-27b-Expert
         qwv:  qwen3.8-27b-Expert-Vision
+        emb:  nomic-embed-text-v1.5
+        q17:  qwen3-1.7b-cpu
 
       sets:
 
-        # arch-router is no longer in this GPU matrix -- it now runs CPU-only
-        # with ttl:0 (see its entry above), same as nomic-embed-text-v1.5 and
-        # qwen3-1.7b-cpu, so it's always resident independent of whatever's
-        # swapped in on the GPU. matrix var "arch" itself is still defined
-        # above in case it's ever needed for a GPU-side expression again.
-        # (no more "& q7" here -- the 7B autocomplete model was dropped, see above)
-        resident_router: "(a1 | orn | qpg | qw6 | goss | q8 | med | qvl | qwe | qwv)"
+        # BUG FIXED 2026-09-07: the comment that used to be here claimed
+        # ttl:0 alone keeps a CPU-only model "always resident independent
+        # of whatever's swapped in on the GPU" -- confirmed FALSE by real
+        # llama-swap behavior (kubectl logs showed explicit
+        # "evict=[arch-router-1.5b] target=[qwen3.8-27b-Expert]" and the
+        # reverse, every single time either side started -- the semantic
+        # router was silently falling back to "other" on a huge fraction of
+        # real requests because of this). llama-swap's matrix/groups solver
+        # only keeps concurrent whatever's actually named inside the DSL
+        # expression -- ttl is purely about idle-unload timing, unrelated to
+        # concurrency. Per llama-swap's own docs (Groups V2/matrix design,
+        # github.com/mostlygeek/llama-swap#643), the correct way to keep a
+        # model concurrent alongside a whole OR-set is to AND it into that
+        # set explicitly -- which is exactly what the ORIGINAL Windows-lab
+        # config already did for the old 7B autocomplete model ("& q7",
+        # dropped only because that model itself was retired, not because
+        # the pattern was wrong -- see the no-rewrite-principle note at the
+        # top of this file). Restored that pattern here, and extended it to
+        # nomic-embed-text-v1.5 and qwen3-1.7b-cpu too: both have the exact
+        # same ttl:0-is-enough assumption and no matrix var at all, meaning
+        # Honcho's background deriver/embedding calls have almost certainly
+        # been hitting this same silent eviction on every GPU model swap,
+        # just unnoticed since Honcho retries quietly in the background
+        # rather than surfacing an error to a human.
+        resident_router: "(a1 | orn | qpg | qw6 | goss | q8 | med | qvl | qwe | qwv) & arch & emb & q17"
