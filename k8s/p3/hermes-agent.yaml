@@ -28,14 +28,24 @@
 #    specialized agent later is a `hermes profile create <name>` inside the
 #    running pod, not a new Deployment.
 #
-# LLM routing: model.model below points at qwen3.8-27b-Expert-Vision (the
-# locked-in P1 GPU model, see llama-swap-configmap.yaml) via LiteLLM
-# (k8s/p1/litellm.yaml) rather than llama-swap directly -- same pattern as
-# Open WebUI and Honcho now. llama-swap still only keeps one GPU model
-# resident at a time, so Hermes and Open WebUI share whatever's currently
-# swapped in; that contention already existed between WebUI sessions and
-# isn't new here. LiteLLM being in the middle doesn't change that -- it's
-# still the same one GPU underneath.
+# LLM routing: model.default is "auto" -- every Hermes request goes through
+# LiteLLM's (k8s/p1/litellm.yaml) semantic arch-router, same as the router
+# was actually built for, instead of hardcoding one fixed model. FIXED
+# 2026-09-07: this was originally set to the literal model name
+# qwen3.8-27b-Expert-Vision, which works (Hermes doesn't error), but means
+# every single message -- "hey", "all good bro", a real coding task, all of
+# it -- ran the full 27B model directly, silently bypassing the router
+# entirely (custom_router_hook.py only rewrites requests whose model is
+# literally "auto"). Eldar caught this from Hermes's own status bar always
+# showing "qwen3.8 27b Expert Vision" regardless of how trivial the message
+# was. "auto" restores the intended behavior: casual/quick messages ->
+# qwen3-8b, vision/medical -> their dedicated models, everything else ->
+# qwen3.8-27b-Expert, decided per-message by arch-router-1.5b (or the
+# deterministic image-attached check) instead of always paying for the 27B
+# model. llama-swap still only keeps one GPU model resident at a time, so
+# whichever route wins causes the usual swap if a different model was
+# already loaded (e.g. from an Open WebUI session) -- that contention
+# already existed and isn't new here.
 #
 # Memory: memory.provider: honcho in config.yaml + a self-hosted honcho.json
 # pointed at our in-cluster honcho-api service (P2), matching the "Minimal
@@ -117,7 +127,12 @@ data:
       # both of which document this key as "default:". "model.model" was
       # silently ignored, leaving the model id empty and causing LiteLLM to
       # reject every request with "Invalid model name passed in model=."
-      default: qwen3.8-27b-Expert-Vision
+      #
+      # SECOND FIX 2026-09-07: this was then set to the literal model name
+      # qwen3.8-27b-Expert-Vision -- worked, but bypassed the semantic router
+      # entirely (see the top-of-file comment). "auto" is LiteLLM's real
+      # routing entry point (k8s/p1/litellm.yaml's custom_router_hook.py).
+      default: auto
       base_url: http://litellm.ai-models.svc.cluster.local:4000/v1
       # api_key was "none" when Hermes talked to llama-swap directly, which
       # took no auth. LiteLLM (k8s/p1/litellm.yaml) enforces a real
