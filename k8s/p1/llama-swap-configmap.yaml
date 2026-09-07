@@ -132,6 +132,21 @@ data:
         # ...") for best retrieval quality -- Honcho's embedding calls won't
         # send these, so embeddings will work but may be somewhat less
         # precise than the model's benchmarked numbers. Not a blocker.
+        #
+        # env: CUDA_VISIBLE_DEVICES="" ADDED 2026-09-07: -ngl 0 alone does
+        # NOT stop a CUDA-built llama-server from touching the GPU -- it
+        # still creates a CUDA context and can offload some compute buffer
+        # ops regardless (confirmed via llama.cpp's own maintainers). This
+        # only became a real problem once this model was ANDed into the
+        # matrix's resident_router set (below) so it's always concurrent
+        # with the GPU models -- qwen3.8-27b-Expert already runs at a
+        # documented, razor-thin VRAM ceiling on this card, and three CPU
+        # models each quietly reserving a bit of CUDA context overhead was
+        # enough to push it into "cudaMalloc failed: out of memory" on a
+        # mere 400MB allocation, even with 14GB+ nominally free (a startup-
+        # time CUDA contention/fragmentation issue, not a simple aggregate
+        # shortage). CUDA_VISIBLE_DEVICES="" forces this process to never
+        # initialize CUDA at all -- genuinely CPU-only, not just -ngl 0.
         cmd: |
           llama-server
           -m /models/nomic-embed-text-v1.5/nomic-embed-text-v1.5.Q8_0.gguf
@@ -144,6 +159,8 @@ data:
           -c 8192
           -b 8192
           -ub 8192
+        env:
+          - "CUDA_VISIBLE_DEVICES="
         ttl: 0
 
       qwen3-1.7b-cpu:
@@ -168,6 +185,9 @@ data:
         # extraction/tool-call, not visible reasoning) -- so
         # --reasoning-budget 0 added to disable it. Re-test after this
         # change before concluding a smaller model is needed.
+        # env: CUDA_VISIBLE_DEVICES="" ADDED 2026-09-07: see the identical
+        # comment on nomic-embed-text-v1.5 above -- same fix, same reason
+        # (this model being ANDed into resident_router is what surfaced it).
         cmd: |
           llama-server
           -m /models/qwen3-1.7B/Qwen3-1.7B-Q8_0.gguf
@@ -180,6 +200,8 @@ data:
           -c 32768
           --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0
           --reasoning-budget 0
+        env:
+          - "CUDA_VISIBLE_DEVICES="
         ttl: 0
 
       # NOTE 2026-09-07: still inactive placeholders (no GGUF on aibox, per
@@ -529,6 +551,18 @@ data:
         # forwarding Hermes's full system-prompt/tool-harness, tens of
         # thousands of tokens, into an 8192-token context); this is just
         # headroom on top of that fix, not the fix itself.
+        #
+        # env: CUDA_VISIBLE_DEVICES="" ADDED 2026-09-07: -ngl 0 alone does
+        # NOT stop a CUDA-built llama-server from touching the GPU (still
+        # creates a CUDA context, can offload some compute buffer ops
+        # regardless). Once this model was ANDed into resident_router
+        # (below) so it's always concurrent with qwen3.8-27b-Expert, that
+        # small reserved overhead was enough to push the already razor-thin
+        # 27B model into "cudaMalloc failed: out of memory" on a 400MB
+        # allocation, even with 14GB+ nominally free per nvidia-smi (a
+        # startup-time CUDA contention issue, not a real aggregate
+        # shortage). This forces genuinely CPU-only execution, same fix as
+        # nomic-embed-text-v1.5 and qwen3-1.7b-cpu.
         cmd: |
           llama-server
           -m /models/arch-router-1.5B/Arch-Router-1.5B-Q4_K_M.gguf
@@ -540,6 +574,8 @@ data:
           --no-mmap
           -c 24576
           --temp 0
+        env:
+          - "CUDA_VISIBLE_DEVICES="
         ttl: 0
 
     matrix:
