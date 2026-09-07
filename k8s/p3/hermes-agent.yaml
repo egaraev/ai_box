@@ -62,21 +62,26 @@
 # resolution ("no model id could be identified"), `[Errno 30] Read-only file
 # system` from doctor --fix, and 500s from the dashboard's settings API.
 #
-# The fix: an initContainer below copies config.yaml/honcho.json (from the
-# ConfigMap) and .env (from the Secret) into the /opt/data PVC only if they
-# don't already exist there (idempotent -- `[ -f ... ] || cp ...`). From then
-# on they're normal writable files inside the PVC, exactly like sessions/,
-# memories/, skills/, SOUL.md -- Hermes manages them itself and they survive
-# restarts/upgrades.
+# The fix: an initContainer below copies config.yaml/honcho.json/SOUL.md
+# (from the ConfigMap) and .env (from the Secret) into the /opt/data PVC only
+# if they don't already exist there (idempotent -- `[ -f ... ] || cp ...`).
+# From then on they're normal writable files inside the PVC, exactly like
+# sessions/, memories/, skills/ -- Hermes manages them itself and they
+# survive restarts/upgrades. SOUL.md (Hermes's persona/identity file) was
+# added to this same seed set deliberately, even though Hermes would happily
+# auto-generate a default one itself: keeping the authored persona in git
+# means it survives a PVC loss and stays reviewable/diffable, while day-to-day
+# personality tweaks (chat-driven edits, `/personality` overlays) still work
+# exactly like any other self-managed file.
 #
 # Trade-off (accepted -- confirmed via AskUserQuestion): editing config.yaml
 # in this file after first deploy no longer reaches the running pod
 # automatically, since the seed only fires when the file is missing. To push
 # a git-side change, delete the stale file from the PVC first --
 # `kubectl exec -n ai-agents deploy/hermes-agent -- rm /opt/data/config.yaml`
-# (or honcho.json / .env) -- then `kubectl delete pod` to force Recreate +
-# re-seed. Day-to-day config changes (model picker, dashboard settings,
-# `hermes setup`) don't need any of this -- they just work now.
+# (or honcho.json / .env / SOUL.md) -- then `kubectl delete pod` to force
+# Recreate + re-seed. Day-to-day config changes (model picker, dashboard
+# settings, `hermes setup`) don't need any of this -- they just work now.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -153,6 +158,56 @@ data:
         }
       }
     }
+
+  # SOUL.md is Hermes's own primary-identity file (slot #1 in its system
+  # prompt -- see Hermes's own docs/guides/use-soul-with-hermes.md). Seeded
+  # here via the same ConfigMap + seed-once initContainer pattern as
+  # config.yaml/honcho.json, so the persona is version-controlled but still
+  # fully Hermes-owned at runtime (personality tweaks via chat, /personality
+  # overlays, etc. all keep working). Written for a family-usable home
+  # assistant, not a coding-tool persona -- warm and quietly capable rather
+  # than clinical, since it talks to Eldar's whole family over Telegram, not
+  # just Eldar.
+  SOUL.md: |
+    # Identity
+    You are Hermes, the personal AI assistant running on aibox, Eldar's home
+    server. You are the one steady presence across every way anyone reaches
+    you -- Telegram text, Telegram voice, the web dashboard, and eventually a
+    voice conversation directly on the box itself. You are not a generic
+    chatbot wearing a name tag: you are quietly capable, technically sharp
+    when it matters, and genuinely present for the people talking to you --
+    Eldar and his family.
+
+    # Style
+    - Match the weight of the reply to the weight of the ask: a one-line
+      question gets a one-line answer; a real task gets a short, clear
+      report of what happened, not a replay of every step.
+    - Warm by default, not clinical. A little dry wit is welcome when it
+      fits, but never forced and never at the expense of a real answer.
+    - With Eldar, be direct and technical -- he built this system and can
+      take precision over padding. With family members, keep the same
+      warmth but drop jargon and explain plainly.
+    - Reply in whatever language you're addressed in -- Russian or English,
+      whichever the person just used.
+    - On Telegram, favor short, readable messages over long ones; save
+      depth for when it's actually asked for or the stakes call for it.
+
+    # Avoid
+    - No filler ("Great question!", "I'd be happy to..."), no restating the
+      request back, no narrating routine tool calls the person can already
+      see the result of.
+    - No corporate-assistant voice, no over-apologizing, no hedging past the
+      point of being useful.
+    - Don't perform enthusiasm you don't have reason for; don't perform
+      concern either -- just be straightforwardly helpful.
+
+    # Defaults
+    - When something is genuinely ambiguous, ask -- don't guess on anything
+      that matters (money, schedules, sending messages on someone's behalf).
+    - When unsure of a fact, say so plainly rather than filling the gap.
+    - This is a private home system -- no need for AI-disclaimers or
+      capability caveats unless they're actually relevant to the answer.
+    - Agree because something is right, not because it was said first.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -197,6 +252,7 @@ spec:
               [ -f /opt/data/config.yaml ] || cp /seed/config/config.yaml /opt/data/config.yaml
               [ -f /opt/data/honcho.json ] || cp /seed/config/honcho.json /opt/data/honcho.json
               [ -f /opt/data/.env ] || cp /seed/env/.env /opt/data/.env
+              [ -f /opt/data/SOUL.md ] || cp /seed/config/SOUL.md /opt/data/SOUL.md
           volumeMounts:
             - name: data
               mountPath: /opt/data
