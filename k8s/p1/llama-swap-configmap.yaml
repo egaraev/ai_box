@@ -17,11 +17,15 @@ data:
     #                                            (hostPath /data/models on aibox,
     #                                            mounted into the container at /models)
     #
-    # P1 only has qwen3.8-27b-Expert's and qwen3.8-27b-Expert-Vision's GGUF
-    # files actually present on aibox so far — every other entry below is
-    # carried over structurally (matching the Windows config 1:1) but won't
-    # serve anything until its files are copied into the matching
-    # /data/models/<dir>/ subfolder.
+    # TRIMMED 2026-09-07 (Eldar's call): every model entry below now has a
+    # real GGUF folder on aibox's /data/models -- arch-router-1.5B,
+    # gemma4-26B, medgemma-1.5-4B, nomic-embed-text-v1.5, qwen3-1.7B,
+    # qwen3-8B, qwen3.8-27B (Expert + Expert-Vision), qwopus3.6-35B. Every
+    # other placeholder carried over from the Windows-lab config (which had
+    # no file on disk) was removed rather than kept as dead config -- see
+    # the REMOVED comments inline below for what was dropped and why.
+    # gemma4-26b and qwopus-general have files present but aren't wired
+    # into LiteLLM's router yet (no route maps to them in litellm.yaml).
     healthCheckTimeout: 300
     logLevel: info
 
@@ -254,114 +258,16 @@ data:
           - "CUDA_VISIBLE_DEVICES="
         ttl: 0
 
-      # NOTE 2026-09-07: still inactive placeholders (no GGUF on aibox, per
-      # the top-of-file P1 comment) -- not touched as part of the
-      # qwen3.8-27B folder restructure below, so their -m/-mmproj paths
-      # still point at the now-gone qwen3.8-27B-MTP/ layout. Fix the paths
-      # for real if these are ever activated.
-      qwen3.8-27b-Atomic:
-        cmd: |
-          llama-server
-          -m /models/qwen3.8-27B-MTP/Qwen3.8-27B-AD-IQ3_S.gguf
-          --mmproj /models/qwen3.8-27B-MTP/mmproj-F16.gguf
-          --port ${PORT}
-          --host 0.0.0.0
-          --jinja
-          -ngl 99
-          -t 16
-          --no-mmap
-          -fa on
-          -c 80000 -ctk q4_0 -ctv q4_0
-          --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
-          --presence-penalty 1.5 --repeat-penalty 1.0
-          --reasoning-budget 4096
-          --reasoning-effort medium
-        ttl: 300
-
-      qwen3.8-27b-MTP:
-        cmd: |
-          llama-server
-          -m /models/qwen3.8-27B-MTP/Qwen3.8-27B-UD-IQ4_XS.gguf
-          --model-draft /models/qwen3.8-27B-MTP/MTP/mtp-Qwen3.8-27B-Q4_0.gguf
-          --port ${PORT}
-          --host 0.0.0.0
-          --jinja
-          -ngl 99
-          -ngld 99
-          -t 16
-          --no-mmap
-          --parallel 1
-          --spec-type draft-mtp --spec-draft-n-max 4
-          -fa on
-          -c 40000 -ctk q4_0 -ctv q4_0
-          --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
-          --presence-penalty 1.5 --repeat-penalty 1.0
-          --reasoning-budget 2048
-          --reasoning-effort low
-        ttl: 300
-
-      agents-a1:
-        cmd: |
-          llama-server
-          -m /models/agents-a1/agents-a1-Q4_K_M-MTP-graft-headQ6.gguf
-          --port ${PORT}
-          --host 0.0.0.0
-          --n-gpu-layers 99
-          --n-cpu-moe 32
-          -t 16
-          --no-mmap
-          --flash-attn on
-          -ctk q8_0
-          -ctv q8_0
-          -c 131072
-          -b 2048 -ub 512
-          --cache-reuse 256
-          --jinja
-          --temp 0.85
-          --top-p 0.95
-          --top-k 20
-          --min-p 0.0
-          --presence-penalty 1.1
-          --repeat-penalty 1.0
-          --spec-type draft-mtp
-          --spec-draft-n-max 3
-          --dry-multiplier 0.8
-          --dry-base 1.75
-          --dry-allowed-length 2
-          --dry-penalty-last-n 4096
-          --reasoning-budget -1
-        ttl: 300
-
-      ornith-35b:
-        cmd: |
-          llama-server
-          -m /models/ornith-35b/ornith-1.0-35b-MXFP4_MOE-MTP.gguf
-          --port ${PORT}
-          --host 0.0.0.0
-          --n-gpu-layers 99
-          --n-cpu-moe 32
-          -t 16
-          --no-mmap
-          --flash-attn on
-          --jinja
-          -ctk q4_0
-          -ctv q4_0
-          -c 131072
-          -b 2048 -ub 512
-          --cache-reuse 256
-          --spec-type draft-mtp
-          --spec-draft-n-max 3
-          --dry-multiplier 0.8
-          --dry-base 1.75
-          --dry-allowed-length 2
-          --dry-penalty-last-n 4096
-          --reasoning-budget 8096
-        ttl: 300
-
-      # qwopus-coder: RETIRED 2026-07-14 -- repeated reliability problems
-      # (circling, wrong-directory writes, excessive thinking time). Replaced by
-      # qwen3.6-35b as the "code" role in litellm_config.yaml. Block removed
-      # entirely; re-add from git history if ever needed again.
+      # REMOVED 2026-09-07 (Eldar's call -- only keeping what's actually on
+      # aibox): qwen3.8-27b-Atomic, qwen3.8-27b-MTP, agents-a1, ornith-35b.
+      # None of these had a GGUF present on disk (aibox's /data/models only
+      # holds the folders listed in the top-of-file inventory comment) --
+      # config-only placeholders that were never going to run. Restorable
+      # from git history if any of these models actually gets downloaded
+      # later; re-check the -m/--mmproj paths against whatever folder layout
+      # exists at that point rather than trusting the old paths verbatim,
+      # since qwen3.8-27B-MTP/ in particular no longer exists (see the P1
+      # restructure note on qwen3.8-27b-Expert above).
 
       qwopus-general:
         cmd: |
@@ -397,12 +303,6 @@ data:
       # that ever changes, restore both blocks + the "q7" matrix var from the
       # Windows config.yaml git history.
 
-      # qwen3-coder-30b: RETIRED 2026-07-14 -- slow, high VRAM (no MTP draft
-      # head in this quant), and had no fallback chain of its own in
-      # litellm_config.yaml (a real production gap that surfaced once already).
-      # Replaced by qwen3.6-35b as the "code" role. Block removed entirely;
-      # re-add from git history if ever needed again.
-
       gemma4-26b:
         cmd: |
           llama-server
@@ -421,44 +321,9 @@ data:
           -c 32768
         ttl: 300
 
-      qwen3.6-35b:
-        cmd: |
-          llama-server
-          -m /models/qwen3.6-35b/Qwen3.6-35B-A3B-UD-Q4_K_XL_MTP.gguf
-          --port ${PORT}
-          --host 0.0.0.0
-          --n-gpu-layers 99
-          --n-cpu-moe 32
-          -t 16
-          --no-mmap
-          --flash-attn on
-          --jinja
-          -ctk q4_0
-          -ctv q4_0
-          -c 131072
-          -b 2048 -ub 512
-          --cache-reuse 256
-          --spec-type draft-mtp
-          --spec-draft-n-max 3
-          --reasoning-budget 1024
-        ttl: 300
-
-      gpt-oss-20b:
-        cmd: |
-          llama-server
-          -m /models/gpt-oss-20B/gpt-oss-20b-f16.gguf
-          --port ${PORT}
-          --host 0.0.0.0
-          --n-gpu-layers 99
-          --n-cpu-moe 28
-          -t 16
-          --no-mmap
-          --flash-attn on
-          --jinja
-          -ctk q4_0
-          -ctv q4_0
-          -c 131072
-        ttl: 300
+      # REMOVED 2026-09-07 (Eldar's call): qwen3.6-35b, gpt-oss-20b. No GGUF
+      # present on disk for either -- config-only placeholders. Restorable
+      # from git history if either model is actually downloaded later.
 
       # ── ACTIVATED 2026-09-07: wired into LiteLLM's semantic router as the
       # "fast" route (see k8s/p1/litellm.yaml's custom_router_hook.py) --
@@ -597,25 +462,10 @@ data:
           -c 65536 -ctk q4_0 -ctv q4_0
         ttl: 300
 
-      # ── NEW: Qwen3-VL 30B-A3B (multimodal MoE, OCR/doc/vision) — "vision" role ───
-      qwen3-vl-30b:
-        cmd: |
-          llama-server
-          -m /models/qwen3-VL-30B/Qwen3-VL-30B-A3B-Instruct-UD-Q4_K_XL.gguf
-          --mmproj /models/qwen3-VL-30B/mmproj-F16.gguf
-          --port ${PORT}
-          --host 0.0.0.0
-          --n-gpu-layers 99
-          --n-cpu-moe 20
-          -t 8
-          --no-mmap
-          --flash-attn on
-          --jinja
-          -ctk q4_0
-          -ctv q4_0
-          -c 65536
-          --no-mmproj-offload
-        ttl: 300
+      # REMOVED 2026-09-07 (Eldar's call): qwen3-vl-30b. No GGUF present on
+      # disk -- config-only placeholder; the vision role is already covered
+      # by qwen3.8-27b-Expert-Vision. Restorable from git history if this
+      # model is actually downloaded later.
 
       # ── Arch-Router-1.5B — semantic-router classifier for LiteLLM's "auto"
       # model (see k8s/p1/litellm.yaml's custom_router_hook.py). Called on
@@ -683,15 +533,18 @@ data:
         ttl: 0
 
     matrix:
+      # vars/sets TRIMMED 2026-09-07 to match the models actually on aibox
+      # (Eldar's call -- removed agents-a1/a1, ornith-35b/orn,
+      # qwen3.6-35b/qw6, gpt-oss-20b/goss, qwen3-vl-30b/qvl, none of which
+      # had a GGUF on disk). gemma4-26b and qwopus-general (qpg) both DO
+      # have real folders on aibox now but neither is wired into the
+      # LiteLLM router yet -- qpg stays in resident_router below since it
+      # already was; gemma4-26b was never in this set and still isn't,
+      # since it likewise has no router role yet.
       vars:
-        a1:   agents-a1
-        orn:  ornith-35b
         qpg:  qwopus-general
-        qw6:  qwen3.6-35b
-        goss: gpt-oss-20b
         q8:   qwen3-8b
         med:  medgemma-1.5-4b
-        qvl:  qwen3-vl-30b
         arch: arch-router-1.5b
         qwe:  qwen3.8-27b-Expert
         qwv:  qwen3.8-27b-Expert-Vision
@@ -724,4 +577,4 @@ data:
         # been hitting this same silent eviction on every GPU model swap,
         # just unnoticed since Honcho retries quietly in the background
         # rather than surfacing an error to a human.
-        resident_router: "(a1 | orn | qpg | qw6 | goss | q8 | med | qvl | qwe | qwv) & arch & emb & q17"
+        resident_router: "(qpg | q8 | med | qwe | qwv) & arch & emb & q17"
