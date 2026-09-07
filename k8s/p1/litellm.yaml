@@ -147,6 +147,22 @@ data:
     from litellm.integrations.custom_logger import CustomLogger
 
     logger = logging.getLogger("custom_router_hook")
+    # Explicit level + our own handler, not relying on root logger config:
+    # Python's root logger only surfaces WARNING+ by default with no
+    # handlers attached (its "handler of last resort") -- that's exactly why
+    # the earlier failure warnings showed up as bare unstyled text while
+    # LiteLLM's own INFO-level proxy logs (with their timestamp/prefix) come
+    # from a separately configured logger. Without this, the success log
+    # line added below (logger.info, once classification actually started
+    # working) would be silently swallowed the same way -- confirmed 2026-
+    # 09-07: a request went through 200 OK with no failure warning at all,
+    # meaning it worked, but there was no way to see it working.
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        _handler = logging.StreamHandler()
+        _handler.setFormatter(logging.Formatter("%(asctime)s custom_router_hook %(levelname)s: %(message)s"))
+        logger.addHandler(_handler)
+        logger.propagate = False
 
     ARCH_ROUTER_URL = "http://llama-swap.ai-models.svc.cluster.local:8080/v1/chat/completions"
     ARCH_ROUTER_MODEL = "arch-router-1.5b"
