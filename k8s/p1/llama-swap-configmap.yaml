@@ -429,6 +429,13 @@ data:
       #   cd /data/models/medgemma-1.5-4B
       #   wget https://huggingface.co/unsloth/medgemma-1.5-4b-it-GGUF/resolve/main/medgemma-1.5-4b-it-Q5_K_M.gguf -O medgemma-1.5-4b-it-q5_k_m.gguf
       #   wget https://huggingface.co/unsloth/medgemma-1.5-4b-it-GGUF/resolve/main/mmproj-F16.gguf
+      # --no-jinja -> --jinja FIXED 2026-09-07: llama-server hard-requires
+      # --jinja whenever a request includes a "tools" param, and Hermes (the
+      # only real caller of the medical route) always sends tool/function
+      # definitions -- it's an agent, not a plain chat client. --no-jinja
+      # was carried over without checking that against how this model would
+      # actually be called; every other GPU model in this roster already
+      # runs --jinja for the same reason.
       medgemma-1.5-4b:
         cmd: |
           llama-server
@@ -440,7 +447,7 @@ data:
           -t 8
           --no-mmap
           --flash-attn on
-          --no-jinja
+          --jinja
           -c 32768
         ttl: 300
 
