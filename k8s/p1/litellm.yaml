@@ -350,6 +350,18 @@ data:
                     )
                     resp.raise_for_status()
                     text = resp.json()["choices"][0]["message"]["content"]
+                    # ADDED 2026-09-07: every classification call started
+                    # landing on "other" -- not via the exception branch
+                    # below (which never fired, confirmed via kubectl logs),
+                    # meaning the model answers successfully but the regex
+                    # below stopped matching whatever it's actually saying
+                    # now. We had zero visibility into the raw text before
+                    # this point -- only the final resolved route was ever
+                    # logged. Logging it raw (repr'd, so stray whitespace/
+                    # newlines/quote-style are visible) is the fastest way
+                    # to see the real cause on the next request instead of
+                    # guessing at the regex or the prompt again.
+                    logger.info("arch-router raw response: %r", text)
                     # BUG FIXED 2026-09-07: arch-router-1.5b (Q4_K_M, this
                     # serving setup) reliably answers with single-quoted,
                     # Python-dict-style output -- {'route': 'casual'} -- not
