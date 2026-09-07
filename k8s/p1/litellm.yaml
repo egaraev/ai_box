@@ -141,6 +141,7 @@ data:
     """
     import json
     import logging
+    import re
 
     import httpx
     from litellm.integrations.custom_logger import CustomLogger
@@ -286,7 +287,20 @@ data:
                     )
                     resp.raise_for_status()
                     text = resp.json()["choices"][0]["message"]["content"]
-                    route = json.loads(text).get("route", "other")
+                    # BUG FIXED 2026-09-07: arch-router-1.5b (Q4_K_M, this
+                    # serving setup) reliably answers with single-quoted,
+                    # Python-dict-style output -- {'route': 'casual'} -- not
+                    # strict double-quoted JSON, which made json.loads() fail
+                    # on every single classification with a JSONDecodeError
+                    # (silently falling back to "other" every time, same
+                    # end result as the earlier timeout/context bugs, just a
+                    # different cause). Rather than fight the model's actual
+                    # output format, extract the route value directly with a
+                    # regex that accepts either quote style and ignores any
+                    # surrounding text -- more robust than requiring the
+                    # whole response to be parseable JSON in the first place.
+                    match = re.search(r'["\']route["\']\s*:\s*["\']([\w-]+)["\']', text)
+                    route = match.group(1) if match else "other"
             except Exception as exc:  # noqa: BLE001 -- any failure just falls back
                 logger.warning(
                     "arch-router classification failed (%s: %s), defaulting to general chat",
