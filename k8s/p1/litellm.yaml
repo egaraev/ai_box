@@ -235,6 +235,7 @@ data:
             # we can just check for directly.
             if _has_image(messages):
                 data["model"] = ROUTE_TO_MODEL["vision"]
+                logger.info("auto -> vision (image attached) -> %s", data["model"])
                 return data
 
             route = "other"
@@ -265,6 +266,12 @@ data:
                 route = "other"
 
             data["model"] = ROUTE_TO_MODEL.get(route, ROUTE_TO_MODEL["other"])
+            # Success case, logged at INFO specifically so it's visible via
+            # `kubectl logs -n ai-models -l app=litellm` -- otherwise the
+            # only visible signal a caller gets back is the literal string
+            # "auto" (Hermes's status bar showed exactly that and Eldar had
+            # no way to confirm a route actually fired without this).
+            logger.info("auto -> %s -> %s", route, data["model"])
             return data
 
 
