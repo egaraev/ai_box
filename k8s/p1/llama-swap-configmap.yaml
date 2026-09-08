@@ -72,6 +72,39 @@ data:
         # processing/sampling overhead, not the actual layer compute -- so
         # halving to 8 should cost little decode speed while giving arch-
         # router-1.5b real headroom. NOT YET CONFIRMED on aibox.
+        #
+        # -b/-ub ADDED 2026-09-08: this model started intermittently
+        # OOMing live on exactly the same class of failure the 80000-
+        # context test above already hit ("~470MB short on the compute
+        # buffer alone") -- but now at the supposedly-safe 65536, under
+        # real concurrent load. Root-caused via a live nvidia-smi capture
+        # (not guessed): the "~530MB desktop baseline" assumption above is
+        # stale -- real baseline now runs ~700-800MB (Xorg + a couple of
+        # Chromium/Electron processes), PLUS a previously-unaccounted-for
+        # persistent ~420MB held by ComfyUI's idle python3 process the
+        # whole time it's running (confirmed via `ps -p <pid>` and via
+        # testing ComfyUI's own /free endpoint against it live -- /free
+        # made ZERO difference, so that 420MB is the floor cost of
+        # ComfyUI having a live CUDA context at all, not something
+        # reclaimable without stopping the pod). Net: real spare margin
+        # for this model is thinner than the clean-pod benchmark above
+        # ever measured, since that test had none of ComfyUI/media-gen
+        # running yet. Fix attempt (Eldar's choice among 3 real options --
+        # this one over freeing the desktop's VRAM, which is bigger/more
+        # disruptive since aibox's desktop is actively used): -b 512
+        # -ub 128 shrinks the specific compute/graph_reserve buffer that's
+        # been failing to allocate, without touching -c (so Hermes's 64K
+        # floor stays satisfied) or the quant (no quality cost) -- prompt
+        # processing may be modestly slower (more sequential chunks),
+        # generation speed unaffected. Confidence here is MODERATE, not
+        # proven: grounded in a third-party llama.cpp tuning guide's claim
+        # that -b to -ub reduction "meaningfully reduces peak memory," not
+        # a verified-on-this-exact-model test. NOT YET CONFIRMED on aibox
+        # -- after deploying, trigger several reasoning-route messages in
+        # a row (the failure was intermittent, roughly 6/7 attempts before
+        # succeeding once) and watch for "upstream command exited
+        # prematurely" / cudaMalloc OOM in `/logs/stream/upstream` to
+        # actually disappear, not just one lucky success.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B/Qwen3.8-27B-UD-IQ4_XS.gguf
@@ -82,6 +115,7 @@ data:
           -t 8
           --no-mmap
           --parallel 1
+          -b 512 -ub 128
           -fa on
           -c 65536 -ctk q4_0 -ctv q4_0
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
