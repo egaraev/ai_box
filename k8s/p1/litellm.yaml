@@ -127,6 +127,39 @@
 # interaction directly, so this needs a real induced-failure test after
 # deploy (see the P6-adjacent "Cloud aliases + fallback providers" roadmap
 # item), not just a clean-request smoke test.
+#
+# GENERAL AUTO-FALLBACK, ROUND 2 (same day): the round-1 test (scaling
+# llama-swap to 0 replicas, via ArgoCD selfHeal paused on the aibox-p1
+# Application) found a real problem -- the classifier call fails fast
+# (httpx ConnectError, confirming llama-swap really is unreachable), but the
+# actual completion call to the routed model then just HANGS, no fallback,
+# no error, for several minutes. Root cause: LiteLLM's default response
+# timeout is very long (the underlying openai-client default is on the
+# order of 10 minutes) and nothing was set to fail faster, so retries/
+# fallback in round 1 were technically wired correctly but functionally
+# useless in practice -- Eldar's own bar ("redirect to Cloud once model is
+# unavailable, just like we have when image is being generated") wasn't
+# met. Fix: stream_timeout: 20 added per-model below -- LiteLLM's own docs
+# (docs.litellm.ai/docs/proxy/timeout) describe this exact setting as being
+# for aborting a "hanging" provider and retrying/falling over quickly,
+# distinct from the overall `timeout` (deliberately left unset/default --
+# see the 4m45s real-response caveat above, `timeout` bounds the WHOLE
+# response so setting it short risks killing a legitimately slow-but-
+# working generation). stream_timeout only bounds time-to-FIRST-chunk, so a
+# response that's actually streaming tokens (even slowly) is unaffected
+# once it starts. Net expected latency before failover: roughly 2x
+# stream_timeout (one attempt against the original model, one retry, per
+# num_retries: 1) -- not instant like the pre-call busy-flag check (which
+# has zero added latency since it never attempts the local model at all),
+# but close, and vastly better than the multi-minute hang round 1 hit.
+# UNVERIFIED ASSUMPTION, flagged rather than guessed past: stream_timeout
+# only has any effect if the caller's request actually sets stream: true --
+# whether Hermes's requests to LiteLLM do this was NOT confirmed this
+# session (no access to Hermes's own outgoing request body). If Hermes
+# calls non-streaming, this fix will have NO effect and the hang will
+# recur -- the next induced-failure test after deploy needs to watch
+# actual wall-clock time to the fallback firing, not just assume 20s worked
+# because the config looks right.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -143,11 +176,17 @@ data:
           model: openai/qwen3.8-27b-Expert
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
+          # stream_timeout ADDED 2026-09-08 -- see "GENERAL AUTO-FALLBACK,
+          # ROUND 2" comment above. Without this, a genuinely-unreachable
+          # backend just hangs on LiteLLM's long default response timeout
+          # instead of failing fast into the retry/fallback path.
+          stream_timeout: 20
       - model_name: qwen3.8-27b-Expert-Vision
         litellm_params:
           model: openai/qwen3.8-27b-Expert-Vision
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
+          stream_timeout: 20
       - model_name: qwen3-1.7b-cpu
         litellm_params:
           model: openai/qwen3-1.7b-cpu
@@ -174,11 +213,13 @@ data:
           model: openai/llama-3.1-8b
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
+          stream_timeout: 20
       - model_name: medgemma-1.5-4b
         litellm_params:
           model: openai/medgemma-1.5-4b
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
+          stream_timeout: 20
           # ADDED 2026-09-07: this specific unsloth medgemma-1.5-4b GGUF
           # never stops generating on its own -- it keeps emitting literal
           # "<|im_end|>"/"<|im_start|>" as plain text and re-runs the whole
