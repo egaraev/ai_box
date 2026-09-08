@@ -44,6 +44,39 @@ confirmed against a real generated image). Node IDs match that capture:
   71 CLIPTextEncode (negative)
 Only the fields generate_image() actually parameterizes are touched;
 everything else is passed through byte-for-byte from the capture.
+
+DELIVERY (fixed 2026-09-08, third pass -- see git history for the first
+two): confirmed via Hermes's own docs (hermes-agent.nousresearch.com/docs/
+user-guide/features/deliverable-mode) that Hermes does NOT auto-attach
+binary/base64 image content returned from a tool call to the outgoing
+message -- its real mechanism is text-path-based. Live proof this was A
+bug: a real end-to-end test generated a real image (confirmed via
+media-gen-mcp's own logs -- unload, submit, poll, fetch, free all
+succeeded) and Hermes's reply accurately DESCRIBED the image but no photo
+reached Telegram, because the original Image-content return gave the model
+something to see/describe, not a path to mention.
+
+Second pass (return a plain string with the path) assumed the docs page's
+claim that bare-path-mention alone is sufficient. THIS WAS INCOMPLETE:
+Hermes's own source (github.com/NousResearch/hermes-agent PR #27813, which
+added that bare-path feature) says explicitly "Existing MEDIA:<path> tag
+path is untouched; bare-path delivery is the simpler primitive small
+models can use without the tag syntax" -- i.e. there are TWO coexisting,
+independently-documented mechanisms, not one, and per-gateway wiring gaps
+between them are real and precedented (github.com/NousResearch/hermes-agent
+issue #5105: the Signal gateway has the MEDIA: tag parser in code but it
+was never wired into that gateway's actual send path). Rather than bet on
+which one this deployment's Telegram wiring actually uses, generate_image
+now emits BOTH in its returned string: the bare path, and an explicit
+`MEDIA:<path>` line for the model to copy verbatim into its reply. Costs
+nothing, covers either mechanism.
+
+Either way, the file itself still has to physically exist somewhere
+Hermes's own pod can read it: write the fetched bytes to a hostPath volume
+shared with Hermes's own pod (SHARED_OUTPUT_DIR, mounted identically in
+both Deployments -- see k8s/media-gen/media-gen-mcp-deployment.yaml and
+k8s/p3/hermes-agent.yaml). That plumbing is unchanged by this pass --
+only the returned text format changed.
 """
 import asyncio
 import copy
@@ -51,6 +84,7 @@ import logging
 import os
 import random
 import time
+import uuid
 
 import httpx
 import redis.asyncio as redis
@@ -62,7 +96,7 @@ import redis.asyncio as redis
 # ModuleNotFoundError with its own migration-guide message). json_response
 # also moved: it's now a run()/run_streamable_http_async() kwarg, not a
 # constructor kwarg.
-from mcp.server.mcpserver import MCPServer, Image
+from mcp.server.mcpserver import MCPServer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s media-gen-mcp %(levelname)s: %(message)s")
 logger = logging.getLogger("media-gen-mcp")
@@ -70,6 +104,12 @@ logger = logging.getLogger("media-gen-mcp")
 LLAMA_SWAP_URL = os.environ.get("LLAMA_SWAP_URL", "http://llama-swap.ai-models.svc.cluster.local:8080")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://comfyui.ai-models.svc.cluster.local:8188")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis.ai-memory.svc.cluster.local:6379/0")
+# Must be the SAME path inside both this container and hermes-agent's --
+# see the "DELIVERY" note above. A hostPath volume, not a PVC: this is a
+# single-node cluster, so both pods always land on the same node anyway,
+# and hostPath matches the pattern already used for /data/models,
+# /data/comfyui elsewhere in this repo instead of introducing a new PVC.
+SHARED_OUTPUT_DIR = os.environ.get("SHARED_OUTPUT_DIR", "/shared-output")
 
 BUSY_KEY = "media-gen:busy"
 BUSY_TTL_SECONDS = 300  # safety-net only -- the finally block is the primary clear path
@@ -180,7 +220,7 @@ async def generate_image(
     height: int = 1024,
     steps: int = 8,
     seed: int = -1,
-) -> Image:
+) -> str:
     """Generate an image locally with Z-Image Turbo (via ComfyUI on aibox's GPU).
 
     This fully unloads whatever chat model is currently resident to give
@@ -201,6 +241,14 @@ async def generate_image(
             few steps -- more isn't necessarily better).
         seed: Fixed seed for reproducibility. Default -1 picks a random
             seed each call.
+
+    Returns:
+        A short confirmation message containing a `MEDIA:<path>` line for
+        the generated image -- include that line VERBATIM, on its own, in
+        your reply to the user (in addition to whatever else you say) so
+        Hermes's gateway actually attaches the file instead of you just
+        describing the image. This is Hermes's own documented attachment
+        syntax, not something ComfyUI or this tool understands.
     """
     if not prompt or not prompt.strip():
         raise ValueError("prompt must not be empty")
@@ -271,7 +319,18 @@ async def generate_image(
             image_bytes = view_resp.content
             logger.info("fetched output image %s (%d bytes)", image_ref["filename"], len(image_bytes))
 
-            return Image(data=image_bytes, format="png")
+            os.makedirs(SHARED_OUTPUT_DIR, exist_ok=True)
+            out_path = os.path.join(SHARED_OUTPUT_DIR, f"{uuid.uuid4().hex}.png")
+            with open(out_path, "wb") as f:
+                f.write(image_bytes)
+            logger.info("saved image to shared path %s", out_path)
+
+            return (
+                f"Image generated successfully and saved to {out_path}\n\n"
+                f"To actually attach it, include this exact line on its own "
+                f"in your reply (don't just describe the image):\n"
+                f"MEDIA:{out_path}"
+            )
         finally:
             await _free_comfyui_vram(client)
             await _redis.delete(BUSY_KEY)

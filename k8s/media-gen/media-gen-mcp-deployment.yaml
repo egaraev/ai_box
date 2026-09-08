@@ -35,6 +35,26 @@
 # only a manifest change self-triggers; the image itself has to be rebuilt
 # and reimported by hand first, same class of gap as any locally-built image
 # with no registry/CI in front of it).
+#
+# SHARED OUTPUT VOLUME (added 2026-09-08, fixing the "image never reached
+# Telegram" bug): Hermes does not auto-attach binary image content a tool
+# returns -- it only attaches a file whose absolute path it mentions in its
+# own reply text (confirmed via Hermes's own deliverable-mode docs). So
+# generate_image now writes the fetched PNG to /shared-output and returns
+# that path as plain text instead of an MCP Image content block. This only
+# works because the SAME hostPath is also mounted into hermes-agent's own
+# pod at the identical path (k8s/p3/hermes-agent.yaml) -- both pods always
+# land on this cluster's single node, so a hostPath (not a PVC, matching
+# the existing /data/models, /data/comfyui pattern elsewhere in this repo)
+# is the simplest way to actually share a file between two Deployments.
+# type: DirectoryOrCreate means kubelet creates /data/media-gen-output on
+# the host itself on first mount if it doesn't already exist -- no manual
+# `mkdir` needed on aibox first, unlike comfyui/llama-swap's hostPath
+# entries which require the directory to pre-exist. Default kubelet-created
+# permissions (0755) should let hermes-agent's UID 10000 process read files
+# this container (running as root, see its own Dockerfile) writes with
+# Python's default 0644 -- NOT YET CONFIRMED against the live pod, check
+# for a permission error in hermes-agent's logs on first real use.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -68,6 +88,11 @@ spec:
               value: "http://comfyui.ai-models.svc.cluster.local:8188"
             - name: REDIS_URL
               value: "redis://redis.ai-memory.svc.cluster.local:6379/0"
+            - name: SHARED_OUTPUT_DIR
+              value: "/shared-output"
+          volumeMounts:
+            - name: shared-output
+              mountPath: /shared-output
           resources:
             requests:
               cpu: "100m"
@@ -75,6 +100,11 @@ spec:
             limits:
               cpu: "500m"
               memory: "512Mi"
+      volumes:
+        - name: shared-output
+          hostPath:
+            path: /data/media-gen-output
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service

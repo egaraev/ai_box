@@ -348,6 +348,16 @@ spec:
               mountPath: /opt/data
             - name: dshm
               mountPath: /dev/shm
+            # Shared with media-gen-mcp (k8s/media-gen/media-gen-mcp-deployment.yaml)
+            # at the identical path -- see that file's "SHARED OUTPUT VOLUME"
+            # comment. generate_image writes a PNG here and returns its
+            # absolute path as plain text; Hermes's own deliverable-mode
+            # mechanism (not an MCP feature) then attaches whatever file path
+            # it finds mentioned in its own reply text. Without this mount,
+            # the path in the tool's return value points at a file this pod
+            # can't see, and the image silently never reaches Telegram.
+            - name: shared-output
+              mountPath: /shared-output
           resources:
             requests:
               cpu: "500m"
@@ -375,6 +385,15 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1Gi
+        # Same hostPath, same DirectoryOrCreate semantics, as
+        # media-gen-mcp-deployment.yaml -- both pods always land on this
+        # cluster's single node, so this is the simplest way to actually
+        # share a file between two Deployments (matches the existing
+        # /data/models, /data/comfyui pattern elsewhere in this repo).
+        - name: shared-output
+          hostPath:
+            path: /data/media-gen-output
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
