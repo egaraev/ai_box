@@ -1,0 +1,9 @@
+# Verified 2026-09-08 by actually installing into a scratch venv and
+# importing server.py against it (see the top-of-file comment in server.py
+# for why the mcp floor moved from the originally-researched 1.2.0 to 2.0 --
+# FastMCP was renamed MCPServer in mcp 2.x and plain `pip install mcp`
+# already resolves to 2.x today). Tested versions: mcp 2.2.0, httpx 0.28.1,
+# redis 8.1.0.
+mcp>=2.0
+httpx>=0.27
+redis>=5.0

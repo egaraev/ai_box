@@ -118,6 +118,34 @@ kubectl delete pod -n ai-agents -l app=hermes-agent
 kubectl delete pod -n ai-memory -l app=honcho-api -l app=honcho-deriver
 ```
 
+## openrouter-secret (namespace: ai-models)
+
+Backs `OPENROUTER_API_KEY` in `k8s/p1/litellm.yaml`'s litellm Deployment --
+used by the `openrouter-fallback` model_list entry (the uniform cloud
+fallback `custom_router_hook.py` redirects to while the media-gen busy flag
+is set -- see that file's own top comment). Only one namespace needs it,
+unlike `litellm-secret` above -- OpenRouter auth is entirely internal to
+the litellm pod, nothing else calls OpenRouter directly.
+
+The real key already lives in a local `.env` file at the repo root on
+aibox (`~/repos/aibox-platform/.env`, git-ignored) -- this reads it
+straight from there so the value never has to be typed into a chat with
+the assistant or committed anywhere:
+
+```sh
+OPENROUTER_KEY=$(grep '^OPENROUTER_API_KEY=' ~/repos/aibox-platform/.env | head -1 | cut -d= -f2- | tr -d '"')
+kubectl create namespace ai-models --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic openrouter-secret \
+  --namespace ai-models \
+  --from-literal=OPENROUTER_API_KEY="$OPENROUTER_KEY"
+```
+
+Rotating: update the key in `.env` first, then re-run the block above
+(`kubectl create secret` fails if the Secret already exists -- use
+`kubectl create secret ... --dry-run=client -o yaml | kubectl apply -f -`
+instead, or `kubectl delete secret openrouter-secret -n ai-models` first),
+then `kubectl delete pod -n ai-models -l app=litellm`.
+
 ## Order of operations for a fresh cluster
 
 1. Run the three `kubectl create secret` blocks above (they also create the

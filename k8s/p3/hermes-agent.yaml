@@ -161,15 +161,32 @@ data:
       # instead of one Deployment each.
       multiplex_profiles: true
 
-    # MCP bus scaffold. Hermes's own MCP *client* (this config block) is the
-    # "MCP bus" for this architecture -- there's no separate broker process
-    # to stand up. Left empty until specific integrations are identified;
-    # add entries here (stdio or HTTP servers) as they come, e.g.:
+    # MCP bus. Hermes's own MCP *client* (this config block) is the "MCP
+    # bus" for this architecture -- there's no separate broker process to
+    # stand up. First real entry, added for the Media Generation roadmap
+    # item: media-gen-mcp (apps/media-gen-mcp/, deployed by
+    # k8s/media-gen/media-gen-mcp-deployment.yaml) is an HTTP MCP server
+    # exposing one tool, generate_image, that calls ComfyUI directly and
+    # coordinates the full-swap GPU handoff with the chat path via a Redis
+    # busy flag -- see that server's own top-of-file comment for the full
+    # design. Confirmed real integration mechanism (Hermes's own docs,
+    # github.com/NousResearch/hermes-agent): mcp_servers entries take either
+    # a stdio (command/args/env) or HTTP (url/headers) transport; this one
+    # uses HTTP since it's an in-cluster Service, not a local process.
+    # NOT YET VERIFIED: "/mcp" is FastMCP's documented default mount path
+    # for transport="streamable-http" (mcp.server.fastmcp.FastMCP.run), but
+    # this hasn't been confirmed against a real request/response yet --
+    # check `kubectl logs -n ai-agents deploy/hermes-agent` on first use and
+    # adjust the path here (redeploy dance below) if Hermes can't reach it.
     #
-    # mcp_servers:
-    #   filesystem:
-    #     command: "npx"
-    #     args: ["-y", "@modelcontextprotocol/server-filesystem", "/opt/data/workspace"]
+    # REMEMBER: config.yaml is seed-once (see the top-of-file comment) -- a
+    # `git push` + ArgoCD sync alone does NOT make Hermes pick this up. Also
+    # required, once per change to this block:
+    #   kubectl exec -n ai-agents deploy/hermes-agent -- rm /opt/data/config.yaml
+    #   kubectl delete pod -n ai-agents -l app=hermes-agent
+    mcp_servers:
+      media-gen:
+        url: "http://media-gen-mcp.ai-mcp.svc.cluster.local:8000/mcp"
 
     # No platforms.api_server block here on purpose -- the API server is
     # controlled entirely by env vars (API_SERVER_ENABLED/_HOST/_KEY/_CORS_ORIGINS,

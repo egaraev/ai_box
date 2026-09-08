@@ -60,6 +60,37 @@
 # ai-models and ai-agents and Hermes's pod had OPENAI_API_KEY set correctly.
 # general_settings.allow_requests_on_db_unavailable: true (below) is
 # LiteLLM's own documented flag for exactly this DB-less deployment shape.
+#
+# MEDIA-GEN BUSY FALLBACK (added 2026-09-08): custom_router_hook.py now
+# checks the same Redis busy flag (media-gen:busy, ai-memory Redis) that
+# apps/media-gen-mcp/server.py sets/clears -- see that file's own top
+# comment for the full "full swap" design. When set, EVERY "auto" request
+# (all four routes uniformly, per Eldar's own simplification -- "i do not
+# think there will be so many, this must simplify the setup") is redirected
+# to the openrouter-fallback model_list entry below instead of a local
+# model, before the classifier even runs. Real OPENROUTER_API_KEY now
+# exists (Eldar added it to a local .env on aibox, kept out of git) -- see
+# k8s/secrets/README.md's openrouter-secret section for how it gets into
+# the cluster (kubectl, never through this repo or the assistant).
+# Model choice: Eldar picked "Google Gemini Flash tier" via AskUserQuestion
+# (cheap, fast, multimodal -- vision requests share this one fallback too,
+# so it can't be text-only). NOT FULLY VERIFIED: the pinned slug
+# (google/gemini-3.8-flash) came from fetching openrouter.ai/models/
+# /collections/vision-models live, and two separate fetches of that page
+# returned slightly different version numbers (3.7 vs 3.8) -- OpenRouter's
+# catalog moves fast. Spot-check the exact slug against
+# https://openrouter.ai/models before/at first real deploy and fix the
+# model_list entry below if it's changed.
+# ALSO NOT YET VERIFIED: whether redis-py is bundled in the
+# ghcr.io/berriai/litellm:main-latest image -- LiteLLM's proxy documents
+# Redis caching as a first-class built-in feature so it's very likely
+# present, but this wasn't confirmed against the live pod (no shell access
+# to it from this session). custom_router_hook.py's redis import is wrapped
+# in try/except specifically for this -- if it's missing, the busy-check
+# just logs a warning and always returns "not busy" (degrades to today's
+# behavior) instead of crashing the whole router. Check
+# `kubectl logs -n ai-models -l app=litellm` on first deploy for an
+# ImportError, same discipline as the P3 honcho-ai risk.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -133,6 +164,18 @@ data:
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
 
+      # Uniform cloud fallback for the media-gen busy window -- see the
+      # top-of-file "MEDIA-GEN BUSY FALLBACK" comment for the full story,
+      # including the caveat that this exact model slug needs a spot-check
+      # against openrouter.ai/models before/at first real deploy.
+      # LiteLLM's native OpenRouter provider (model: "openrouter/<slug>")
+      # doesn't need api_base -- it defaults to https://openrouter.ai/api/v1
+      # on its own.
+      - model_name: openrouter-fallback
+        litellm_params:
+          model: openrouter/google/gemini-3.8-flash
+          api_key: os.environ/OPENROUTER_API_KEY
+
     litellm_settings:
       callbacks: ["custom_router_hook.proxy_handler_instance"]
 
@@ -166,6 +209,19 @@ data:
     import httpx
     from litellm.integrations.custom_logger import CustomLogger
 
+    # ADDED 2026-09-08: guarded import -- NOT CONFIRMED that redis-py ships
+    # inside ghcr.io/berriai/litellm:main-latest (see top-of-file comment).
+    # If it's missing, _media_gen_busy() below just always returns False
+    # (busy-check degrades to a no-op, today's routing behavior) instead of
+    # this whole module failing to import and taking the router down.
+    try:
+        import redis.asyncio as _redis_lib
+        _REDIS = _redis_lib.from_url(
+            "redis://redis.ai-memory.svc.cluster.local:6379/0", decode_responses=True
+        )
+    except Exception:  # noqa: BLE001 -- ImportError or a bad URL, either way degrade gracefully
+        _REDIS = None
+
     logger = logging.getLogger("custom_router_hook")
     # Explicit level + our own handler, not relying on root logger config:
     # Python's root logger only surfaces WARNING+ by default with no
@@ -183,6 +239,27 @@ data:
         _handler.setFormatter(logging.Formatter("%(asctime)s custom_router_hook %(levelname)s: %(message)s"))
         logger.addHandler(_handler)
         logger.propagate = False
+
+    # media-gen:busy is set/cleared by apps/media-gen-mcp/server.py around
+    # every ComfyUI generation (full-swap GPU handoff -- see that file's own
+    # top comment). Checked first, before the deterministic image-check and
+    # before spending an arch-router-1.5b classifier call on a request that's
+    # going to cloud regardless -- ALL four routes redirect uniformly when
+    # busy (Eldar's own simplification), so there's nothing left to classify.
+    MEDIA_GEN_BUSY_KEY = "media-gen:busy"
+    BUSY_FALLBACK_MODEL = "openrouter-fallback"
+
+    async def _media_gen_busy():
+        if _REDIS is None:
+            return False
+        try:
+            return bool(await _REDIS.get(MEDIA_GEN_BUSY_KEY))
+        except Exception as exc:  # noqa: BLE001 -- Redis unreachable etc. -- never block chat on this
+            logger.warning(
+                "media-gen busy check failed (%s: %s) -- assuming not busy",
+                type(exc).__name__, exc,
+            )
+            return False
 
     ARCH_ROUTER_URL = "http://llama-swap.ai-models.svc.cluster.local:8080/v1/chat/completions"
     ARCH_ROUTER_MODEL = "arch-router-1.5b"
@@ -290,6 +367,15 @@ data:
     class ArchRouterHook(CustomLogger):
         async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
             if data.get("model") != "auto":
+                return data
+
+            # Checked before anything else -- if ComfyUI has the GPU, every
+            # route (including vision/medical) goes to the cloud fallback
+            # uniformly, so there's no point running the image check or
+            # paying for a classifier call first.
+            if await _media_gen_busy():
+                data["model"] = BUSY_FALLBACK_MODEL
+                logger.info("auto -> %s (media-gen busy)", BUSY_FALLBACK_MODEL)
                 return data
 
             messages = data.get("messages", [])
@@ -429,6 +515,11 @@ spec:
                 secretKeyRef:
                   name: litellm-secret
                   key: master_key
+            - name: OPENROUTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openrouter-secret
+                  key: OPENROUTER_API_KEY
           volumeMounts:
             - name: config
               mountPath: /litellm-extra

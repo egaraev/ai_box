@@ -1,0 +1,90 @@
+# media-gen-mcp: the HTTP MCP server Hermes calls to generate images. Source
+# lives in apps/media-gen-mcp/ in this repo (not published anywhere) --
+# built and run locally on aibox, no registry involved, same reasoning as
+# every other single-node piece of this build: one more moving part
+# (registry auth, a push step, image scanning) with no real benefit on a
+# single-user home cluster. imagePullPolicy: IfNotPresent means k3s/containerd
+# uses whatever image tag already exists on the node instead of trying (and
+# failing) to pull it from Docker Hub.
+#
+# Talks directly to ComfyUI's native API (k8s/media-gen/comfyui-deployment.yaml)
+# -- no OpenAI-compatible bridge in front of it; see apps/media-gen-mcp/server.py's
+# top-of-file comment for why that bridge layer was dropped (the originally
+# planned pnyxai/comfyui-openai-api tool doesn't exist, and this ComfyUI
+# version has no native /v1/images/generations endpoint either -- both
+# confirmed empirically, not assumed).
+#
+# Coordination with the chat path (llama-swap / LiteLLM) is entirely via the
+# Redis busy flag this pod sets/clears (media-gen:busy in the ai-memory
+# Redis, k8s/p2/redis.yaml) -- there is no direct connection between this
+# Deployment and litellm.yaml's custom_router_hook.py (task still to be
+# built) beyond that shared key. Runs in ai-mcp per README.md's namespace
+# table ("All MCP server pods").
+#
+# BUILD / DEPLOY (run on aibox, not from this repo checkout on its own --
+# the image has to exist as a local containerd/docker image on the node
+# before this Deployment can start):
+#   cd ~/repos/aibox-platform/apps/media-gen-mcp
+#   docker build -t media-gen-mcp:latest .
+#   # k3s uses containerd, not the docker daemon, by default -- import the
+#   # image into containerd's own store so IfNotPresent can find it:
+#   docker save media-gen-mcp:latest | sudo k3s ctr images import -
+# After editing server.py, repeat both of those, then:
+#   kubectl rollout restart deployment/media-gen-mcp -n ai-mcp
+# (a plain `git push` + ArgoCD sync alone does NOT pick up a code change --
+# only a manifest change self-triggers; the image itself has to be rebuilt
+# and reimported by hand first, same class of gap as any locally-built image
+# with no registry/CI in front of it).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: media-gen-mcp
+  namespace: ai-mcp
+  labels:
+    app: media-gen-mcp
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # only one generation job should ever be in flight
+  selector:
+    matchLabels:
+      app: media-gen-mcp
+  template:
+    metadata:
+      labels:
+        app: media-gen-mcp
+    spec:
+      containers:
+        - name: media-gen-mcp
+          image: media-gen-mcp:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: LLAMA_SWAP_URL
+              value: "http://llama-swap.ai-models.svc.cluster.local:8080"
+            - name: COMFYUI_URL
+              value: "http://comfyui.ai-models.svc.cluster.local:8188"
+            - name: REDIS_URL
+              value: "redis://redis.ai-memory.svc.cluster.local:6379/0"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: media-gen-mcp
+  namespace: ai-mcp
+spec:
+  selector:
+    app: media-gen-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http

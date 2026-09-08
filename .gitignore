@@ -11,5 +11,6 @@ k8s/secrets/*
 *.secret.yaml
 .env
 .env.*
+.venv
 *.pem
 *.key
