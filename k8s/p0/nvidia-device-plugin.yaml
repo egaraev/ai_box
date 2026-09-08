@@ -1,6 +1,39 @@
 # Official NVIDIA k8s-device-plugin DaemonSet — advertises nvidia.com/gpu as an
 # allocatable resource on the node so pods can request it. Without this, the
 # GPU is usable at the containerd/runtime level but invisible to the scheduler.
+#
+# 2026-09-08: time-slicing enabled (see the ConfigMap below) so the node
+# advertises nvidia.com/gpu:2 instead of :1. This is a SCHEDULING workaround,
+# not a real capacity increase — aibox only has one physical RTX 5070 Ti.
+# Without this, llama-swap's pod holds the single nvidia.com/gpu claim for its
+# entire lifetime and a second pod (ComfyUI, for image/video/music gen) would
+# sit Pending forever with "Insufficient nvidia.com/gpu". With replicas: 2,
+# both pods can be scheduled onto the same physical card; actual VRAM/compute
+# time-sharing between them is still handled entirely by the app-level
+# busy-flag + llama-swap-unload coordination (see litellm.yaml /
+# custom_router_hook.py), NOT by anything the device plugin does — the device
+# plugin only lies to the scheduler about how many "slots" exist. Do not raise
+# replicas beyond 2 without a real reason: more slots just means more pods
+# CAN be scheduled concurrently, it doesn't create more VRAM.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-device-plugin-config
+  namespace: kube-system
+data:
+  config.yaml: |
+    version: v1
+    sharing:
+      timeSlicing:
+        # false: keep the resource named "nvidia.com/gpu" (not renamed to
+        # e.g. nvidia.com/gpu.shared) so llama-swap's existing manifest,
+        # which already requests nvidia.com/gpu: 1, needs no changes.
+        renameByDefault: false
+        failRequestsGreaterThanOne: false
+        resources:
+        - name: nvidia.com/gpu
+          replicas: 2
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -29,6 +62,8 @@ spec:
       containers:
       - image: nvcr.io/nvidia/k8s-device-plugin:v0.20.0
         name: nvidia-device-plugin-ctr
+        args:
+        - --config-file=/etc/nvidia-device-plugin/config.yaml
         env: []
         securityContext:
           allowPrivilegeEscalation: false
@@ -37,8 +72,13 @@ spec:
         volumeMounts:
         - name: kubelet-device-plugins-dir
           mountPath: /var/lib/kubelet/device-plugins
+        - name: device-plugin-config
+          mountPath: /etc/nvidia-device-plugin
       volumes:
       - name: kubelet-device-plugins-dir
         hostPath:
           path: /var/lib/kubelet/device-plugins
           type: Directory
+      - name: device-plugin-config
+        configMap:
+          name: nvidia-device-plugin-config
