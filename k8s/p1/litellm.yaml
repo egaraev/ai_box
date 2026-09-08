@@ -91,6 +91,42 @@
 # behavior) instead of crashing the whole router. Check
 # `kubectl logs -n ai-models -l app=litellm` on first deploy for an
 # ImportError, same discipline as the P3 honcho-ai risk.
+#
+# GENERAL AUTO-FALLBACK (added 2026-09-08): closes a real gap the media-gen
+# busy-fallback above does NOT cover -- that one only fires when Redis's
+# media-gen:busy flag is set. If a local model fails for any OTHER reason
+# (the qwen3.8-27b-Expert intermittent CUDA OOM investigated the same day is
+# exactly this case), the request just hard-fails back to the caller as a
+# real 500 -- no fallback. Fixed using LiteLLM's own native Router-level
+# fallback mechanism (litellm_settings.num_retries + .fallbacks below), NOT
+# more custom_router_hook.py code -- unlike the busy-check (which has to run
+# BEFORE the classifier even picks a model), this is a documented,
+# officially-supported LiteLLM proxy feature that operates AFTER a real
+# model is chosen and its completion call fails
+# (docs.litellm.ai/docs/proxy/reliability). Confirmed via that doc before
+# writing this: fallbacks cover generic backend errors (429, 500, etc, not
+# just RateLimitError/ContextWindowExceededError), and trigger only after
+# num_retries attempts against the ORIGINAL model are exhausted -- so an
+# intermittent OOM gets one real local retry (llama-swap reloading the
+# crashed process) before ever touching the cloud, matching the "prefer
+# local, cloud only as last resort" intent everywhere else in this file.
+# num_retries: 1 chosen deliberately low -- each retry means a full model
+# reload for a 27B GGUF (real time cost), so this isn't a lever to push
+# higher without good reason. request_timeout/allowed_fails/cooldown_time
+# deliberately NOT set -- a real observed reasoning-route response took
+# 4m45s to legitimately complete (large output, not stuck), so any global
+# request_timeout risks killing genuinely slow-but-successful generations;
+# cooldown_time/allowed_fails mainly matter for load-balancing across
+# multiple deployments of the same model_name, which doesn't apply here
+# (exactly one llama-swap backend per model). Applies to all 4 real routed
+# models uniformly, same simplification principle as the busy-fallback
+# above. NOT YET CONFIRMED on aibox: whether the interaction between
+# custom_router_hook.py's async_pre_call_hook (which rewrites "auto" to a
+# real model name before the Router ever sees it) and this native fallback
+# actually fires as expected -- LiteLLM's own docs don't address that
+# interaction directly, so this needs a real induced-failure test after
+# deploy (see the P6-adjacent "Cloud aliases + fallback providers" roadmap
+# item), not just a clean-request smoke test.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -189,6 +225,16 @@ data:
 
     litellm_settings:
       callbacks: ["custom_router_hook.proxy_handler_instance"]
+      # GENERAL AUTO-FALLBACK -- see the top-of-file comment for the full
+      # story. One local retry, then fail over to the same cloud model the
+      # media-gen busy-fallback already uses, for any of the 4 real routed
+      # models.
+      num_retries: 1
+      fallbacks:
+        - qwen3.8-27b-Expert: ["openrouter-fallback"]
+        - qwen3.8-27b-Expert-Vision: ["openrouter-fallback"]
+        - llama-3.1-8b: ["openrouter-fallback"]
+        - medgemma-1.5-4b: ["openrouter-fallback"]
 
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
