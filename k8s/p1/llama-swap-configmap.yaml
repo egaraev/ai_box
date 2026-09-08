@@ -344,6 +344,27 @@ data:
       # before it actually breaks mid-conversation. -ctk/-ctv q8_0 already
       # in place, so the larger context should be cheap. NOT YET CONFIRMED
       # on aibox (no live failure here yet to retest against).
+      #
+      # THAT BUMP WAS A NO-OP -- found live 2026-09-08 via a real
+      # ContextWindowExceededError over Telegram, chased down via
+      # llama-swap's /logs/stream/upstream endpoint: this specific GGUF
+      # (unsloth/Qwen3-8B-Q4_K_M) has a real trained context of only
+      # 40960 tokens, and llama-server silently caps -c 65536 back down
+      # to that rather than honoring it ("the slot context (65536)
+      # exceeds the training context of the model (40960) - capping").
+      # A YaRN rope-scaling fix (--rope-scaling yarn --rope-scale 1.6
+      # --yarn-orig-ctx 40960) was tried and confirmed to be real,
+      # correct llama.cpp syntax, but REVERTED 2026-09-08 (Eldar's call)
+      # in favor of retiring this route to a model with genuine native
+      # long context instead.
+      #
+      # SWAPPED OUT 2026-09-08: llama-3.1-8b (below) now serves the
+      # "casual" route in litellm.yaml instead -- see that model's own
+      # comment for why. This entry is kept defined but UNWIRED (no
+      # route in litellm.yaml points at it anymore) rather than deleted,
+      # in case it's wanted again later; still silently capped at 40960
+      # if anything does call it directly by name. Ask before removing
+      # outright.
       qwen3-8b:
         cmd: |
           llama-server
@@ -359,6 +380,50 @@ data:
           -ctv q8_0
           -c 65536
           --reasoning-budget 1024
+        ttl: 300
+
+      # ── ADDED 2026-09-08: replaces qwen3-8b as the "casual" route
+      # destination (see litellm.yaml's llama-3.1-8b model_list entry
+      # and ROUTE_TO_MODEL comment for the full reasoning). Real GGUF
+      # confirmed present on aibox via device bridge (4,920,739,200
+      # bytes, matches unsloth's published Q4_K_M size):
+      #   mkdir -p /data/models/llama-3.1-8B
+      #   cd /data/models/llama-3.1-8B
+      #   wget https://huggingface.co/unsloth/Llama-3.1-8B-Instruct-GGUF/resolve/main/Llama-3.1-8B-Instruct-Q4_K_M.gguf
+      # -c 65536: matches every other active router destination's
+      # Hermes-64K-floor target. Genuinely safe here -- Llama-3.1-8B-
+      # Instruct's real native context is 131072 (Meta's own official
+      # rope_scaling baked into the release, confirmed via its actual
+      # config.json: max_position_embeddings 131072), so 65536 is well
+      # inside the trained range with no capping risk, unlike qwen3-8b's
+      # 40960 native ceiling. No --reasoning-budget: unlike Qwen3, Llama
+      # 3.1 isn't a hybrid-thinking model, so that flag doesn't apply
+      # here. --parallel 1 added (unlike qwen3-8b, which never had it):
+      # llama-server defaults to n_slots=4 otherwise, which was already
+      # identified as a real CPU-thread-oversubscription risk for
+      # qwen3.8-27b-Expert/Expert-Vision above -- added here from the
+      # start rather than waiting to hit the same bug again. Text-only
+      # model, no --mmproj (vision stays covered by
+      # qwen3.8-27b-Expert-Vision). NOT YET CONFIRMED on aibox -- after
+      # deploying, verify via `kubectl exec ... ps aux | grep llama-3.1`
+      # that the live process actually shows these flags (see the
+      # aibox-config-restart-verify skill), and a real casual-route
+      # Telegram message to confirm tool calling still works end-to-end.
+      llama-3.1-8b:
+        cmd: |
+          llama-server
+          -m /models/llama-3.1-8B/Llama-3.1-8B-Instruct-Q4_K_M.gguf
+          --port ${PORT}
+          --host 0.0.0.0
+          --n-gpu-layers 99
+          -t 8
+          --no-mmap
+          --parallel 1
+          --flash-attn on
+          --jinja
+          -ctk q8_0
+          -ctv q8_0
+          -c 65536
         ttl: 300
 
       # ── ACTIVATED 2026-09-07: wired into LiteLLM's semantic router as the
@@ -544,6 +609,7 @@ data:
       vars:
         qpg:  qwopus-general
         q8:   qwen3-8b
+        l31:  llama-3.1-8b
         med:  medgemma-1.5-4b
         arch: arch-router-1.5b
         qwe:  qwen3.8-27b-Expert
@@ -577,4 +643,12 @@ data:
         # been hitting this same silent eviction on every GPU model swap,
         # just unnoticed since Honcho retries quietly in the background
         # rather than surfacing an error to a human.
-        resident_router: "(qpg | q8 | med | qwe | qwv) & arch & emb & q17"
+        # l31 (llama-3.1-8b) ADDED 2026-09-08 to the OR-group when it
+        # replaced qwen3-8b as the "casual" route destination -- same
+        # reasoning as every other GPU route here: without it, arch/emb/
+        # q17 would get silently evicted whenever this model is the one
+        # actually loaded. q8 (qwen3-8b) itself is left in place even
+        # though no route points at it anymore (see its own comment
+        # above) -- harmless if unused, and avoids the same silent-
+        # eviction bug resurfacing if it's ever called directly again.
+        resident_router: "(qpg | q8 | l31 | med | qwe | qwv) & arch & emb & q17"

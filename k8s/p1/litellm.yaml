@@ -122,9 +122,20 @@ data:
           model: openai/nomic-embed-text-v1.5
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
-      - model_name: qwen3-8b
+      - model_name: llama-3.1-8b
+        # SWAPPED IN 2026-09-08, replacing qwen3-8b as the "casual" route
+        # destination -- qwen3-8b's GGUF turned out to have a real trained
+        # context of only 40960 tokens (llama-server silently capped -c
+        # 65536 back down to it, confirmed live), below Hermes's 64K
+        # floor. Llama-3.1-8B-Instruct has a genuine native 131072-token
+        # context (Meta's own official rope_scaling, not a patch) and
+        # llama.cpp's own function-calling docs list it as natively/
+        # reliably tool-call-capable -- no YaRN/rope hackery needed here.
+        # See k8s/p1/llama-swap-configmap.yaml's llama-3.1-8b entry for
+        # the actual server command. qwen3-8b's model entry there is kept
+        # (unwired, not deleted) in case it's wanted again later.
         litellm_params:
-          model: openai/qwen3-8b
+          model: openai/llama-3.1-8b
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
       - model_name: medgemma-1.5-4b
@@ -334,7 +345,10 @@ data:
     ROUTE_TO_MODEL = {
         "vision": "qwen3.8-27b-Expert-Vision",
         "medical": "medgemma-1.5-4b",
-        "casual": "qwen3-8b",
+        # "casual" CHANGED 2026-09-08: qwen3-8b -> llama-3.1-8b (see the
+        # litellm_params comment on the llama-3.1-8b model_list entry
+        # above for why).
+        "casual": "llama-3.1-8b",
         "reasoning": "qwen3.8-27b-Expert",
         "other": "qwen3.8-27b-Expert",
     }
