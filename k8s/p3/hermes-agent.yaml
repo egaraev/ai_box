@@ -312,7 +312,29 @@ spec:
               mountPath: /seed/env
       containers:
         - name: hermes-agent
-          image: nousresearch/hermes-agent:latest
+          # Pinned to the exact digest that was running as of 2026-09-08,
+          # not the floating :latest tag. An unpinned :latest tag defaults
+          # to imagePullPolicy: Always in k8s -- found the hard way: a plain
+          # `kubectl rollout restart` (done only to reconnect Hermes to
+          # media-gen-mcp after adding generate_video) silently pulled
+          # whatever NousResearch had published as "latest" at that moment,
+          # jumping this box's config schema from v0 to a version the
+          # running config predated by ~2 years' worth of migrations. That
+          # broke chat entirely (bogus `Skill View("media")` tool calls,
+          # `[/OUT-OF-BAND USER MESSAGE]` template leaking into replies)
+          # until fixed via `hermes doctor --fix` (config migrated cleanly,
+          # v0->v41, additive only -- confirmed via its own output before
+          # trusting it). A version bump should be a deliberate, reviewed
+          # choice -- not a side effect of restarting for an unrelated
+          # reason -- so this pins the digest and sets IfNotPresent so a
+          # restart reuses exactly this image already cached on the node.
+          # To upgrade deliberately: pull the new digest, update this line,
+          # then run `hermes doctor --fix` (or `hermes setup`) BEFORE
+          # assuming chat still works, and reread this comment's config-
+          # version lesson at k8s/p3/hermes-agent.yaml's git blame if this
+          # breaks again.
+          image: nousresearch/hermes-agent@sha256:6305b1b16f945aa7201610d9e3ba69b9e26d57ee00693215cc8ff36c0b4c3616
+          imagePullPolicy: IfNotPresent
           args: ["gateway", "run"]
           ports:
             - containerPort: 8642
