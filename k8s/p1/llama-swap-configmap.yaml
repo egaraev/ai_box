@@ -99,12 +99,44 @@ data:
         # generation speed unaffected. Confidence here is MODERATE, not
         # proven: grounded in a third-party llama.cpp tuning guide's claim
         # that -b to -ub reduction "meaningfully reduces peak memory," not
-        # a verified-on-this-exact-model test. NOT YET CONFIRMED on aibox
+        # a verified-on-this-exact-model test.
+        #
+        # ROUND 1 RESULT (-ub 128), confirmed via /logs/stream/upstream:
+        # PARTIAL effect only. The failing compute buffer did shrink (from
+        # 400.28 MiB / 419725568 bytes down to 292.27 MiB / 306467072
+        # bytes -- so the lever is real), but stress-testing (5-6 back-to-
+        # back reasoning-route messages) still hit repeated "upstream
+        # command exited prematurely" / cudaMalloc OOM failures, arguably
+        # more consistently than the pre-fix baseline. One capture also
+        # showed a second, different-looking failure right at the end --
+        # a raw CUDA error inside ggml_cuda_kernel_can_use_pdl (a
+        # cudaFuncGetAttributes call, part of llama.cpp's Programmatic
+        # Dependent Launch support, see github.com/ggml-org/llama.cpp
+        # issue #15479). That function only queries kernel metadata and
+        # doesn't itself allocate real memory, so per the well-documented
+        # CUDA "OOM on an unrelated call" pattern (e.g. ggml-org/llama.cpp
+        # issue #1866, forums.developer.nvidia.com/t/cudafuncgetattributes
+        # -failed-out-of-memory/112473), this is read as the SAME
+        # underlying OOM leaving the CUDA context sticky, not a distinct
+        # bug introduced by -ub -- next unrelated CUDA call after a failed
+        # cudaMalloc can surface the same error. Conclusion: -ub 128 alone
+        # is insufficient given current real VRAM pressure.
+        #
+        # ROUND 2 (2026-09-08): Eldar's choice -- push the batch size
+        # lever further before considering the bigger structural fix
+        # (freeing the desktop's VRAM baseline via nvidia-drm.modeset=0).
+        # -ub 128 -> 64 (halved again; -b left at 512, -ub is the one that
+        # actually bounds the graph_reserve/compute buffer size per the
+        # same tuning-guide source as round 1). NOT YET CONFIRMED on aibox
         # -- after deploying, trigger several reasoning-route messages in
-        # a row (the failure was intermittent, roughly 6/7 attempts before
-        # succeeding once) and watch for "upstream command exited
-        # prematurely" / cudaMalloc OOM in `/logs/stream/upstream` to
-        # actually disappear, not just one lucky success.
+        # a row (same test as round 1) and watch /logs/stream/upstream for
+        # cudaMalloc OOM / the ggml_cuda_kernel_can_use_pdl error to
+        # actually stop recurring, not just one lucky success. If -ub 64
+        # still isn't enough, the remaining options are: push -ub lower
+        # still (e.g. 32, though returns are diminishing and very small
+        # -ub can start costing real prompt-processing speed), or take the
+        # bigger swing at the actual non-model VRAM baseline (desktop +
+        # ComfyUI idle floor).
         cmd: |
           llama-server
           -m /models/qwen3.8-27B/Qwen3.8-27B-UD-IQ4_XS.gguf
@@ -115,7 +147,7 @@ data:
           -t 8
           --no-mmap
           --parallel 1
-          -b 512 -ub 128
+          -b 512 -ub 64
           -fa on
           -c 65536 -ctk q4_0 -ctv q4_0
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
