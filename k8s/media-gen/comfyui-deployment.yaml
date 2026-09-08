@@ -1,0 +1,86 @@
+# ComfyUI: image/video generation backend for the Media Generation roadmap
+# item. Runs mmartial/comfyui-nvidia-docker (ships CUDA 12.9 + a recent
+# PyTorch — Blackwell/RTX 50-series (sm_120) capable, requires NVIDIA driver
+# 570+, which aibox already runs). GPU access is time-sliced alongside
+# llama-swap — see k8s/p0/nvidia-device-plugin.yaml — since this is a
+# single-GPU box. That only lets both pods SCHEDULE at once; it does not
+# make them share VRAM automatically. llama-swap and ComfyUI are not meant
+# to actually generate concurrently — that's coordinated at the app level
+# (a busy-flag + llama-swap's /api/models/unload endpoint, still to be
+# built), not by anything in this manifest.
+#
+# Host directories this expects to already exist before first apply (see
+# deploy notes), owned by the uid/gid set in WANTED_UID/WANTED_GID below:
+#   /data/comfyui/basedir/models/checkpoints   <- Z-Image Turbo etc. go here
+#   /data/comfyui/basedir/models/vae
+#   /data/comfyui/basedir/input
+#   /data/comfyui/basedir/output
+#   /data/comfyui/basedir/custom_nodes
+#   /data/comfyui/run                          <- venv + ComfyUI source, container-managed
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comfyui
+  namespace: ai-models
+  labels:
+    app: comfyui
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # only one process should hold the GPU slot at a time
+  selector:
+    matchLabels:
+      app: comfyui
+  template:
+    metadata:
+      labels:
+        app: comfyui
+    spec:
+      runtimeClassName: nvidia
+      containers:
+        - name: comfyui
+          image: mmartial/comfyui-nvidia-docker:ubuntu24_cuda12.9-latest
+          ports:
+            - containerPort: 8188
+              name: http
+          env:
+            - name: WANTED_UID
+              value: "1000"   # verify with `id eldar` on aibox — edit if different
+            - name: WANTED_GID
+              value: "1000"
+            - name: BASE_DIRECTORY
+              value: /basedir
+            - name: SECURITY_LEVEL
+              value: normal
+            - name: USE_UV
+              value: "true"
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: run
+              mountPath: /comfy/mnt
+            - name: basedir
+              mountPath: /basedir
+      volumes:
+        - name: run
+          hostPath:
+            path: /data/comfyui/run
+            type: Directory
+        - name: basedir
+          hostPath:
+            path: /data/comfyui/basedir
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: comfyui
+  namespace: ai-models
+spec:
+  selector:
+    app: comfyui
+  ports:
+    - port: 8188
+      targetPort: 8188
+      name: http

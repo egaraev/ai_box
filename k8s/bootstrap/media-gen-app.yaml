@@ -1,0 +1,30 @@
+# Media Generation Application — ComfyUI (image/video gen backend), and
+# later the OpenAI-compat bridge + ACE-Step. Same pattern as the other phase
+# Applications: ArgoCD watches k8s/media-gen/ in this repo and keeps the
+# cluster in sync automatically. Not phase-numbered (P-something) since it
+# was inserted into the roadmap ahead of P6 rather than following the strict
+# P0-P9 sequence.
+#
+# One-time manual apply required, same as every other bootstrap Application:
+#   kubectl apply -f k8s/bootstrap/media-gen-app.yaml
+# After that, syncPolicy.automated takes over for anything under k8s/media-gen/.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aibox-media-gen
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: git@github.com:egaraev/ai_box.git
+    targetRevision: main
+    path: k8s/media-gen
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
