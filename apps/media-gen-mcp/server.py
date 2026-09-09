@@ -120,6 +120,14 @@ SHARED_OUTPUT_DIR = os.environ.get("SHARED_OUTPUT_DIR", "/shared-output")
 BUSY_KEY = "media-gen:busy"
 BUSY_TTL_SECONDS = 300  # safety-net only -- the finally block is the primary clear path
 
+# How long to wait after ComfyUI's /free returns 200 before actually clearing
+# the busy flag -- see the comment on this constant's use in generate_video's
+# finally block (real live OOM this fixed, 2026-09-09) for the full story.
+# Short version: /free returning 200 doesn't mean CUDA has actually finished
+# reclaiming the VRAM yet, and clearing busy immediately lets the very next
+# chat request race that teardown straight into an OOM.
+VRAM_FREE_SETTLE_SECONDS = 3
+
 # Poll /history for up to this long before giving up. Z-Image Turbo took
 # ~18-20s end-to-end in the verified live test; 180s leaves generous room
 # for a cold model load on top of that without hanging forever on a stuck job.
@@ -606,6 +614,12 @@ async def generate_image(
             # media-gen:busy stuck in Redis for the rest of its TTL even
             # though this finally block did technically run).
             await asyncio.shield(_free_comfyui_vram(client))
+            # VRAM_FREE_SETTLE_SECONDS (added 2026-09-09, real live failure):
+            # see the comment on this same line in generate_video below for
+            # the full story -- same race, same fix, applies here too since
+            # this finally block has the identical free-then-clear-busy
+            # shape.
+            await asyncio.sleep(VRAM_FREE_SETTLE_SECONDS)
             await asyncio.shield(_redis.delete(BUSY_KEY))
 
 
@@ -778,6 +792,29 @@ async def generate_video(
             # stuck lock here means up to 15 minutes of every chat message
             # AND every future generate call getting bounced, not 5.
             await asyncio.shield(_free_comfyui_vram(client))
+            # VRAM_FREE_SETTLE_SECONDS (added 2026-09-09, real live failure):
+            # a real "Spacemarine... soccer" generation succeeded end to
+            # end (video saved, ComfyUI's /free returned 200) but the very
+            # next chat message Hermes sent (to compose its reply) got
+            # routed to the now-"not busy" local qwen3.8-27b-Expert and
+            # immediately OOM'd trying to allocate ~12.7GB -- confirmed via
+            # llama-swap's own upstream log (cudaMalloc failed: out of
+            # memory), repeated across 3-4 retries. Root cause: ComfyUI's
+            # /free endpoint returning 200 does not mean CUDA has actually
+            # finished reclaiming the ~10-13GB it was holding (cudaFree /
+            # GGML allocator teardown for a buffer that size isn't
+            # instant) -- clearing the busy flag immediately let the very
+            # next request race that teardown. media-gen-mcp's own
+            # Deployment requests no nvidia.com/gpu (see
+            # k8s/media-gen/media-gen-mcp-deployment.yaml), so it has no
+            # nvidia-smi/pynvml visibility to poll for "actually free" --
+            # a short fixed settle delay before releasing the lock is the
+            # pragmatic fix instead of adding GPU access to this pod just
+            # for that check. Not empirically tuned to a minimum -- 3s is a
+            # conservative first guess; shorten it later if it proves to
+            # always be more than enough, lengthen it if the race is still
+            # observed.
+            await asyncio.sleep(VRAM_FREE_SETTLE_SECONDS)
             await asyncio.shield(_redis.delete(BUSY_KEY))
 
 
