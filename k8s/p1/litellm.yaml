@@ -139,7 +139,8 @@
 # fallback in round 1 were technically wired correctly but functionally
 # useless in practice -- Eldar's own bar ("redirect to Cloud once model is
 # unavailable, just like we have when image is being generated") wasn't
-# met. Fix: stream_timeout: 20 added per-model below -- LiteLLM's own docs
+# met. Fix: stream_timeout added per-model below (originally 20, raised to
+# 60 on 2026-09-09 -- see that dated note further down) -- LiteLLM's own docs
 # (docs.litellm.ai/docs/proxy/timeout) describe this exact setting as being
 # for aborting a "hanging" provider and retrying/falling over quickly,
 # distinct from the overall `timeout` (deliberately left unset/default --
@@ -160,6 +161,24 @@
 # recur -- the next induced-failure test after deploy needs to watch
 # actual wall-clock time to the fallback firing, not just assume 20s worked
 # because the config looks right.
+#
+# stream_timeout 20 -> 60, 2026-09-09: 20s turned out too short for a real
+# cold start, not just for detecting a genuinely-dead backend. Confirmed
+# live -- after restarting llama-swap's pod (clearing a VRAM-thrash state
+# from a heavy video-gen run earlier that day), completely unrelated plain
+# chat messages ("Hey bro", "I am chilling") kept failing with a raw 500
+# ("Timeout on reading data from socket"), repeated across multiple
+# attempts a Telegram user sent manually. Root cause: llama-swap's own DSL
+# policy wants arch-router-1.5b + an embedding model + the main 27B model
+# resident together for one chat turn, and loading that whole set from
+# cold (nothing warm right after a restart) can plainly take longer than
+# 20s to produce a first streamed token -- so every request tripped
+# stream_timeout, used its one retry (num_retries: 1) while the load was
+# still in progress, and surfaced a raw failure straight to the user since
+# general fallback-to-cloud is deliberately OFF here (see the top-of-file
+# fallback comment). 60s keeps real-dead-backend detection reasonably fast
+# (still nowhere near the old multi-minute hang this was added to fix)
+# while giving a cold multi-model load realistic room to finish.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -180,13 +199,13 @@ data:
           # ROUND 2" comment above. Without this, a genuinely-unreachable
           # backend just hangs on LiteLLM's long default response timeout
           # instead of failing fast into the retry/fallback path.
-          stream_timeout: 20
+          stream_timeout: 60
       - model_name: qwen3.8-27b-Expert-Vision
         litellm_params:
           model: openai/qwen3.8-27b-Expert-Vision
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
-          stream_timeout: 20
+          stream_timeout: 60
       - model_name: qwen3-1.7b-cpu
         litellm_params:
           model: openai/qwen3-1.7b-cpu
@@ -217,13 +236,13 @@ data:
           model: openai/hermes3-llama-3.1-8b
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
-          stream_timeout: 20
+          stream_timeout: 60
       - model_name: medgemma-1.5-4b
         litellm_params:
           model: openai/medgemma-1.5-4b
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
-          stream_timeout: 20
+          stream_timeout: 60
           # ADDED 2026-09-07: this specific unsloth medgemma-1.5-4b GGUF
           # never stops generating on its own -- it keeps emitting literal
           # "<|im_end|>"/"<|im_start|>" as plain text and re-runs the whole
