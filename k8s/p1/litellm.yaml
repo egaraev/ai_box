@@ -646,6 +646,15 @@ data:
                     if m.get("role") not in ("system", "tool")
                     and isinstance(m.get("content"), str)
                 ][-6:]
+                # DIAGNOSTIC RE-ADDED 2026-09-09: the tool-role exclusion
+                # above (real bug, real fix, kept) did NOT actually resolve
+                # search-flow requests still landing on reasoning/other --
+                # confirmed live post-fix, pod verified fresh via configmap
+                # + on-disk grep + pod age. So there's still something else
+                # going on; logging the real post-filter convo again to see
+                # it rather than guess a second time. Remove again once
+                # this is actually resolved.
+                logger.info("arch-router convo (post tool-filter): %r", convo)
                 prompt = SYSTEM_PROMPT.format(
                     routes=json.dumps(ROUTES), conversation=json.dumps(convo)
                 )
