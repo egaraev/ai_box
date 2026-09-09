@@ -373,6 +373,41 @@ spec:
                 secretKeyRef:
                   name: litellm-secret
                   key: master_key
+            # HERMES_STREAM_STALE_TIMEOUT (added 2026-09-09, real production
+            # bug): Hermes's own stale-stream-detector has two timeout
+            # branches -- a generous 900s for a "local" LLM endpoint, and a
+            # much shorter, context-scaled "cloud" budget (nominal 180s base)
+            # for everything else. Which branch applies is decided by
+            # agent/model_metadata.py's is_local_endpoint(base_url), and that
+            # function is Docker/Podman/Lima-only: it checks
+            # _LOCAL_HOSTS = (localhost, 127.0.0.1, ::1, 0.0.0.0) and
+            # _CONTAINER_LOCAL_SUFFIXES = (.docker.internal,
+            # .containers.internal, .lima.internal), plus RFC-1918/loopback/
+            # link-local/Tailscale-CGNAT IPs and unqualified (no-dot)
+            # hostnames -- it has zero awareness of Kubernetes'
+            # *.svc.cluster.local DNS pattern. Our base_url above,
+            # litellm.ai-models.svc.cluster.local, matches none of that, so
+            # is_local_endpoint() always returns False and every single chat
+            # request here has been silently running under the short "cloud"
+            # timeout, never the intended 900s local one. Confirmed live by
+            # reading model_metadata.py and chat_completion_helpers.py
+            # directly on this pod (v0.21.1) while reproducing a real
+            # Telegram chat cutoff at a precise, repeated ~20.0s HTTP 499
+            # (client closed the connection) -- llama-swap's own logs showed
+            # requests that were still actively serving getting dropped from
+            # the Hermes side exactly at that mark.
+            #
+            # Can't durably patch Hermes's own vendored source (wiped on any
+            # image upgrade), but chat_completion_helpers.py's
+            # _configured_stale_base() reads this env var BEFORE the broken
+            # is_local_endpoint() branch even runs, and the "cloud" path only
+            # ever scales this value UP for very large contexts (>50k/100k
+            # estimated tokens), never down -- so setting it directly gives
+            # every request the long patience the local branch was always
+            # supposed to grant, regardless of the endpoint-detection bug.
+            # 900 matches the local branch's own hardcoded default.
+            - name: HERMES_STREAM_STALE_TIMEOUT
+              value: "900"
           envFrom:
             - secretRef:
                 name: hermes-env
