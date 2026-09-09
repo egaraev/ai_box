@@ -270,16 +270,31 @@ data:
 
     litellm_settings:
       callbacks: ["custom_router_hook.proxy_handler_instance"]
-      # GENERAL AUTO-FALLBACK -- see the top-of-file comment for the full
-      # story. One local retry, then fail over to the same cloud model the
-      # media-gen busy-fallback already uses, for any of the 4 real routed
-      # models.
-      num_retries: 1
-      fallbacks:
-        - qwen3.8-27b-Expert: ["openrouter-fallback"]
-        - qwen3.8-27b-Expert-Vision: ["openrouter-fallback"]
-        - hermes3-llama-3.1-8b: ["openrouter-fallback"]
-        - medgemma-1.5-4b: ["openrouter-fallback"]
+      # GENERAL AUTO-FALLBACK -- TEMPORARILY DISABLED 2026-09-09 (Eldar's
+      # explicit request, while actively testing local-LLM tool-calling
+      # behavior post the casual-route model swap): with this on, a local
+      # model timing out or erroring silently fails over to cloud, which
+      # was masking exactly the kind of local bug we're hunting right now
+      # -- no way to tell from the outside whether a reply came from the
+      # local model or the cloud fallback without digging into logs (hit
+      # this for real testing hermes3-llama-3.1-8b: first "hey bro" test
+      # cold-load-timed-out and silently answered from openrouter-fallback
+      # instead, which would have read as "bug fixed" if not double-checked).
+      # Commented out, not removed -- re-enable by uncommenting
+      # num_retries/fallbacks below once testing is done, see the top-of-
+      # file comment for the full original story.
+      # Does NOT affect the separate media-gen busy-flag redirect
+      # (custom_router_hook.py's _media_gen_busy() check below, look for
+      # "data[\"model\"] = BUSY_FALLBACK_MODEL") -- that's a direct
+      # data["model"] override in the pre-call hook itself, independent of
+      # this fallbacks: block, and stays fully active: a VRAM-busy-from-
+      # image/video-gen request still redirects to cloud exactly as before.
+      # num_retries: 1
+      # fallbacks:
+      #   - qwen3.8-27b-Expert: ["openrouter-fallback"]
+      #   - qwen3.8-27b-Expert-Vision: ["openrouter-fallback"]
+      #   - hermes3-llama-3.1-8b: ["openrouter-fallback"]
+      #   - medgemma-1.5-4b: ["openrouter-fallback"]
 
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
