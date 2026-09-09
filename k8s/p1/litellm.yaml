@@ -528,6 +528,19 @@ data:
     # in an unrelated sentence) just mean an occasional casual message
     # gets the slower, more careful model, which is a safe failure
     # direction, not a broken one.
+    #
+    # BUG FOUND + FIXED same day, live testing: originally scanned EVERY
+    # role="user" message in the whole conversation, not just the latest
+    # one -- so a single earlier "think deeply about X" test message stayed
+    # matched on every later, completely unrelated turn in that same
+    # conversation (confirmed live: a plain "what's the weather in Baku"
+    # follow-up got forced to reasoning twice in the same exchange, with no
+    # trigger phrase anywhere in that actual request). A deterministic
+    # per-request check has to judge THIS request, not conversation
+    # history. Fixed to only look at the single most recent user-role
+    # message. logger.info added on match (phrase + a content snippet) so
+    # a future false-positive shows exactly what matched instead of being
+    # guessed at again.
     DEEP_REASONING_TRIGGERS = (
         "think deeply", "think carefully", "think hard", "reason through",
         "analyze in depth", "analyse in depth", "be thorough",
@@ -538,14 +551,21 @@ data:
 
 
     def _wants_deep_reasoning(messages):
-        for m in messages:
+        for m in reversed(messages):
             if m.get("role") != "user":
                 continue
             content = m.get("content")
             if isinstance(content, str):
                 lowered = content.lower()
-                if any(t in lowered for t in DEEP_REASONING_TRIGGERS):
-                    return True
+                for t in DEEP_REASONING_TRIGGERS:
+                    if t in lowered:
+                        logger.info(
+                            "deep-reasoning trigger matched %r in: %r",
+                            t, content[:200],
+                        )
+                        return True
+            # only the latest user turn counts -- stop here either way
+            return False
         return False
 
 
