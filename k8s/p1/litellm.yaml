@@ -620,27 +620,32 @@ data:
                 # Arch-Router only needs the recent human/assistant turns to
                 # classify intent, not an agent's full system prompt -- drop
                 # system messages and cap to the last few turns.
+                #
+                # SECOND BUG FIXED 2026-09-09, ROOT-CAUSED via a diagnostic
+                # log of the real convo array (kept temporarily, then
+                # removed once this confirmed it -- see git history if
+                # needed again): role="tool" messages were NOT excluded by
+                # the filter above (their content is a plain string, same
+                # as a normal turn, so isinstance(str) let them straight
+                # through) -- live evidence: a live weather-search follow-up
+                # question sent the classifier `[assistant:'',
+                # tool:<huge raw weather-API JSON>, assistant:'Barcelona
+                # today...', user:'what's the weather in Warsaw?',
+                # assistant:'', tool:<huge raw weather-API JSON>]` as its
+                # last-6-message window -- two giant raw JSON blobs
+                # completely dominating the window, the actual human
+                # question buried in the middle, and the LAST message the
+                # classifier saw being raw tool telemetry, not a real
+                # conversational turn. Unsurprising a 1.5B model answered
+                # "other" on that. Same fix as the system-message bug above,
+                # same reasoning: the classifier needs real human/assistant
+                # turns, not tool output. Excludes "tool" from the filter.
                 convo = [
                     {"role": m.get("role"), "content": m.get("content")}
                     for m in messages
-                    if m.get("role") != "system" and isinstance(m.get("content"), str)
+                    if m.get("role") not in ("system", "tool")
+                    and isinstance(m.get("content"), str)
                 ][-6:]
-                # DIAGNOSTIC ADDED 2026-09-09, investigating why tool-flow
-                # follow-up requests (e.g. a search query after a tool call)
-                # keep landing on "other" instead of "casual" even though
-                # arch-router-1.5b genuinely answers "other" (confirmed via
-                # the raw-response log below, not an exception fallback) --
-                # only the RESOLVED route was ever logged before this, not
-                # what the classifier was actually shown. This line shows
-                # the real convo array going into the prompt so we can see
-                # directly whether role="tool" messages (their content is
-                # usually a string -- raw search-result JSON/text -- so the
-                # isinstance(str) filter above does NOT drop them) are
-                # flooding the classifier's limited context with tool
-                # output instead of the actual human request. Remove once
-                # this is root-caused and fixed, don't leave it logging
-                # forever.
-                logger.info("arch-router convo: %r", convo)
                 prompt = SYSTEM_PROMPT.format(
                     routes=json.dumps(ROUTES), conversation=json.dumps(convo)
                 )
