@@ -184,9 +184,24 @@ data:
     # required, once per change to this block:
     #   kubectl exec -n ai-agents deploy/hermes-agent -- rm /opt/data/config.yaml
     #   kubectl delete pod -n ai-agents -l app=hermes-agent
+    # timeout (added 2026-09-09, real production failure): Hermes's
+    # mcp_servers.<name>.timeout defaults to 300s per server if unset
+    # (confirmed against Hermes's own MCP config reference docs) -- this bit
+    # generate_video specifically. A real "Spacemarine... playing soccer"
+    # call ran the character-expansion LLM call (~30-50s) plus the full
+    # Wan2.2 two-pass sampling and got killed client-side at exactly 300.0s
+    # while ComfyUI was still working (Hermes's own self-improvement loop
+    # then patched around it with raw ComfyUI /history polling via
+    # Execute Code, rather than the real fix). server.py's own
+    # VIDEO_POLL_TIMEOUT_SECONDS (600s) already assumes generation can
+    # legitimately take up to 10 minutes, so the 300s client default was
+    # always going to fire first regardless of anything on the ComfyUI
+    # side. Set comfortably above that 600s server-side ceiling so Hermes
+    # never gives up before media-gen-mcp itself would.
     mcp_servers:
       media-gen:
         url: "http://media-gen-mcp.ai-mcp.svc.cluster.local:8000/mcp"
+        timeout: 900
 
     # No platforms.api_server block here on purpose -- the API server is
     # controlled entirely by env vars (API_SERVER_ENABLED/_HOST/_KEY/_CORS_ORIGINS,
