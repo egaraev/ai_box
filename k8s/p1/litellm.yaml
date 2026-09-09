@@ -640,20 +640,25 @@ data:
                 # "other" on that. Same fix as the system-message bug above,
                 # same reasoning: the classifier needs real human/assistant
                 # turns, not tool output. Excludes "tool" from the filter.
+                # THIRD BUG FIXED 2026-09-09, ROOT-CAUSED via the re-added
+                # convo diagnostic below (live evidence this time, pod
+                # restart confirmed via a genuinely new pod name): a
+                # tool-call-only assistant turn has empty string content
+                # ("") -- that passes isinstance(str) same as real text, so
+                # it wasn't excluded either. Live example: the classifier's
+                # last-6 window for a real "what's the weather in Gdansk?"
+                # follow-up ended with an empty assistant turn (the
+                # tool-call-in-progress stub) as the LAST item, one slot
+                # after the actual question -- the classifier's most recent
+                # impression of the conversation was a blank line, not the
+                # real request. Also drops empty/whitespace-only content.
                 convo = [
                     {"role": m.get("role"), "content": m.get("content")}
                     for m in messages
                     if m.get("role") not in ("system", "tool")
                     and isinstance(m.get("content"), str)
+                    and m.get("content").strip()
                 ][-6:]
-                # DIAGNOSTIC RE-ADDED 2026-09-09: the tool-role exclusion
-                # above (real bug, real fix, kept) did NOT actually resolve
-                # search-flow requests still landing on reasoning/other --
-                # confirmed live post-fix, pod verified fresh via configmap
-                # + on-disk grep + pod age. So there's still something else
-                # going on; logging the real post-filter convo again to see
-                # it rather than guess a second time. Remove again once
-                # this is actually resolved.
                 logger.info("arch-router convo (post tool-filter): %r", convo)
                 prompt = SYSTEM_PROMPT.format(
                     routes=json.dumps(ROUTES), conversation=json.dumps(convo)
