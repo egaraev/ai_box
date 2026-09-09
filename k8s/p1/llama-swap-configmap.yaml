@@ -475,10 +475,70 @@ data:
       # that the live process actually shows these flags (see the
       # aibox-config-restart-verify skill), and a real casual-route
       # Telegram message to confirm tool calling still works end-to-end.
+      # SWAPPED OUT 2026-09-09: hermes3-llama-3.1-8b (below) now serves the
+      # "casual" route instead. Root cause (found live via kubectl logs on
+      # both media-gen-mcp -- unrelated bug found the same week -- and
+      # litellm/hermes-agent): every casual-route message that made Hermes
+      # reach for its `clarify` tool came back malformed (`questions` sent
+      # as a JSON-string instead of a real array), which llama-swap/litellm
+      # then failed to parse ("OpenAIException - The model produced output
+      # that does not match the expected peg-native format"), burning a
+      # ~10-20s retry-and-recover cycle on plain chit-chat like "hey bro".
+      # Diagnosis: vanilla Meta Llama-3.1-8B-Instruct's native tool-calling
+      # syntax is its own python_tag/ipython builtin-tool format, not the
+      # <tool_call>{json}</tool_call> XML+JSON convention Hermes Agent (and
+      # the "peg-native" grammar llama-swap builds from its tool schemas)
+      # expects -- so it was fighting an unfamiliar format on every call,
+      # not just complex ones. This entry is kept (unwired, not deleted) in
+      # case it's wanted again later -- same treatment as qwen3-8b above.
       llama-3.1-8b:
         cmd: |
           llama-server
           -m /models/llama-3.1-8B/Llama-3.1-8B-Instruct-Q4_K_M.gguf
+          --port ${PORT}
+          --host 0.0.0.0
+          --n-gpu-layers 99
+          -t 8
+          --no-mmap
+          --parallel 1
+          --flash-attn on
+          --jinja
+          -ctk q8_0
+          -ctv q8_0
+          -c 65536
+        ttl: 300
+
+      # ── ADDED 2026-09-09: replaces llama-3.1-8b as the "casual" route
+      # destination (see litellm.yaml's hermes3-llama-3.1-8b model_list
+      # entry and ROUTE_TO_MODEL comment). NousResearch's own Hermes-3
+      # fine-tune of the same Llama-3.1-8B base -- picked over the
+      # alternative candidate found in research (Llama-3-Groq-8B-Tool-Use,
+      # 89.06% BFCL, real published benchmark) because it's the direct
+      # lineage match to Hermes Agent's own <tool_call>{json}</tool_call>
+      # convention (same vendor, github.com/NousResearch/Hermes-Function-
+      # Calling documents this exact format). Same Q4_K_M quant, same
+      # 4.92GB size as the outgoing llama-3.1-8b -- deliberately picked to
+      # keep the resident-model VRAM budget unchanged given how thin the
+      # margins turned out to be during this week's OOM investigation.
+      # Download:
+      #   mkdir -p /data/models/hermes3-llama-3.1-8B
+      #   cd /data/models/hermes3-llama-3.1-8B
+      #   wget https://huggingface.co/NousResearch/Hermes-3-Llama-3.1-8B-GGUF/resolve/main/Hermes-3-Llama-3.1-8B.Q4_K_M.gguf
+      # -c 65536: NOT YET CONFIRMED against this GGUF's real n_ctx_train --
+      # research couldn't confirm the fine-tune preserved Llama-3.1's
+      # native 131072 context (unlike qwen3-8b, whose advertised context
+      # turned out silently capped -- same check applies here). After
+      # deploying, check this model's own startup log for an
+      # "n_ctx_train"/"capping" warning before trusting -c 65536 holds.
+      # Neither candidate model's own docs demonstrated array-typed tool
+      # parameters specifically (only simple strings in their examples) --
+      # this fixes the *format* mismatch with real evidence behind it, but
+      # the array-specific failure mode itself still needs a real
+      # `clarify`-triggering test post-deploy to confirm, not assume.
+      hermes3-llama-3.1-8b:
+        cmd: |
+          llama-server
+          -m /models/hermes3-llama-3.1-8B/Hermes-3-Llama-3.1-8B.Q4_K_M.gguf
           --port ${PORT}
           --host 0.0.0.0
           --n-gpu-layers 99
@@ -676,6 +736,7 @@ data:
         qpg:  qwopus-general
         q8:   qwen3-8b
         l31:  llama-3.1-8b
+        h31:  hermes3-llama-3.1-8b
         med:  medgemma-1.5-4b
         arch: arch-router-1.5b
         qwe:  qwen3.8-27b-Expert
@@ -717,4 +778,8 @@ data:
         # though no route points at it anymore (see its own comment
         # above) -- harmless if unused, and avoids the same silent-
         # eviction bug resurfacing if it's ever called directly again.
-        resident_router: "(qpg | q8 | l31 | med | qwe | qwv) & arch & emb & q17"
+        # h31 (hermes3-llama-3.1-8b) SWAPPED IN 2026-09-09 for l31, same
+        # OR-group slot -- l31 itself stays listed here too (like q8) so
+        # arch/emb/q17 don't get evicted if it's ever called directly
+        # again despite no route pointing at it.
+        resident_router: "(qpg | q8 | l31 | h31 | med | qwe | qwv) & arch & emb & q17"

@@ -197,20 +197,24 @@ data:
           model: openai/nomic-embed-text-v1.5
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
-      - model_name: llama-3.1-8b
-        # SWAPPED IN 2026-09-08, replacing qwen3-8b as the "casual" route
-        # destination -- qwen3-8b's GGUF turned out to have a real trained
-        # context of only 40960 tokens (llama-server silently capped -c
-        # 65536 back down to it, confirmed live), below Hermes's 64K
-        # floor. Llama-3.1-8B-Instruct has a genuine native 131072-token
-        # context (Meta's own official rope_scaling, not a patch) and
-        # llama.cpp's own function-calling docs list it as natively/
-        # reliably tool-call-capable -- no YaRN/rope hackery needed here.
-        # See k8s/p1/llama-swap-configmap.yaml's llama-3.1-8b entry for
-        # the actual server command. qwen3-8b's model entry there is kept
-        # (unwired, not deleted) in case it's wanted again later.
+      - model_name: hermes3-llama-3.1-8b
+        # SWAPPED IN 2026-09-09, replacing llama-3.1-8b as the "casual"
+        # route destination -- llama-3.1-8b's own tool-calling format
+        # (Meta's python_tag/ipython builtin-tool syntax) doesn't match
+        # the <tool_call>{json}</tool_call> convention Hermes Agent's
+        # "peg-native" grammar expects, and it was reliably mangling
+        # Hermes's `clarify` tool's array-shaped `questions` param on
+        # ordinary casual chat (confirmed live via hermes-agent + litellm
+        # logs -- "OpenAIException - The model produced output that does
+        # not match the expected peg-native format"). NousResearch's own
+        # Hermes-3 fine-tune of the same Llama-3.1-8B base is the direct
+        # lineage match for that convention. See
+        # k8s/p1/llama-swap-configmap.yaml's hermes3-llama-3.1-8b entry
+        # for the actual server command and the real download URL.
+        # llama-3.1-8b's model entry there is kept (unwired, not deleted)
+        # in case it's wanted again later -- same treatment as qwen3-8b.
         litellm_params:
-          model: openai/llama-3.1-8b
+          model: openai/hermes3-llama-3.1-8b
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
           stream_timeout: 20
@@ -274,7 +278,7 @@ data:
       fallbacks:
         - qwen3.8-27b-Expert: ["openrouter-fallback"]
         - qwen3.8-27b-Expert-Vision: ["openrouter-fallback"]
-        - llama-3.1-8b: ["openrouter-fallback"]
+        - hermes3-llama-3.1-8b: ["openrouter-fallback"]
         - medgemma-1.5-4b: ["openrouter-fallback"]
 
     general_settings:
@@ -432,10 +436,11 @@ data:
     ROUTE_TO_MODEL = {
         "vision": "qwen3.8-27b-Expert-Vision",
         "medical": "medgemma-1.5-4b",
-        # "casual" CHANGED 2026-09-08: qwen3-8b -> llama-3.1-8b (see the
-        # litellm_params comment on the llama-3.1-8b model_list entry
-        # above for why).
-        "casual": "llama-3.1-8b",
+        # "casual" CHANGED 2026-09-09: llama-3.1-8b -> hermes3-llama-3.1-8b
+        # (see the litellm_params comment on the hermes3-llama-3.1-8b
+        # model_list entry above for why). Previously changed 2026-09-08:
+        # qwen3-8b -> llama-3.1-8b, for an unrelated context-length reason.
+        "casual": "hermes3-llama-3.1-8b",
         "reasoning": "qwen3.8-27b-Expert",
         "other": "qwen3.8-27b-Expert",
     }
