@@ -417,33 +417,65 @@ data:
             ),
         },
         {
+            # WIDENED 2026-09-09 (Eldar's explicit request): "casual" used
+            # to mean just greetings/small talk, so most everyday traffic
+            # (general discussion, language practice, quick searches) fell
+            # through to "reasoning" -> the 27B model -> a real 30-50s wait
+            # for stuff that didn't need it. hermes3-llama-3.1-8b is fast
+            # AND (since the 2026-09-09 swap) follows Hermes's tool-call
+            # format correctly, so it's fine for tool-using casual requests
+            # too, not just plain text. Goal: make this the everyday
+            # workhorse route, reasoning the exception -- not the reverse.
             "name": "casual",
             "description": (
-                "A quick, simple, easy, or regular everyday message -- a "
-                "greeting, a lookup, a basic definition, small talk, or "
-                "anything else that clearly doesn't need deep reasoning or "
-                "careful judgment. Examples: 'hey', 'what's up', 'morning, "
-                "how's it going', 'thanks!', 'all good, you?', 'lol nice', "
-                "'what time is it in Tokyo'. A short greeting or casual "
-                "remark belongs here even if it isn't a perfect textbook "
-                "example -- don't escalate a plain hello just because "
-                "it's brief or informal."
+                "Everyday conversational traffic that doesn't need deep "
+                "analysis or careful multi-step judgment -- this is the "
+                "default workhorse route, not just greetings. Covers: "
+                "small talk and greetings; quick factual lookups with one "
+                "clear answer (capitals, unit conversions, 'what time is "
+                "it in Tokyo'); simple web searches that just relay a "
+                "single result ('what's the weather', 'any news on X'); "
+                "casual language-learning practice -- vocabulary, everyday "
+                "grammar questions, short translations, conversational "
+                "drills; a lightweight recommendation ('suggest a movie "
+                "for tonight'); a one-line tech explanation ('what does "
+                "this error mean', 'what's a Kubernetes pod'); basic "
+                "arithmetic or conversions; a short casual summary of a "
+                "message or paragraph; a quick joke or one-liner; a "
+                "how-to with one obvious answer. Examples: 'hey', "
+                "'what's up', 'thanks!', 'how do you say thank you in "
+                "Georgian', \"what's the weather in Katowice\", 'what "
+                "does a 504 error mean', 'suggest a quick dinner idea', "
+                "'how do I unzip a .tar.gz on Linux', 'search for the "
+                "latest news on X'. Route here whenever the request is "
+                "genuinely answerable in one pass without weighing "
+                "tradeoffs or synthesizing multiple sources -- don't "
+                "escalate just because a message is longer than a "
+                "one-liner or uses a tool."
             ),
         },
         {
             "name": "reasoning",
             "description": (
                 "A request with real depth, complexity, or substance -- "
-                "writing, coding, planning, analysis, multi-step tasks, or "
+                "writing or debugging code, architecture/infra decisions, "
+                "multi-step planning, weighing tradeoffs, synthesizing or "
+                "reconciling multiple sources, multi-step math, "
+                "long-document analysis, longer creative writing, or "
                 "anything where being wrong actually matters. Examples: "
                 "'plan a 3-day trip to Tbilisi with a rough budget', "
                 "'write a Python function that merges overlapping "
                 "intervals', 'what's the tradeoff between Postgres and "
-                "SQLite here'. This is the fallback ONLY when a request "
-                "genuinely has real substance to it and doesn't fit "
-                "vision/medical/casual -- not a default for short or "
-                "casual-sounding messages just because the classifier "
-                "isn't fully certain."
+                "SQLite here', 'compare these three job offers'. This is "
+                "the fallback whenever a request genuinely has real "
+                "substance to it and doesn't fit vision/medical/casual -- "
+                "not a default for short or casual-sounding messages just "
+                "because the classifier isn't fully certain. (Explicit "
+                "'think deeply' / 'be thorough' / 'step by step' style "
+                "requests never even reach this classifier -- they're "
+                "caught by a deterministic keyword check earlier in the "
+                "hook and routed straight here, see "
+                "_wants_deep_reasoning below.)"
             ),
         },
     ]
@@ -485,6 +517,38 @@ data:
         return False
 
 
+    # ADDED 2026-09-09, alongside widening "casual" (see the ROUTES comment
+    # above): an explicit "go deep" instruction should never be at the
+    # mercy of a 1.5B classifier's semantic judgment -- if the user says
+    # "think deeply", they should always get the 27B model, not "probably".
+    # Same deterministic-fast-path pattern as _has_image above: checked
+    # BEFORE the classifier call, so it also saves a classifier round-trip
+    # on these. Substring match on the lowercased text, not a regex --
+    # simple and good enough; false positives (a trigger phrase appearing
+    # in an unrelated sentence) just mean an occasional casual message
+    # gets the slower, more careful model, which is a safe failure
+    # direction, not a broken one.
+    DEEP_REASONING_TRIGGERS = (
+        "think deeply", "think carefully", "think hard", "reason through",
+        "analyze in depth", "analyse in depth", "be thorough",
+        "thorough analysis", "step by step", "step-by-step", "deep dive",
+        "in detail", "don't rush", "do not rush", "take your time",
+        "double check", "double-check", "carefully consider",
+    )
+
+
+    def _wants_deep_reasoning(messages):
+        for m in messages:
+            if m.get("role") != "user":
+                continue
+            content = m.get("content")
+            if isinstance(content, str):
+                lowered = content.lower()
+                if any(t in lowered for t in DEEP_REASONING_TRIGGERS):
+                    return True
+        return False
+
+
     class ArchRouterHook(CustomLogger):
         async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
             if data.get("model") != "auto":
@@ -507,6 +571,18 @@ data:
             if _has_image(messages):
                 data["model"] = ROUTE_TO_MODEL["vision"]
                 logger.info("auto -> vision (image attached) -> %s", data["model"])
+                return data
+
+            # Deterministic fast path, same idea as the image check above:
+            # an explicit "think deeply" / "be thorough" / "step by step"
+            # style instruction always goes to the 27B model, no classifier
+            # judgment call involved. See DEEP_REASONING_TRIGGERS above.
+            if _wants_deep_reasoning(messages):
+                data["model"] = ROUTE_TO_MODEL["reasoning"]
+                logger.info(
+                    "auto -> reasoning (explicit deep-thought keyword) -> %s",
+                    data["model"],
+                )
                 return data
 
             route = "other"
