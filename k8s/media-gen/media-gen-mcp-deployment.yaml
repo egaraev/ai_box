@@ -36,6 +36,14 @@
 # and reimported by hand first, same class of gap as any locally-built image
 # with no registry/CI in front of it).
 #
+# When THIS FILE itself changes (env vars, the RBAC objects below, etc, not
+# just server.py) -- `kubectl apply -f` it directly (or let ArgoCD sync
+# k8s/media-gen the normal way) in addition to any image rebuild:
+#   kubectl apply -f k8s/media-gen/media-gen-mcp-deployment.yaml
+# The RBAC objects (ServiceAccount/Role/RoleBinding, added 2026-09-09 for
+# _restart_comfyui_and_wait_ready) only take effect once this manifest is
+# actually applied -- rebuilding the image alone does nothing for them.
+#
 # SHARED OUTPUT VOLUME (added 2026-09-08, fixing the "image never reached
 # Telegram" bug): Hermes does not auto-attach binary image content a tool
 # returns -- it only attaches a file whose absolute path it mentions in its
@@ -55,6 +63,19 @@
 # this container (running as root, see its own Dockerfile) writes with
 # Python's default 0644 -- NOT YET CONFIRMED against the live pod, check
 # for a permission error in hermes-agent's logs on first real use.
+# Dedicated ServiceAccount (added 2026-09-09, GGUF stuck-VRAM fix -- see
+# apps/media-gen-mcp/server.py's _restart_comfyui_and_wait_ready) rather
+# than reusing ai-mcp's "default" SA: the Role/RoleBinding below grant
+# permission to delete pods in ai-models, and scoping that to a SA used
+# only by this one Deployment (instead of every future pod in ai-mcp that
+# happens to run as "default") is the cheap, obviously-correct hygiene
+# call even on a single-user cluster.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: media-gen-mcp
+  namespace: ai-mcp
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -74,6 +95,7 @@ spec:
       labels:
         app: media-gen-mcp
     spec:
+      serviceAccountName: media-gen-mcp
       containers:
         - name: media-gen-mcp
           image: media-gen-mcp:latest
@@ -132,3 +154,51 @@ spec:
     - port: 8000
       targetPort: 8000
       name: http
+---
+# RBAC for _restart_comfyui_and_wait_ready (apps/media-gen-mcp/server.py,
+# added 2026-09-09): GGUF-loaded models (Wan2.2's two UnetLoaderGGUF-loaded
+# experts) turned out not to reliably release VRAM through ComfyUI's own
+# /free endpoint -- confirmed via a real live incident (VRAM pinned at
+# 10756MiB for 9+ minutes after /free returned 200) and corroborated by
+# third parties (github.com/1038lab/ComfyUI-QwenVL issue #104;
+# github.com/SeanScripts/ComfyUI-Unload-Model's README). The only
+# mechanism confirmed to actually reclaim it is restarting ComfyUI itself,
+# so generate_video now does that via the Kubernetes API directly (the
+# in-cluster service-account token, not kubectl) instead of trusting
+# /free alone.
+#
+# This Role lives in ai-models (where the ComfyUI pod actually runs), not
+# ai-mcp (where media-gen-mcp runs) -- a cross-namespace RoleBinding is the
+# normal, supported way to grant a ServiceAccount from one namespace
+# permissions scoped to a different namespace; no ClusterRole needed since
+# this only ever needs to touch pods in ai-models.
+#
+# "delete" alone is NOT enough for the label-selector delete the code
+# actually issues (DELETE /api/v1/namespaces/ai-models/pods?labelSelector=
+# app=comfyui) -- that's Kubernetes' "DeleteCollection" operation, which is
+# authorized by the separate "deletecollection" verb. "get"/"list" are
+# included for basic visibility/debugging (kubectl exec ... describe from
+# this SA, if ever needed) even though the current code only calls delete.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: media-gen-mcp-restart-comfyui
+  namespace: ai-models
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete", "deletecollection"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: media-gen-mcp-restart-comfyui
+  namespace: ai-models
+subjects:
+  - kind: ServiceAccount
+    name: media-gen-mcp
+    namespace: ai-mcp
+roleRef:
+  kind: Role
+  name: media-gen-mcp-restart-comfyui
+  apiGroup: rbac.authorization.k8s.io
