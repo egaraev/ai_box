@@ -90,6 +90,20 @@ spec:
               value: "redis://redis.ai-memory.svc.cluster.local:6379/0"
             - name: SHARED_OUTPUT_DIR
               value: "/shared-output"
+            # For generate_video's _expand_character_references (see
+            # apps/media-gen-mcp/server.py) -- calls LiteLLM directly to
+            # translate named-character references into visual descriptions
+            # before submitting to Wan2.2. Same base_url/auth pattern
+            # hermes-agent.yaml and open-webui.yaml already use to reach
+            # LiteLLM (k8s/p1/litellm.yaml): Bearer auth against its
+            # LITELLM_MASTER_KEY, sourced from the same litellm-secret Secret.
+            - name: LITELLM_URL
+              value: "http://litellm.ai-models.svc.cluster.local:4000/v1"
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master_key
           volumeMounts:
             - name: shared-output
               mountPath: /shared-output

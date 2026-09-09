@@ -104,6 +104,12 @@ logger = logging.getLogger("media-gen-mcp")
 LLAMA_SWAP_URL = os.environ.get("LLAMA_SWAP_URL", "http://llama-swap.ai-models.svc.cluster.local:8080")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://comfyui.ai-models.svc.cluster.local:8188")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis.ai-memory.svc.cluster.local:6379/0")
+# For _expand_character_references (see comment above that function). Same
+# base_url/auth pattern hermes-agent.yaml and open-webui.yaml already use to
+# call LiteLLM (k8s/p1/litellm.yaml) -- Bearer auth against its
+# LITELLM_MASTER_KEY, sourced from the same litellm-secret Secret.
+LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm.ai-models.svc.cluster.local:4000/v1")
+LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "")
 # Must be the SAME path inside both this container and hermes-agent's --
 # see the "DELIVERY" note above. A hostPath volume, not a PVC: this is a
 # single-node cluster, so both pods always land on the same node anyway,
@@ -132,6 +138,79 @@ DEFAULT_VIDEO_NEGATIVE_PROMPT = (
     "画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，"
     "静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走，裸露，NSFW"
 )
+
+# Wan2.2 T2V-A14B (like most open video models) has weak-to-no recall of
+# named characters/franchises/celebrities/real people -- confirmed
+# empirically 2026-09-09 against the real deployed graph: the prompt
+# "Spacemarine from Starcraft video game is playing soccer" produced a
+# plain human in a soccer kit, no armor at all. Rewording the SAME request
+# as a plain visual description instead ("hulking armored super-soldier,
+# massive bulky power armor, wide shoulder pauldrons, glowing visor
+# helmet...") produced exactly the intended result on the first try. So
+# generate_video() now runs every prompt through the local expert chat
+# model first (see _expand_character_references below) to do that
+# translation automatically, rather than relying on Eldar or Hermes to
+# phrase every request as a visual description by hand.
+#
+# Bypasses LiteLLM's own "auto" semantic router entirely (k8s/p1/litellm.yaml's
+# custom_router_hook.py, arch-router-1.5b classifying casual/reasoning/etc)
+# -- this is a single one-shot system-prompted rewrite with no conversation
+# history, not a user-facing chat turn, and the classifier was built and
+# tuned for the latter. There's no good reason to gamble a real character's
+# visual accuracy on a 1.5B classifier's guess landing this in the "casual"
+# bucket. Calls the 27B reasoning/expert model directly by its litellm
+# model_list name instead, for reliability over speed.
+VIDEO_PROMPT_EXPANSION_MODEL = "qwen3.8-27b-Expert"
+
+CHARACTER_EXPANSION_SYSTEM_PROMPT = """You rewrite prompts for a text-to-video diffusion model that does NOT reliably recognize named characters, franchises, celebrities, or real people -- it only understands plain visual descriptions (physical build, clothing/armor, colors, distinguishing features, props/weapons).
+
+Rewrite the user's request:
+- If it names a specific character, franchise, celebrity, or real person, REPLACE that name with a detailed visual description of how they actually look (build, outfit/armor, colors, notable features, iconic props/weapons). Do not keep the name itself in the output.
+- Keep everything else in the request unchanged: setting, action, camera/style notes, mood.
+- If the request has no named character/franchise/celebrity/person in it already, return it essentially unchanged -- light cleanup only, do not invent new details.
+- Output ONLY the rewritten prompt text. No preamble, no explanation, no surrounding quotes."""
+
+
+async def _expand_character_references(client: httpx.AsyncClient, prompt: str) -> str:
+    """Best-effort: ask the local expert chat model to translate any named
+    character/franchise/celebrity/real-person reference in `prompt` into a
+    plain visual description (see the comment above
+    CHARACTER_EXPANSION_SYSTEM_PROMPT for why -- Wan2.2 doesn't reliably
+    recognize names). Falls back to the original prompt unchanged on any
+    failure -- this is a quality enhancement, not something that should
+    ever block a video generation.
+    """
+    try:
+        headers = {"Authorization": f"Bearer {LITELLM_API_KEY}"} if LITELLM_API_KEY else {}
+        resp = await client.post(
+            f"{LITELLM_URL}/chat/completions",
+            headers=headers,
+            json={
+                "model": VIDEO_PROMPT_EXPANSION_MODEL,
+                "messages": [
+                    {"role": "system", "content": CHARACTER_EXPANSION_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.4,
+                "max_tokens": 300,
+            },
+            # The expert model is a slow local 27B model (Eldar's own
+            # observation earlier this project: ~30-50s per response on
+            # this box) -- generous, not tuned.
+            timeout=90.0,
+        )
+        resp.raise_for_status()
+        expanded = resp.json()["choices"][0]["message"]["content"].strip()
+        if not expanded:
+            raise ValueError("expert model returned empty content")
+        logger.info("prompt expansion: %r -> %r", prompt, expanded)
+        return expanded
+    except Exception as exc:  # noqa: BLE001 -- best effort, must never block a real generation
+        logger.warning(
+            "prompt expansion failed (%s: %s) -- using original prompt unchanged", type(exc).__name__, exc
+        )
+        return prompt
+
 
 # The exact captured, verified-working /prompt payload. Deep-copied per
 # request before any field is edited.
@@ -559,10 +638,26 @@ async def generate_video(
     one uses real cfg=3.5 guidance, so negative_prompt actually has an
     effect here -- it's no longer just a no-op parameter kept for parity.
 
+    Named characters (e.g. "Tony Stark", "a Spacemarine from Starcraft") are
+    handled automatically -- before submitting to ComfyUI, this call runs
+    `prompt` through the local expert chat model, which rewrites any named
+    character/franchise/celebrity/real-person reference into a plain visual
+    description (build, outfit/armor, colors, distinguishing features).
+    Wan2.2 doesn't reliably recognize names by themselves (confirmed
+    empirically -- see the comment above CHARACTER_EXPANSION_SYSTEM_PROMPT),
+    so it's fine, and expected, to reference a character directly in
+    `prompt` -- no need to describe their appearance by hand. This adds
+    real latency (the expert model itself is slow, up to ~30-50s) on top of
+    the video generation time; if that expansion call fails for any reason
+    it silently falls back to the original prompt rather than blocking the
+    generation, so a failure here degrades quality, not reliability.
+
     Args:
         prompt: What the video should show. Describe subject, motion,
             camera movement, and style -- motion description matters more
-            here than for a still image.
+            here than for a still image. Named characters are fine to
+            reference directly (see above) -- they get auto-translated to
+            a visual description before generation.
         negative_prompt: What to avoid. Empty by default falls back to
             DEFAULT_VIDEO_NEGATIVE_PROMPT (the checkpoint's own tuned
             default) rather than actually submitting an empty string.
@@ -598,10 +693,16 @@ async def generate_video(
 
     async with httpx.AsyncClient() as client:
         try:
+            # Must happen BEFORE _unload_chat_model -- this call needs a
+            # chat model loaded (it'll trigger llama-swap to lazily load
+            # the expert model if it isn't resident already). Doing it
+            # after the unload would just force an extra, wasted reload.
+            expanded_prompt = await _expand_character_references(client, prompt)
+
             await _unload_chat_model(client)
 
             workflow = copy.deepcopy(VIDEO_WORKFLOW_TEMPLATE)
-            workflow["7"]["inputs"]["text"] = prompt
+            workflow["7"]["inputs"]["text"] = expanded_prompt
             workflow["8"]["inputs"]["text"] = negative_prompt or DEFAULT_VIDEO_NEGATIVE_PROMPT
             workflow["9"]["inputs"]["length"] = length
             workflow["10"]["inputs"]["steps"] = steps
