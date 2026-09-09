@@ -482,8 +482,15 @@ async def generate_image(
                 f"MEDIA:{out_path}"
             )
         finally:
-            await _free_comfyui_vram(client)
-            await _redis.delete(BUSY_KEY)
+            # asyncio.shield() so this cleanup still finishes even if the
+            # whole call gets cancelled from outside (e.g. Hermes's MCP
+            # session hitting its idle timeout mid-generation, confirmed as
+            # a real occurrence 2026-09-09 -- without shield(), a
+            # cancellation can rip through these awaits too and leave
+            # media-gen:busy stuck in Redis for the rest of its TTL even
+            # though this finally block did technically run).
+            await asyncio.shield(_free_comfyui_vram(client))
+            await asyncio.shield(_redis.delete(BUSY_KEY))
 
 
 @mcp.tool()
@@ -618,8 +625,13 @@ async def generate_video(
                 f"MEDIA:{out_path}"
             )
         finally:
-            await _free_comfyui_vram(client)
-            await _redis.delete(BUSY_KEY)
+            # same shield() reasoning as generate_image's finally above --
+            # video's lock is even more important to get right, since its
+            # TTL is 3x longer (VIDEO_BUSY_TTL_SECONDS=900 vs 300), so a
+            # stuck lock here means up to 15 minutes of every chat message
+            # AND every future generate call getting bounced, not 5.
+            await asyncio.shield(_free_comfyui_vram(client))
+            await asyncio.shield(_redis.delete(BUSY_KEY))
 
 
 if __name__ == "__main__":
