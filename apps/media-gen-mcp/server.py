@@ -122,6 +122,17 @@ POLL_INTERVAL_SECONDS = 1.0
 
 DEFAULT_NEGATIVE_PROMPT = "low quality, bad anatomy, extra digits, missing digits, extra limbs, missing limbs"
 
+# Wan2.2's own official ComfyUI template default negative prompt (kept
+# verbatim, not translated -- it's what the checkpoint was tuned/tested
+# against). Unlike HunyuanVideo's cfg-distilled checkpoint, Wan2.2 T2V-A14B
+# uses real cfg=3.5 guidance, so this actually has an effect.
+DEFAULT_VIDEO_NEGATIVE_PROMPT = (
+    "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，"
+    "整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，"
+    "画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，"
+    "静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走，裸露，NSFW"
+)
+
 # The exact captured, verified-working /prompt payload. Deep-copied per
 # request before any field is edited.
 WORKFLOW_TEMPLATE = {
@@ -188,153 +199,179 @@ WORKFLOW_TEMPLATE = {
     },
 }
 
-# Video: HunyuanVideo 1.5, fp8-scaled, 480p, cfg-distilled (Eldar's pick via
-# AskUserQuestion 2026-09-08, after the earlier "LTX-2 19B distilled NVFP4"
-# plan was found not to fit aibox's 16GB card at all -- confirmed against
-# Lightricks' own HF repo + maintainer replies, not guessed). Same ComfyUI
-# pod as image gen -- no new Deployment, just three more model files under
-# the existing /data/comfyui/basedir/models/ hostPath (diffusion_models/
-# text_encoders/vae) plus a second, smaller text encoder ComfyUI's own
-# DualCLIPLoader also requires (byt5_small_glyphxl_fp16.safetensors --
-# only found this was needed empirically, from a real 400 validation error
-# submitting the workflow, not from any docs page).
+# Video: Wan2.2 T2V-A14B (Alibaba), GGUF Q4_K_M quantized -- replaces the
+# earlier HunyuanVideo 1.5 setup (2026-09-08 - 09) after Eldar asked for
+# less hallucination / better precision / longer videos and research
+# pointed at switching model families rather than tuning the cfg-distilled
+# Hunyuan checkpoint (whose cfg is baked to 1, so negative prompts do
+# essentially nothing there). Wan2.2 T2V-A14B is a genuine two-expert MoE
+# (27B total params, 14B active per step: a "high-noise" expert for the
+# first half of denoising, a "low-noise" expert for the second half) with
+# real non-distilled CFG guidance (cfg=3.5), so negative prompts actually
+# matter here -- see DEFAULT_VIDEO_NEGATIVE_PROMPT above.
 #
-# Like Z-Image Turbo, this graph is NOT hand-authored. Captured live via
-# window.app.graphToPrompt() in a browser tab pointed at the running
-# ComfyUI pod (through a temporary kubectl port-forward), starting from
-# ComfyUI's own official "Hunyuan Video 1.5 Text to Video" template
-# (search Browse Templates for "Hunyuan"), then editing four widget values
-# to match the fp8/480p/distilled checkpoint actually on disk:
-#   node 12 (UNETLoader): 720p fp16 checkpoint -> our 480p fp8 distilled one
-#   node 124 (EmptyHunyuanVideo15Latent): 1280x720 -> 848x480 (ComfyUI's own
-#     node default for this width/height, confirmed via GET /object_info)
-#   node 132 (ModelSamplingSD3): shift 7 -> 5
-#   node 131 (CFGGuider): cfg 6 -> 1
-# (shift/cfg values per the template's own embedded reference table for the
-# "480p_t2v_distilled" row -- distilled checkpoints use cfg=1, non-distilled
-# need cfg=6; getting this wrong doesn't error, it just generates a much
-# worse video, so it's worth getting right rather than leaving the loaded
-# template's non-distilled defaults in place).
-# Submitted for real via POST /prompt from that same browser tab (bypassing
-# this server entirely, direct against ComfyUI) -- CONFIRMED end-to-end: a
-# real 848x480, 49-frame (~2s) video generated in ~107s total (including a
-# cold model load, this box's first-ever video generation) matching the
-# template's own default prompt, fetched back via GET /view and visually
-# confirmed to be a real, coherent video (not noise/garbage).
+# Two open questions from research had to be settled empirically before
+# committing to this, both confirmed live against the real GGUF files on
+# this box (2026-09-09) rather than trusted from docs/community claims --
+# the project has been burned by unverified community VRAM numbers before
+# (the LTX-2 mis-sizing mistake, 2026-09-08, is why LTX-2.3 was researched
+# but NOT picked here despite promising-looking community posts):
+#   1. Do the two experts need to be simultaneously VRAM-resident? NO --
+#      confirmed via a real nvidia-smi trace (1s samples) through an
+#      actual generation: the high-noise expert loads + samples, plateaus
+#      ~13.3-13.5GB, gets EVICTED, then the low-noise expert loads +
+#      samples, plateaus at the same ~13.2-13.3GB ceiling -- not additive.
+#      ComfyUI's model manager swaps them sequentially, the same way
+#      llama-swap swaps chat models.
+#   2. Does Q4_K_M actually fit the 16GB card with real headroom? YES --
+#      peak observed was 13495MiB against a 16303MiB card (~2.8GB spare)
+#      at 480x480 / 33 frames / 20 steps.
+#
+# Graph captured live via window.app.graphToPrompt() in a browser tab
+# against the running ComfyUI pod, starting from ComfyUI's own official
+# "Wan 2.2 14B Text to Video" template (Browse Templates -> search
+# "Wan2.2"), then:
+#   - both "Load Diffusion Model" (UNETLoader, safetensors) nodes swapped
+#     for "Unet Loader (GGUF)" (UnetLoaderGGUF) nodes pointing at the
+#     Q4_K_M-quantized high/low-noise files actually on disk (the fp8
+#     safetensors files the template defaults to were deliberately never
+#     downloaded -- only the smaller GGUF quants, for VRAM headroom)
+#   - the template's built-in "Lightning LoRA" turbo-mode scaffolding (2
+#     LoraLoaderModelOnly nodes + 5 ComfySwitchNode nodes + primitive
+#     int/float nodes picking between "Original" and "Lightning" timing/
+#     cfg values) stripped out entirely -- not needed, and the Lightning
+#     LoRA files (2.29GB) were never downloaded. What's left below is
+#     hardcoded to the template's own "Original" (non-turbo) branch
+#     values: 20 steps total, split at step 10 (halfway) between experts,
+#     cfg=3.5, shift=5 -- the template's own tuned defaults for this
+#     checkpoint, not guessed.
+# Submitted for real via the ComfyUI UI (Run button) against this exact
+# graph -- CONFIRMED end-to-end: a real 480x480, 33-frame (~2s @ 16fps)
+# video generated successfully, visually confirmed coherent (not noise),
+# with the VRAM behavior described in points 1/2 above.
 #
 # NOT YET VERIFIED: delivery to Telegram. Image delivery took three passes
 # to get right (see generate_image's docstring/comment above) because
 # Hermes doesn't auto-attach tool output -- it scans reply TEXT for a path.
 # That fix (bare path + MEDIA:<path> line) is carried over here on the
-# assumption it's format-agnostic, but that assumption is UNTESTED for
-# video specifically -- Hermes's Telegram gateway might handle
-# video-attachment differently from photo-attachment (separate sendVideo
-# vs sendPhoto-style call). First real Telegram test after deploying this
-# will confirm or break that assumption -- don't treat this as done until
-# a real video actually lands in Telegram, the same bar image gen had to
-# clear.
+# assumption it's format-agnostic, but that assumption is still UNTESTED
+# for video specifically and was already untested under the old Hunyuan
+# version this replaces -- first real Telegram test after deploying this
+# will confirm or break it.
 VIDEO_WORKFLOW_TEMPLATE = {
-    "8": {
-        "inputs": {"samples": ["127", 0], "vae": ["10", 0]},
-        "class_type": "VAEDecode",
-        "_meta": {"title": "VAE Decode"},
+    "1": {
+        "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan", "device": "default"},
+        "class_type": "CLIPLoader",
+        "_meta": {"title": "Load CLIP"},
     },
-    "10": {
-        "inputs": {"vae_name": "hunyuanvideo15_vae_fp16.safetensors"},
+    "2": {
+        "inputs": {"vae_name": "wan_2.1_vae.safetensors"},
         "class_type": "VAELoader",
         "_meta": {"title": "Load VAE"},
     },
-    "11": {
-        "inputs": {
-            "clip_name1": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
-            "clip_name2": "byt5_small_glyphxl_fp16.safetensors",
-            "type": "hunyuan_video_15",
-            "device": "default",
-        },
-        "class_type": "DualCLIPLoader",
-        "_meta": {"title": "Load CLIP (Dual)"},
+    "3": {
+        "inputs": {"unet_name": "wan2.2_t2v_high_noise_14B_Q4_K_M.gguf"},
+        "class_type": "UnetLoaderGGUF",
+        "_meta": {"title": "Unet Loader (GGUF) - High Noise"},
     },
-    "12": {
-        "inputs": {
-            "unet_name": "hunyuanvideo1.5_480p_t2v_cfg_distilled_fp8_scaled.safetensors",
-            "weight_dtype": "default",
-        },
-        "class_type": "UNETLoader",
-        "_meta": {"title": "Load Diffusion Model"},
+    "4": {
+        "inputs": {"unet_name": "wan2.2_t2v_low_noise_14B_Q4_K_M.gguf"},
+        "class_type": "UnetLoaderGGUF",
+        "_meta": {"title": "Unet Loader (GGUF) - Low Noise"},
     },
-    "44": {
-        "inputs": {"text": "", "clip": ["11", 0]},
+    "5": {
+        "inputs": {"shift": 5, "model": ["3", 0]},
+        "class_type": "ModelSamplingSD3",
+        "_meta": {"title": "ModelSamplingSD3 (High Noise)"},
+    },
+    "6": {
+        "inputs": {"shift": 5, "model": ["4", 0]},
+        "class_type": "ModelSamplingSD3",
+        "_meta": {"title": "ModelSamplingSD3 (Low Noise)"},
+    },
+    "7": {
+        "inputs": {"text": "", "clip": ["1", 0]},
         "class_type": "CLIPTextEncode",
         "_meta": {"title": "CLIP Text Encode (Positive Prompt)"},
     },
-    "93": {
-        "inputs": {"text": "", "clip": ["11", 0]},
+    "8": {
+        "inputs": {"text": DEFAULT_VIDEO_NEGATIVE_PROMPT, "clip": ["1", 0]},
         "class_type": "CLIPTextEncode",
         "_meta": {"title": "CLIP Text Encode (Negative Prompt)"},
     },
-    "101": {
-        "inputs": {"fps": 24, "bit_depth": "auto", "color_space": "sRGB", "images": ["8", 0]},
+    "9": {
+        "inputs": {"width": 832, "height": 480, "length": 49, "batch_size": 1},
+        "class_type": "EmptyHunyuanLatentVideo",
+        "_meta": {"title": "Empty Latent Video"},
+    },
+    "10": {
+        "inputs": {
+            "add_noise": "enable",
+            "noise_seed": 42,
+            "steps": 20,
+            "cfg": 3.5,
+            "sampler_name": "euler",
+            "scheduler": "simple",
+            "start_at_step": 0,
+            "end_at_step": 10,
+            "return_with_leftover_noise": "enable",
+            "model": ["5", 0],
+            "positive": ["7", 0],
+            "negative": ["8", 0],
+            "latent_image": ["9", 0],
+        },
+        "class_type": "KSamplerAdvanced",
+        "_meta": {"title": "KSampler (Advanced) - High Noise Pass"},
+    },
+    "11": {
+        "inputs": {
+            "add_noise": "disable",
+            "noise_seed": 0,
+            "steps": 20,
+            "cfg": 3.5,
+            "sampler_name": "euler",
+            "scheduler": "simple",
+            "start_at_step": 10,
+            "end_at_step": 20,
+            "return_with_leftover_noise": "disable",
+            "model": ["6", 0],
+            "positive": ["7", 0],
+            "negative": ["8", 0],
+            "latent_image": ["10", 0],
+        },
+        "class_type": "KSamplerAdvanced",
+        "_meta": {"title": "KSampler (Advanced) - Low Noise Pass"},
+    },
+    "12": {
+        "inputs": {"samples": ["11", 0], "vae": ["2", 0]},
+        "class_type": "VAEDecode",
+        "_meta": {"title": "VAE Decode"},
+    },
+    "13": {
+        "inputs": {"fps": 16, "bit_depth": "auto", "color_space": "sRGB", "images": ["12", 0]},
         "class_type": "CreateVideo",
         "_meta": {"title": "Create Video"},
     },
-    "102": {
+    "14": {
         "inputs": {
-            "filename_prefix": "video/hunyuan_video_1.5",
+            "filename_prefix": "video/wan2.2_t2v",
             "format": "auto",
-            "format.codec": "h264",
-            "format.codec.encoding": "auto",
+            "format.codec": "auto",
             "codec": "auto",
-            "video": ["101", 0],
+            "video": ["13", 0],
         },
         "class_type": "SaveVideo",
         "_meta": {"title": "Save Video"},
     },
-    "124": {
-        "inputs": {"width": 848, "height": 480, "length": 49, "batch_size": 1},
-        "class_type": "EmptyHunyuanVideo15Latent",
-        "_meta": {"title": "Empty HunyuanVideo 1.5 Latent"},
-    },
-    "127": {
-        "inputs": {
-            "noise": ["129", 0],
-            "guider": ["131", 0],
-            "sampler": ["130", 0],
-            "sigmas": ["128", 0],
-            "latent_image": ["124", 0],
-        },
-        "class_type": "SamplerCustomAdvanced",
-        "_meta": {"title": "SamplerCustomAdvanced"},
-    },
-    "128": {
-        "inputs": {"scheduler": "simple", "steps": 20, "denoise": 1, "model": ["12", 0]},
-        "class_type": "BasicScheduler",
-        "_meta": {"title": "BasicScheduler"},
-    },
-    "129": {
-        "inputs": {"noise_seed": 42},
-        "class_type": "RandomNoise",
-        "_meta": {"title": "RandomNoise"},
-    },
-    "130": {
-        "inputs": {"sampler_name": "euler"},
-        "class_type": "KSamplerSelect",
-        "_meta": {"title": "KSamplerSelect"},
-    },
-    "131": {
-        "inputs": {"cfg": 1, "model": ["132", 0], "positive": ["44", 0], "negative": ["93", 0]},
-        "class_type": "CFGGuider",
-        "_meta": {"title": "CFG Guider"},
-    },
-    "132": {
-        "inputs": {"shift": 5, "model": ["12", 0]},
-        "class_type": "ModelSamplingSD3",
-        "_meta": {"title": "ModelSamplingSD3"},
-    },
 }
 
-# A cold model load + a real generation took ~107s for a 49-frame test clip
-# on this box -- a full-length (121-frame) request or a cold-load-plus-long
-# video could run well past image gen's 180s budget. Generous, not tuned.
+# Two cold GGUF loads (~9GB each, high-noise then low-noise, sequentially --
+# see the VRAM trace note above VIDEO_WORKFLOW_TEMPLATE) plus sampling took
+# on the order of a few minutes for a small 480x480/33-frame/20-step test
+# clip on this box -- not precisely timed, but clearly longer than the old
+# single-checkpoint Hunyuan path since two separate models now load per
+# call instead of one. A longer request (more frames/steps) could run well
+# past image gen's 180s budget. Generous, not tuned.
 VIDEO_POLL_TIMEOUT_SECONDS = 600
 VIDEO_BUSY_TTL_SECONDS = 900  # safety-net only, same finally-block pattern as images
 
@@ -501,35 +538,40 @@ async def generate_video(
     steps: int = 20,
     seed: int = -1,
 ) -> str:
-    """Generate a short video locally with HunyuanVideo 1.5 (via ComfyUI on aibox's GPU).
+    """Generate a short video locally with Wan2.2 T2V-A14B (via ComfyUI on aibox's GPU).
 
-    Fixed at 848x480 (480p) and cfg=1/shift=5 -- these are locked to the
-    specific fp8/480p/cfg-distilled checkpoint installed on this box, not
-    independently tunable (a 720p or non-distilled checkpoint isn't
-    installed here; wrong cfg/shift values silently produce a worse video
-    rather than erroring). Like generate_image, this fully unloads whatever
-    chat model is resident to give the whole GPU to ComfyUI, then reloads
-    the chat model lazily afterward. Any chat message sent elsewhere during
-    that window is automatically redirected to a cloud model.
+    Fixed at 832x480 (480p) and cfg=3.5/shift=5 -- these are the checkpoint's
+    own tuned defaults (from ComfyUI's official Wan2.2 template), not
+    independently tunable. Runs at 16fps (Wan2.2's native rate -- NOT the
+    24fps the old HunyuanVideo checkpoint this replaces used, so the same
+    `length` now covers slightly more real-world seconds). Two GGUF-
+    quantized "expert" models (high-noise, low-noise -- a genuine
+    Mixture-of-Experts architecture) load sequentially during a single
+    call, never simultaneously (confirmed via a live VRAM trace -- see the
+    comment above VIDEO_WORKFLOW_TEMPLATE), so this still fits the 16GB
+    card with headroom despite being two ~9GB GGUF files. Like
+    generate_image, this fully unloads whatever chat model is resident to
+    give the whole GPU to ComfyUI, then reloads the chat model lazily
+    afterward. Any chat message sent elsewhere during that window is
+    automatically redirected to a cloud model.
 
-    A real 49-frame/~2s clip took ~107s end-to-end on this box (including a
-    cold model load) -- expect video generation to take noticeably longer
-    than generate_image's ~20-40s, and scale roughly with `length`.
+    Unlike the old Hunyuan checkpoint (cfg-distilled, cfg baked to 1), this
+    one uses real cfg=3.5 guidance, so negative_prompt actually has an
+    effect here -- it's no longer just a no-op parameter kept for parity.
 
     Args:
         prompt: What the video should show. Describe subject, motion,
             camera movement, and style -- motion description matters more
             here than for a still image.
-        negative_prompt: What to avoid. Empty by default -- this checkpoint
-            is cfg-distilled (cfg=1), so the negative prompt has little to
-            no effect; kept as a parameter for parity with generate_image
-            and in case that changes.
-        length: Number of frames at 24fps (e.g. 49 =~ 2s, 121 =~ 5s).
-            Longer videos take proportionally longer to generate. Must be
-            1 + a multiple of 4 (ComfyUI's own constraint for this node).
-        steps: Sampling steps. Default 20 (this workflow's own template
-            default, reduced from the Hunyuan team's original 50 for
-            speed -- raise it if quality matters more than turnaround).
+        negative_prompt: What to avoid. Empty by default falls back to
+            DEFAULT_VIDEO_NEGATIVE_PROMPT (the checkpoint's own tuned
+            default) rather than actually submitting an empty string.
+        length: Number of frames at 16fps (e.g. 49 =~ 3s). Longer videos
+            take proportionally longer to generate. Must be 1 + a multiple
+            of 4 (ComfyUI's own constraint for this latent node).
+        steps: Total sampling steps, split evenly across the high-noise and
+            low-noise expert passes (e.g. 20 -> 10 steps each). Default 20
+            (this workflow's own template default).
         seed: Fixed seed for reproducibility. Default -1 picks a random
             seed each call.
 
@@ -552,17 +594,21 @@ async def generate_video(
         )
 
     resolved_seed = random.randint(0, 2**31 - 1) if seed < 0 else seed
+    split_step = max(1, steps // 2)
 
     async with httpx.AsyncClient() as client:
         try:
             await _unload_chat_model(client)
 
             workflow = copy.deepcopy(VIDEO_WORKFLOW_TEMPLATE)
-            workflow["44"]["inputs"]["text"] = prompt
-            workflow["93"]["inputs"]["text"] = negative_prompt
-            workflow["124"]["inputs"]["length"] = length
-            workflow["128"]["inputs"]["steps"] = steps
-            workflow["129"]["inputs"]["noise_seed"] = resolved_seed
+            workflow["7"]["inputs"]["text"] = prompt
+            workflow["8"]["inputs"]["text"] = negative_prompt or DEFAULT_VIDEO_NEGATIVE_PROMPT
+            workflow["9"]["inputs"]["length"] = length
+            workflow["10"]["inputs"]["steps"] = steps
+            workflow["10"]["inputs"]["end_at_step"] = split_step
+            workflow["10"]["inputs"]["noise_seed"] = resolved_seed
+            workflow["11"]["inputs"]["steps"] = steps
+            workflow["11"]["inputs"]["start_at_step"] = split_step
 
             submit_resp = await client.post(
                 f"{COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=30.0
@@ -593,8 +639,8 @@ async def generate_video(
 
             # SaveVideo's output uses the same "images" key ComfyUI uses for
             # SaveImage (confirmed empirically against a real completed job,
-            # not documented anywhere obvious) -- node "102" here, not "9".
-            videos = history.get("outputs", {}).get("102", {}).get("images", [])
+            # not documented anywhere obvious) -- node "14" here, not "9".
+            videos = history.get("outputs", {}).get("14", {}).get("images", [])
             if not videos:
                 raise RuntimeError(f"ComfyUI finished prompt {prompt_id} but produced no video output")
             video_ref = videos[0]
