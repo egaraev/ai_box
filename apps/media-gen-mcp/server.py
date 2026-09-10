@@ -96,7 +96,7 @@ import redis.asyncio as redis
 # ModuleNotFoundError with its own migration-guide message). json_response
 # also moved: it's now a run()/run_streamable_http_async() kwarg, not a
 # constructor kwarg.
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s media-gen-mcp %(levelname)s: %(message)s")
 logger = logging.getLogger("media-gen-mcp")
@@ -110,6 +110,26 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://redis.ai-memory.svc.cluster.loc
 # LITELLM_MASTER_KEY, sourced from the same litellm-secret Secret.
 LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm.ai-models.svc.cluster.local:4000/v1")
 LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "")
+
+# For _restart_comfyui_and_wait_ready (see comment above that function) --
+# calls the Kubernetes API directly (in-cluster service-account token, not
+# kubectl) to delete the ComfyUI pod by label, since GGUF-loaded models are
+# known not to reliably release VRAM through /free alone. Needs the RBAC
+# ServiceAccount/Role/RoleBinding added to
+# k8s/media-gen/media-gen-mcp-deployment.yaml -- without it this call just
+# 403s and falls back to logging a warning (fail-open, same as every other
+# best-effort helper in this file).
+K8S_API_SERVER = "https://kubernetes.default.svc"
+K8S_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+K8S_SA_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+COMFYUI_NAMESPACE = "ai-models"
+COMFYUI_POD_LABEL_SELECTOR = "app=comfyui"
+# How long to wait for ComfyUI to come back up and start answering requests
+# again after being restarted, before giving up and clearing the busy flag
+# anyway (better to risk one request racing a still-starting pod than to
+# wedge the busy flag -- and hence the router's cloud-fallback -- forever).
+COMFYUI_RESTART_READY_TIMEOUT_SECONDS = 120
+COMFYUI_RESTART_READY_POLL_INTERVAL_SECONDS = 2.0
 # Must be the SAME path inside both this container and hermes-agent's --
 # see the "DELIVERY" note above. A hostPath volume, not a PVC: this is a
 # single-node cluster, so both pods always land on the same node anyway,
@@ -121,11 +141,19 @@ BUSY_KEY = "media-gen:busy"
 BUSY_TTL_SECONDS = 300  # safety-net only -- the finally block is the primary clear path
 
 # How long to wait after ComfyUI's /free returns 200 before actually clearing
-# the busy flag -- see the comment on this constant's use in generate_video's
+# the busy flag -- see the comment on this constant's use in generate_image's
 # finally block (real live OOM this fixed, 2026-09-09) for the full story.
 # Short version: /free returning 200 doesn't mean CUDA has actually finished
 # reclaiming the VRAM yet, and clearing busy immediately lets the very next
 # chat request race that teardown straight into an OOM.
+#
+# NOTE: generate_video no longer uses this -- Wan2.2's GGUF-loaded experts
+# turned out not to reliably release VRAM through /free AT ALL (not just
+# slowly), so generate_video was moved to a hard ComfyUI pod restart
+# instead (_restart_comfyui_and_wait_ready below). This constant/delay is
+# still correct and still needed for generate_image's plain checkpoint
+# loader (Z-Image Turbo, not GGUF), which hasn't shown the stuck-VRAM
+# symptom -- only the settle-timing race this was originally written for.
 VRAM_FREE_SETTLE_SECONDS = 3
 
 # Poll /history for up to this long before giving up. Z-Image Turbo took
@@ -133,6 +161,35 @@ VRAM_FREE_SETTLE_SECONDS = 3
 # for a cold model load on top of that without hanging forever on a stuck job.
 POLL_TIMEOUT_SECONDS = 180
 POLL_INTERVAL_SECONDS = 1.0
+
+# How often (seconds) to send an MCP progress notification during a long
+# poll loop (video generation, or ComfyUI-restart readiness-waiting).
+# ADDED 2026-09-09, real live bug: a real "Iron Man playing hockey" video
+# generated successfully server-side (confirmed via our own logs -- prompt
+# submitted, polled, fetched, saved, ComfyUI restarted, all clean) but
+# Hermes reported "MCPError: Connection closed" and never got the result,
+# then retried the whole thing from scratch over raw curl. Root cause
+# (confirmed via github.com/NousResearch/hermes-agent PR #21323, "bump
+# sse_read_timeout on SSE transport"): Hermes's MCP client has a stream
+# IDLE timeout -- how long it'll wait between events on the connection,
+# NOT how long the overall tool call is allowed to take -- and that's a
+# completely separate mechanism from mcp_servers.<name>.timeout (which we
+# already correctly set to 900 in hermes-agent.yaml; it governs a
+# different, higher-level "give up and report failure" layer). That PR's
+# own description says the equivalent idle-read-timeout on the Streamable
+# HTTP path we actually use (not SSE) is ~300s by default -- and the real
+# failure observed here dropped the connection at ~291s of total silence
+# on the wire, an almost exact match. The fix isn't a bigger timeout
+# value (there's no config knob for this one in config.yaml at all, near
+# as this project could find) -- it's making sure the connection is never
+# actually silent for that long: MCP's standard progress-notification
+# mechanism (ctx.report_progress(), real protocol traffic on the same
+# connection) both informs the caller AND, as a side effect, resets
+# whatever "time since last event" clock the client is tracking. 20s is a
+# comfortable safety margin under even a much stricter idle threshold than
+# the ~300s this project could actually confirm, not just the one that
+# bit us.
+PROGRESS_REPORT_INTERVAL_SECONDS = 20
 
 DEFAULT_NEGATIVE_PROMPT = "low quality, bad anatomy, extra digits, missing digits, extra limbs, missing limbs"
 
@@ -486,9 +543,114 @@ async def _free_comfyui_vram(client: httpx.AsyncClient) -> None:
         logger.warning("ComfyUI /free failed (%s: %s)", type(exc).__name__, exc)
 
 
+async def _restart_comfyui_and_wait_ready(client: httpx.AsyncClient, ctx: Context) -> None:
+    """Used by generate_video's finally block instead of _free_comfyui_vram.
+
+    Real live incident, 2026-09-09: after a successful Wan2.2 video
+    generation, ComfyUI's /free returned 200 but the python3 process stayed
+    pinned at 10756MiB for 9+ minutes afterward (confirmed via a live
+    nvidia-smi trace showing the exact same figure, unchanged, tick after
+    tick -- not a slow drain, a genuinely stuck allocation), which then
+    OOM'd the very next local chat-model load. This is not specific to our
+    code or the earlier settle-delay race (VRAM_FREE_SETTLE_SECONDS) --
+    it's a known, currently-unresolved limitation of GGUF-loaded models in
+    ComfyUI specifically, corroborated by third parties hitting the same
+    thing: github.com/1038lab/ComfyUI-QwenVL issue #104 ("not possible to
+    free the VRAM ... only a hard restart of Comfyui helps"), and
+    github.com/SeanScripts/ComfyUI-Unload-Model's own README: "there have
+    been some recent changes in the GGUF loader nodes that could cause the
+    unload command to not actually unload the GGUF models." Since Wan2.2's
+    two experts are both loaded via city96/ComfyUI-GGUF's UnetLoaderGGUF
+    node, generate_video hits exactly this case -- generate_image doesn't
+    (Z-Image Turbo uses a plain UNETLoader, not GGUF), so it keeps using
+    _free_comfyui_vram + VRAM_FREE_SETTLE_SECONDS unchanged.
+
+    /free is still attempted first below (cheap, sometimes actually works --
+    it did in an earlier test the same day), but this function unconditionally
+    restarts the ComfyUI pod afterward regardless of what /free reports,
+    since that's the only mechanism anyone (including us, live) has
+    confirmed actually reclaims GGUF VRAM.
+
+    Needs RBAC (k8s/media-gen/media-gen-mcp-deployment.yaml): a dedicated
+    ServiceAccount for this Deployment, bound via a RoleBinding to a Role in
+    the ai-models namespace granting get/list/delete/deletecollection on
+    pods. Delete is by label selector (K8s "DeleteCollection", hence the
+    deletecollection verb) rather than by name, since the pod's name changes
+    on every restart.
+
+    Caller (generate_video's finally block) clears the busy flag only after
+    this returns, not just after issuing the delete -- so the busy window,
+    and the router's cloud-fallback for chat requests, correctly covers the
+    whole restart + cold-start window, not just the moment the delete call
+    was made.
+    """
+    try:
+        await client.post(
+            f"{COMFYUI_URL}/free",
+            json={"unload_models": True, "free_memory": True},
+            timeout=30.0,
+        )
+    except Exception as exc:  # noqa: BLE001 -- best effort, the restart below is the real fix
+        logger.warning("ComfyUI /free failed (%s: %s) -- restarting pod anyway", type(exc).__name__, exc)
+
+    try:
+        with open(K8S_SA_TOKEN_PATH) as f:
+            token = f.read().strip()
+        async with httpx.AsyncClient(verify=K8S_SA_CA_PATH, timeout=30.0) as k8s_client:
+            resp = await k8s_client.delete(
+                f"{K8S_API_SERVER}/api/v1/namespaces/{COMFYUI_NAMESPACE}/pods",
+                params={"labelSelector": COMFYUI_POD_LABEL_SELECTOR},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            logger.info("k8s delete comfyui pod(s) -> %s", resp.status_code)
+    except Exception as exc:  # noqa: BLE001 -- best effort; if this fails VRAM stays stuck, same failure mode as before this fix existed
+        logger.warning("comfyui pod restart failed (%s: %s) -- VRAM may stay stuck until a manual restart", type(exc).__name__, exc)
+        return
+
+    # Wait for the new pod to actually answer before letting anything else
+    # (another generate call, or a chat request once busy clears) hit
+    # ComfyUI again. Polls "/" (the frontend index page) rather than a
+    # specific API endpoint like /system_stats, since "/" is the one thing
+    # already confirmed to exist on this ComfyUI version without having to
+    # guess -- and custom nodes (including ComfyUI-GGUF) import at startup
+    # before ComfyUI starts serving HTTP at all, so a 200 here also means
+    # they're already loaded.
+    start = time.monotonic()
+    last_progress = start
+    deadline = start + COMFYUI_RESTART_READY_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        await asyncio.sleep(COMFYUI_RESTART_READY_POLL_INTERVAL_SECONDS)
+        try:
+            resp = await client.get(f"{COMFYUI_URL}/", timeout=5.0)
+            if resp.status_code == 200:
+                logger.info("ComfyUI back up and answering after restart")
+                return
+        except Exception:  # noqa: BLE001 -- expected while the pod is still (re)starting
+            pass
+        now = time.monotonic()
+        if now - last_progress >= PROGRESS_REPORT_INTERVAL_SECONDS:
+            # See PROGRESS_REPORT_INTERVAL_SECONDS's own comment -- this
+            # keeps Hermes's connection from going idle long enough to get
+            # dropped while we wait for ComfyUI to come back up.
+            try:
+                await ctx.report_progress(
+                    progress=now - start,
+                    total=COMFYUI_RESTART_READY_TIMEOUT_SECONDS,
+                    message="Restarting ComfyUI to fully clear VRAM...",
+                )
+            except Exception as exc:  # noqa: BLE001 -- best effort, must not break the restart wait
+                logger.warning("report_progress failed (%s: %s)", type(exc).__name__, exc)
+            last_progress = now
+    logger.warning(
+        "ComfyUI did not answer within %ss of restart -- clearing busy flag anyway",
+        COMFYUI_RESTART_READY_TIMEOUT_SECONDS,
+    )
+
+
 @mcp.tool()
 async def generate_image(
     prompt: str,
+    ctx: Context,
     negative_prompt: str = DEFAULT_NEGATIVE_PROMPT,
     width: int = 1024,
     height: int = 1024,
@@ -555,7 +717,9 @@ async def generate_image(
             prompt_id = submit_resp.json()["prompt_id"]
             logger.info("submitted prompt_id=%s seed=%s", prompt_id, resolved_seed)
 
-            deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
+            poll_start = time.monotonic()
+            last_progress = poll_start
+            deadline = poll_start + POLL_TIMEOUT_SECONDS
             history = None
             while time.monotonic() < deadline:
                 hist_resp = await client.get(f"{COMFYUI_URL}/history/{prompt_id}", timeout=15.0)
@@ -564,6 +728,20 @@ async def generate_image(
                 if prompt_id in body:
                     history = body[prompt_id]
                     break
+                # See PROGRESS_REPORT_INTERVAL_SECONDS's own comment
+                # (generate_video hit this for real) -- images are normally
+                # well under the connection-idle risk window, but a cold
+                # model load can run long, so this costs nothing to have here.
+                now = time.monotonic()
+                if now - last_progress >= PROGRESS_REPORT_INTERVAL_SECONDS:
+                    try:
+                        await ctx.report_progress(
+                            progress=now - poll_start, total=POLL_TIMEOUT_SECONDS,
+                            message="Z-Image Turbo still rendering...",
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- best effort, must not break generation
+                        logger.warning("report_progress failed (%s: %s)", type(exc).__name__, exc)
+                    last_progress = now
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
             if history is None:
@@ -615,10 +793,16 @@ async def generate_image(
             # though this finally block did technically run).
             await asyncio.shield(_free_comfyui_vram(client))
             # VRAM_FREE_SETTLE_SECONDS (added 2026-09-09, real live failure):
-            # see the comment on this same line in generate_video below for
-            # the full story -- same race, same fix, applies here too since
-            # this finally block has the identical free-then-clear-busy
-            # shape.
+            # see the comment on this constant's definition above for the
+            # full story -- a real OOM this fixed, caused by /free
+            # returning 200 before CUDA had actually finished reclaiming
+            # the VRAM. generate_video no longer has this same shape (moved
+            # to _restart_comfyui_and_wait_ready, see its docstring) since
+            # GGUF-loaded models turned out not to release VRAM through
+            # /free at all, not just slowly -- this constant/delay is still
+            # correct here though, since Z-Image Turbo's plain checkpoint
+            # loader only ever showed the slow-settle version of the
+            # problem, not the stuck-forever one.
             await asyncio.sleep(VRAM_FREE_SETTLE_SECONDS)
             await asyncio.shield(_redis.delete(BUSY_KEY))
 
@@ -626,6 +810,7 @@ async def generate_image(
 @mcp.tool()
 async def generate_video(
     prompt: str,
+    ctx: Context,
     negative_prompt: str = "",
     length: int = 49,
     steps: int = 20,
@@ -732,7 +917,9 @@ async def generate_video(
             prompt_id = submit_resp.json()["prompt_id"]
             logger.info("submitted video prompt_id=%s seed=%s length=%s", prompt_id, resolved_seed, length)
 
-            deadline = time.monotonic() + VIDEO_POLL_TIMEOUT_SECONDS
+            poll_start = time.monotonic()
+            last_progress = poll_start
+            deadline = poll_start + VIDEO_POLL_TIMEOUT_SECONDS
             history = None
             while time.monotonic() < deadline:
                 hist_resp = await client.get(f"{COMFYUI_URL}/history/{prompt_id}", timeout=15.0)
@@ -741,6 +928,22 @@ async def generate_video(
                 if prompt_id in body:
                     history = body[prompt_id]
                     break
+                now = time.monotonic()
+                if now - last_progress >= PROGRESS_REPORT_INTERVAL_SECONDS:
+                    # See PROGRESS_REPORT_INTERVAL_SECONDS's own comment --
+                    # a real generation ran this loop silently for ~5
+                    # minutes and Hermes's connection got dropped partway
+                    # through (confirmed live, 2026-09-09). This keeps the
+                    # connection from ever going that long without traffic.
+                    try:
+                        await ctx.report_progress(
+                            progress=now - poll_start,
+                            total=VIDEO_POLL_TIMEOUT_SECONDS,
+                            message="Wan2.2 still rendering...",
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- best effort, must not break generation
+                        logger.warning("report_progress failed (%s: %s)", type(exc).__name__, exc)
+                    last_progress = now
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
             if history is None:
@@ -791,30 +994,20 @@ async def generate_video(
             # TTL is 3x longer (VIDEO_BUSY_TTL_SECONDS=900 vs 300), so a
             # stuck lock here means up to 15 minutes of every chat message
             # AND every future generate call getting bounced, not 5.
-            await asyncio.shield(_free_comfyui_vram(client))
-            # VRAM_FREE_SETTLE_SECONDS (added 2026-09-09, real live failure):
-            # a real "Spacemarine... soccer" generation succeeded end to
-            # end (video saved, ComfyUI's /free returned 200) but the very
-            # next chat message Hermes sent (to compose its reply) got
-            # routed to the now-"not busy" local qwen3.8-27b-Expert and
-            # immediately OOM'd trying to allocate ~12.7GB -- confirmed via
-            # llama-swap's own upstream log (cudaMalloc failed: out of
-            # memory), repeated across 3-4 retries. Root cause: ComfyUI's
-            # /free endpoint returning 200 does not mean CUDA has actually
-            # finished reclaiming the ~10-13GB it was holding (cudaFree /
-            # GGML allocator teardown for a buffer that size isn't
-            # instant) -- clearing the busy flag immediately let the very
-            # next request race that teardown. media-gen-mcp's own
-            # Deployment requests no nvidia.com/gpu (see
-            # k8s/media-gen/media-gen-mcp-deployment.yaml), so it has no
-            # nvidia-smi/pynvml visibility to poll for "actually free" --
-            # a short fixed settle delay before releasing the lock is the
-            # pragmatic fix instead of adding GPU access to this pod just
-            # for that check. Not empirically tuned to a minimum -- 3s is a
-            # conservative first guess; shorten it later if it proves to
-            # always be more than enough, lengthen it if the race is still
-            # observed.
-            await asyncio.sleep(VRAM_FREE_SETTLE_SECONDS)
+            #
+            # CHANGED 2026-09-09 from the plain _free_comfyui_vram +
+            # VRAM_FREE_SETTLE_SECONDS pattern generate_image still uses:
+            # Wan2.2's GGUF-loaded experts turned out not to reliably
+            # release VRAM through /free AT ALL (a real generation left
+            # python3 pinned at 10756MiB for 9+ minutes after /free
+            # returned 200 -- not a slow drain, a genuinely stuck
+            # allocation), which then OOM'd the next local chat-model load
+            # exactly like the settle-delay race did, just with no delay
+            # long enough to ever fix it. See
+            # _restart_comfyui_and_wait_ready's own docstring above for the
+            # full story (third-party corroboration included) and the RBAC
+            # this now requires.
+            await asyncio.shield(_restart_comfyui_and_wait_ready(client, ctx))
             await asyncio.shield(_redis.delete(BUSY_KEY))
 
 
@@ -822,7 +1015,28 @@ if __name__ == "__main__":
     # streamable_http_path defaults to "/mcp" (confirmed by inspecting the
     # installed mcp package's MCPServer.run_streamable_http_async) -- that's
     # the path k8s/p3/hermes-agent.yaml's mcp_servers.media-gen.url assumes.
-    # json_response=True: plain JSON responses instead of SSE streaming --
-    # simpler for a single-tool server with no need for server-initiated
-    # push during a call.
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=8000, json_response=True)
+    #
+    # json_response=True REMOVED 2026-09-10, real production bug: it was
+    # set on the (wrong) assumption that this server has "no need for
+    # server-initiated push during a call" -- but PROGRESS_REPORT_INTERVAL_
+    # SECONDS's own ctx.report_progress() heartbeats (added 2026-09-09,
+    # see that constant's comment) ARE exactly that kind of push, meant to
+    # keep Hermes's MCP connection from going idle during a multi-minute
+    # generate_video/generate_image call. Confirmed via reading the
+    # installed mcp package's source live on the pod (v2.2.0,
+    # mcp/server/streamable_http.py's message_router): in JSON-response
+    # mode, ANY message tied to the current request's related_request_id
+    # -- which includes every progress notification -- is unconditionally
+    # dropped before being queued, logged only at DEBUG ("dropped message
+    # related to request ... in JSON mode"), never raised as an error. So
+    # every report_progress() call since 2026-09-09 has silently no-op'd:
+    # no exception, no warning, but nothing ever actually reached Hermes on
+    # the wire either -- the connection was genuinely silent for the whole
+    # render duration regardless, which is exactly what caused today's
+    # (2026-09-10) repeat of the original "Iron Man playing hockey"-class
+    # incident. Removing json_response=True falls back to the transport's
+    # default SSE-based streaming response, which has a real wire form for
+    # interim messages -- this is what actually lets the existing
+    # heartbeat code do what it was written to do. See /areas/ai-box-k3s.md
+    # for the full investigation if this needs revisiting.
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=8000)
