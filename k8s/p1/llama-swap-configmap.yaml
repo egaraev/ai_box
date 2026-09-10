@@ -347,7 +347,7 @@ data:
           --host 0.0.0.0
           --n-gpu-layers 99
           --n-cpu-moe 25
-          -t 8
+          -t 4
           --no-mmap
           --flash-attn on
           --jinja
