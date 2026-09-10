@@ -537,7 +537,7 @@ data:
     ROUTE_TO_MODEL = {
         # "vision" CHANGED 2026-09-10: qwen3.8-27b-Expert-Vision ->
         # qwopus-general. See the top-of-file ROUTES comment for why.
-        "vision": "qwopus-general",
+        "vision": "qwen3.8-27b-Expert-Vision",
         "medical": "medgemma-1.5-4b",
         # "casual" CHANGED 2026-09-09: llama-3.1-8b -> hermes3-llama-3.1-8b
         # (see the litellm_params comment on the hermes3-llama-3.1-8b
