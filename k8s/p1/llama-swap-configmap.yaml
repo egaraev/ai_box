@@ -24,8 +24,11 @@ data:
     # other placeholder carried over from the Windows-lab config (which had
     # no file on disk) was removed rather than kept as dead config -- see
     # the REMOVED comments inline below for what was dropped and why.
-    # gemma4-26b and qwopus-general have files present but aren't wired
-    # into LiteLLM's router yet (no route maps to them in litellm.yaml).
+    # gemma4-26b has files present but isn't wired into LiteLLM's router yet
+    # (no route maps to it in litellm.yaml). qwopus-general WAS in the same
+    # boat until 2026-09-10, when it took over the "vision" route from
+    # qwen3.8-27b-Expert-Vision -- see litellm.yaml's top-of-file ROUTES
+    # comment for why.
     healthCheckTimeout: 300
     logLevel: info
 
@@ -727,11 +730,13 @@ data:
       # vars/sets TRIMMED 2026-09-07 to match the models actually on aibox
       # (Eldar's call -- removed agents-a1/a1, ornith-35b/orn,
       # qwen3.6-35b/qw6, gpt-oss-20b/goss, qwen3-vl-30b/qvl, none of which
-      # had a GGUF on disk). gemma4-26b and qwopus-general (qpg) both DO
-      # have real folders on aibox now but neither is wired into the
-      # LiteLLM router yet -- qpg stays in resident_router below since it
-      # already was; gemma4-26b was never in this set and still isn't,
-      # since it likewise has no router role yet.
+      # had a GGUF on disk). gemma4-26b and qwopus-general (qpg) both had
+      # real folders on aibox at that point but neither was wired into the
+      # LiteLLM router yet -- qpg stayed in resident_router below since it
+      # already was, ahead of actually being routed to (which happened
+      # 2026-09-10 -- it's now the "vision" route target, see litellm.yaml).
+      # gemma4-26b was never in this set and still isn't, since it still has
+      # no router role.
       vars:
         qpg:  qwopus-general
         q8:   qwen3-8b

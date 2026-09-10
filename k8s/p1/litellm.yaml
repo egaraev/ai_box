@@ -19,8 +19,25 @@
 # custom_router_hook.py below is hand-rolled glue, not an official
 # integration, and needs updating by hand as new routes/models are added.
 #
-# ROUTES (2026-09-07, Eldar's own naming): four real destinations --
-# vision (deterministic, image attached) -> qwen3.8-27b-Expert-Vision,
+# ROUTES (2026-09-07, Eldar's own naming; vision target swapped 2026-09-10):
+# four real destinations -- vision (deterministic, image attached) ->
+# qwopus-general (MoE with native MTP speculative decoding, 131072 context
+# vs qwen3.8-27b-Expert-Vision's 65536, vision-capable via its own --mmproj;
+# Eldar's own call, based on repeated prior testing on the Windows side of
+# this same box: bigger context, faster decode, and better image description
+# in his judgment. qwen3.8-27b-Expert-Vision's model_list entry is kept, not
+# deleted, in case it's wanted again later -- same treatment as
+# llama-3.1-8b/qwen3-8b below.
+# NOTE: aibox and the Windows lab this config was ported from are the same
+# physical machine (dual-boot, identical RTX 5070 Ti 16GB) -- so qwopus-
+# general's cmd flags (context, MoE offload, MTP) are proven on this exact
+# GPU, not a different one. The real open variable is Linux-side VRAM
+# overhead that doesn't exist the same way on the Windows side: aibox's XFCE
+# desktop (Xorg/Chromium/Claude desktop) and ComfyUI's persistent idle CUDA
+# context both eat into the same budget the Windows runs didn't have to
+# share. scripts/gui-apps-off.sh (2026-09-10) claws back ~400-450MB of the
+# desktop's share of that before testing. Watch the first few real vision
+# requests for OOM regardless -- kept as a real caveat, not a formality.),
 # medical -> medgemma-1.5-4b, casual (quick/easy/regular messages) ->
 # qwen3-8b, reasoning (the default/catch-all) -> qwen3.8-27b-Expert. Eldar's
 # own call: the 27B model already covers most things on its own, so "casual"
@@ -201,8 +218,26 @@ data:
           # instead of failing fast into the retry/fallback path.
           stream_timeout: 60
       - model_name: qwen3.8-27b-Expert-Vision
+        # UNWIRED 2026-09-10 -- no route points at this anymore (vision ->
+        # qwopus-general, see the top-of-file ROUTES comment). Kept, not
+        # deleted, in case it's wanted again later -- same treatment as
+        # llama-3.1-8b/qwen3-8b elsewhere in this file. Still a real,
+        # callable model if named directly.
         litellm_params:
           model: openai/qwen3.8-27b-Expert-Vision
+          api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
+          api_key: "none"
+          stream_timeout: 60
+      - model_name: qwopus-general
+        # ADDED 2026-09-10 as the new vision route target -- see the
+        # top-of-file ROUTES comment for why, and the caveat that this
+        # hasn't been load-tested on aibox specifically yet (llama-swap-
+        # configmap.yaml's qwopus-general entry was carried over from the
+        # Windows-lab config with the GGUF present, never previously wired
+        # into any LiteLLM route). 131072 context, MoE + native MTP
+        # speculative decoding, vision-capable via its own --mmproj.
+        litellm_params:
+          model: openai/qwopus-general
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
           stream_timeout: 60
@@ -311,7 +346,7 @@ data:
       # num_retries: 1
       # fallbacks:
       #   - qwen3.8-27b-Expert: ["openrouter-fallback"]
-      #   - qwen3.8-27b-Expert-Vision: ["openrouter-fallback"]
+      #   - qwopus-general: ["openrouter-fallback"]  # was qwen3.8-27b-Expert-Vision, see ROUTES comment
       #   - hermes3-llama-3.1-8b: ["openrouter-fallback"]
       #   - medgemma-1.5-4b: ["openrouter-fallback"]
 
@@ -500,7 +535,9 @@ data:
     ]
 
     ROUTE_TO_MODEL = {
-        "vision": "qwen3.8-27b-Expert-Vision",
+        # "vision" CHANGED 2026-09-10: qwen3.8-27b-Expert-Vision ->
+        # qwopus-general. See the top-of-file ROUTES comment for why.
+        "vision": "qwopus-general",
         "medical": "medgemma-1.5-4b",
         # "casual" CHANGED 2026-09-09: llama-3.1-8b -> hermes3-llama-3.1-8b
         # (see the litellm_params comment on the hermes3-llama-3.1-8b
