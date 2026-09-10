@@ -573,6 +573,22 @@ data:
         return False
 
 
+    HERMES_IMAGE_MARKERS = ("vision_analyze", "/opt/data/cache/images/")
+
+
+    def _wants_vision_tool(messages):
+        for m in reversed(messages):
+            if m.get("role") != "user":
+                continue
+            content = m.get("content")
+            if isinstance(content, str):
+                for marker in HERMES_IMAGE_MARKERS:
+                    if marker in content:
+                        return True
+            return False
+        return False
+
+
     # ADDED 2026-09-09, alongside widening "casual" (see the ROUTES comment
     # above): an explicit "go deep" instruction should never be at the
     # mercy of a 1.5B classifier's semantic judgment -- if the user says
@@ -647,6 +663,11 @@ data:
             if _has_image(messages):
                 data["model"] = ROUTE_TO_MODEL["vision"]
                 logger.info("auto -> vision (image attached) -> %s", data["model"])
+                return data
+
+            if _wants_vision_tool(messages):
+                data["model"] = ROUTE_TO_MODEL["vision"]
+                logger.info("auto -> vision (hermes image marker) -> %s", data["model"])
                 return data
 
             # Deterministic fast path, same idea as the image check above:
