@@ -519,6 +519,151 @@ VIDEO_WORKFLOW_TEMPLATE = {
 VIDEO_POLL_TIMEOUT_SECONDS = 600
 VIDEO_BUSY_TTL_SECONDS = 900  # safety-net only, same finally-block pattern as images
 
+# Music: ACE-Step 1.5 (ace-step/ACE-Step-1.5), native ComfyUI support (no
+# custom node -- confirmed via docs.comfy.org/tutorials/audio/ace-step/
+# ace-step-v1-5: "now natively supported in ComfyUI", current as of a recent
+# nightly build). Split-files checkpoint set (non-XL 2B DiT + 1.7B-LM text
+# encoder combo -- the clean, no-CPU-offload option for a 16-20GB card per
+# ACE-Step-1.5's own GPU_COMPATIBILITY.md Tier 6a; the XL 4B DiT variant
+# needs offload at 16GB and is deliberately not used here), not the
+# single-file all-in-one checkpoint -- chosen because the AIO template's
+# TextEncodeAceStepAudio1.5 node serializes several extra trailing widget
+# values (cover/remix-type controls, undocumented) that the split template
+# doesn't have, so the split version is the simpler, fully-documented graph
+# to hand-build an API-format payload from.
+#
+# CAPTURED LIVE 2026-09-10 via the browser's Network tab against a real,
+# successful generation on aibox (the console's window.app.graphToPrompt()
+# didn't work on this ComfyUI build -- the actual submitted /prompt request
+# body was pulled from DevTools instead, same end result: the literal graph
+# that already produced a real 2-minute track, not a guess). This replaced
+# an earlier hand-built version (constructed from ComfyUI's shipped template
+# JSON, sight-unseen) that had real mismatches this capture caught before
+# deployment: the save node is SaveAudioAdvanced (format/format.quality
+# fields), not SaveAudioMP3 (quality field) as first guessed; and
+# TextEncodeAceStepAudio1.5 needs cfg_scale/generate_audio_codes/temperature/
+# top_p/top_k/min_p, and its language/key fields are actually named
+# "language"/"keyscale", not "vocal_language"/"key".
+# The UI's PrimitiveFloat "Song Duration" node (fanning one widget to both
+# EmptyAceStep1.5LatentAudio.seconds and TextEncodeAceStepAudio1.5.duration)
+# is collapsed here into setting the same value on both fields directly --
+# equivalent for a single API-submitted /prompt call, no primitive needed.
+# Model files needed (download once, place under ComfyUI's basedir --
+# see the ACE-Step 1.5 install steps given alongside this change):
+#   models/diffusion_models/acestep_v1.5_turbo.safetensors
+#   models/text_encoders/qwen_0.6b_ace15.safetensors
+#   models/text_encoders/qwen_1.7b_ace15.safetensors (NOT qwen_4b_ace15.safetensors --
+#     the official template defaults to the 4B variant, but ACE-Step-1.5's own
+#     GPU_COMPATIBILITY.md recommends 1.7B for the 16-20GB tier this card is in)
+#   models/vae/ace_1.5_vae.safetensors
+# STILL UNVERIFIED: the /history output key SaveAudioAdvanced's result lands
+# under. generate_image/generate_video both confirmed "images" empirically
+# for their Save* nodes; SaveAudioAdvanced is a newer, audio-specific node
+# and may use "audio" instead -- generate_music below checks both rather
+# than gambling on one, so a wrong guess degrades to a clear "no output"
+# error instead of silently looking in the wrong place.
+MUSIC_WORKFLOW_TEMPLATE = {
+    "104": {
+        "inputs": {"unet_name": "acestep_v1.5_turbo.safetensors", "weight_dtype": "default"},
+        "class_type": "UNETLoader",
+        "_meta": {"title": "Load Diffusion Model"},
+    },
+    "105": {
+        "inputs": {
+            "clip_name1": "qwen_0.6b_ace15.safetensors",
+            "clip_name2": "qwen_1.7b_ace15.safetensors",
+            "type": "ace",
+            "device": "default",
+        },
+        "class_type": "DualCLIPLoader",
+        "_meta": {"title": "Load CLIP (Dual)"},
+    },
+    "106": {
+        "inputs": {"vae_name": "ace_1.5_vae.safetensors"},
+        "class_type": "VAELoader",
+        "_meta": {"title": "Load VAE"},
+    },
+    "78": {
+        "inputs": {"shift": 3, "model": ["104", 0]},
+        "class_type": "ModelSamplingAuraFlow",
+        "_meta": {"title": "ModelSamplingAuraFlow"},
+    },
+    "94": {
+        "inputs": {
+            "clip": ["105", 0],
+            "tags": "",
+            "lyrics": "",
+            "seed": 42,
+            "duration": 120,
+            "timesignature": "4",
+            "language": "en",
+            "keyscale": "C major",
+            "generate_audio_codes": True,
+            "cfg_scale": 2,
+            "bpm": 120,
+            "temperature": 0.85,
+            "top_p": 0.9,
+            "top_k": 0,
+            "min_p": 0,
+        },
+        "class_type": "TextEncodeAceStepAudio1.5",
+        "_meta": {"title": "TextEncodeAceStepAudio1.5"},
+    },
+    "47": {
+        "inputs": {"conditioning": ["94", 0]},
+        "class_type": "ConditioningZeroOut",
+        "_meta": {"title": "Conditioning Zero Out"},
+    },
+    "98": {
+        "inputs": {"seconds": 120, "batch_size": 1},
+        "class_type": "EmptyAceStep1.5LatentAudio",
+        "_meta": {"title": "Empty Ace Step 1.5 Latent Audio"},
+    },
+    "3": {
+        "inputs": {
+            "seed": 42,
+            "steps": 8,
+            "cfg": 1,
+            "sampler_name": "euler",
+            "scheduler": "simple",
+            "denoise": 1,
+            "model": ["78", 0],
+            "positive": ["94", 0],
+            "negative": ["47", 0],
+            "latent_image": ["98", 0],
+        },
+        "class_type": "KSampler",
+        "_meta": {"title": "KSampler"},
+    },
+    "18": {
+        "inputs": {"samples": ["3", 0], "vae": ["106", 0]},
+        "class_type": "VAEDecodeAudio",
+        "_meta": {"title": "VAE Decode Audio"},
+    },
+    "111": {
+        "inputs": {
+            "filename_prefix": "audio/media-gen-mcp",
+            "format": "mp3",
+            "format.quality": "128k",
+            "audio": ["18", 0],
+        },
+        "class_type": "SaveAudioAdvanced",
+        "_meta": {"title": "Save Audio (Advanced)"},
+    },
+}
+
+# ACE-Step 1.5 turbo is an 8-step distilled config (same class of fast/cheap
+# as Z-Image Turbo's image generation, not a slow multi-minute render like
+# Wan2.2 video) -- generous timeout anyway to cover a cold checkpoint load
+# the first time it's used, same reasoning as the other two poll timeouts.
+MUSIC_POLL_TIMEOUT_SECONDS = 300
+# 400 -> 600 2026-09-10, alongside switching the finally block to
+# _restart_comfyui_and_wait_ready: that adds up to COMFYUI_RESTART_READY_
+# TIMEOUT_SECONDS (120s) of pod-restart wait on top of generation itself, so
+# 400 no longer left enough margin (300 poll + 120 restart leaves only 20s
+# spare). Safety-net only, same finally-block pattern as video.
+MUSIC_BUSY_TTL_SECONDS = 600
+
 mcp = MCPServer("media-gen")
 _redis = redis.from_url(REDIS_URL, decode_responses=True)
 
@@ -1007,6 +1152,188 @@ async def generate_video(
             # _restart_comfyui_and_wait_ready's own docstring above for the
             # full story (third-party corroboration included) and the RBAC
             # this now requires.
+            await asyncio.shield(_restart_comfyui_and_wait_ready(client, ctx))
+            await asyncio.shield(_redis.delete(BUSY_KEY))
+
+
+@mcp.tool()
+async def generate_music(
+    ctx: Context,
+    lyrics: str = "",
+    tags: str = "pop, upbeat, energetic",
+    duration: float = 120.0,
+    bpm: int = 120,
+    vocal_language: str = "en",
+    key: str = "C major",
+    seed: int = -1,
+) -> str:
+    """Generate a full song with vocals locally with ACE-Step 1.5 (via ComfyUI on aibox's GPU).
+
+    Like generate_image/generate_video, this fully unloads whatever chat
+    model is currently resident to give the whole GPU to generation, then
+    reloads the chat model lazily afterward. Any chat message sent
+    elsewhere during that window is automatically redirected to a cloud
+    model. ACE-Step 1.5 turbo is an 8-step distilled model (same class of
+    fast as Z-Image Turbo's image generation) -- confirmed live 2026-09-10:
+    a real 2-minute track rendered successfully via this exact graph in the
+    ComfyUI UI (see MUSIC_WORKFLOW_TEMPLATE's own comment for how it was
+    captured). Untested from THIS tool specifically, though -- the graph is
+    confirmed, the MCP wiring around it isn't yet.
+
+    Args:
+        lyrics: The song's lyrics, with section markers -- e.g.
+            "[Verse]\\nFirst line...\\n[Chorus]\\nHook line..." ACE-Step 1.5's
+            own convention is [Verse]/[Chorus]/[Bridge]/[Outro] markers, one
+            section per line group. An instrumental-only track can pass an
+            empty string or "[Instrumental]".
+        tags: Comma-separated genre/mood/instrumentation tags -- e.g.
+            "synthwave, energetic, female vocals, 80s". Free text, not a
+            fixed vocabulary.
+        duration: Song length in seconds. Default 120 (2 min), matching the
+            official template's own default. Longer songs take
+            proportionally longer to render.
+        bpm: Target tempo. Default 120.
+        vocal_language: Language code for the vocals (e.g. "en", "ja", "ko",
+            "zh", "es"). Default "en".
+        key: Musical key, e.g. "C major", "E minor". Default "C major".
+        seed: Fixed seed for reproducibility. Default -1 picks a random seed
+            each call.
+
+    Returns:
+        A short confirmation message containing a `MEDIA:<path>` line for
+        the generated song -- include that line VERBATIM, on its own, in
+        your reply to the user, the same as generate_image/generate_video's
+        output. NOTE: unlike image delivery, this has not yet been confirmed
+        to actually reach Telegram as a playable audio file -- if it
+        doesn't, that's the first thing to check (see the top-of-file
+        comment on generate_image's own delivery history for the pattern
+        this class of bug takes).
+    """
+    if not tags or not tags.strip():
+        raise ValueError("tags must not be empty -- ACE-Step 1.5 needs at least genre/mood tags to generate from")
+
+    already_busy = await _redis.set(BUSY_KEY, "1", ex=MUSIC_BUSY_TTL_SECONDS, nx=True)
+    if not already_busy:
+        raise RuntimeError(
+            "Media generation is already in progress. ComfyUI only holds "
+            "the GPU for one job at a time -- try again in a moment."
+        )
+
+    resolved_seed = random.randint(0, 2**31 - 1) if seed < 0 else seed
+
+    async with httpx.AsyncClient() as client:
+        try:
+            await _unload_chat_model(client)
+
+            workflow = copy.deepcopy(MUSIC_WORKFLOW_TEMPLATE)
+            workflow["94"]["inputs"]["tags"] = tags
+            workflow["94"]["inputs"]["lyrics"] = lyrics or "[Instrumental]"
+            workflow["94"]["inputs"]["seed"] = resolved_seed
+            workflow["94"]["inputs"]["bpm"] = bpm
+            workflow["94"]["inputs"]["duration"] = duration
+            workflow["94"]["inputs"]["language"] = vocal_language
+            workflow["94"]["inputs"]["keyscale"] = key
+            workflow["98"]["inputs"]["seconds"] = duration
+            workflow["3"]["inputs"]["seed"] = resolved_seed
+
+            submit_resp = await client.post(
+                f"{COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=30.0
+            )
+            submit_resp.raise_for_status()
+            prompt_id = submit_resp.json()["prompt_id"]
+            logger.info("submitted music prompt_id=%s seed=%s duration=%s", prompt_id, resolved_seed, duration)
+
+            poll_start = time.monotonic()
+            last_progress = poll_start
+            deadline = poll_start + MUSIC_POLL_TIMEOUT_SECONDS
+            history = None
+            while time.monotonic() < deadline:
+                hist_resp = await client.get(f"{COMFYUI_URL}/history/{prompt_id}", timeout=15.0)
+                hist_resp.raise_for_status()
+                body = hist_resp.json()
+                if prompt_id in body:
+                    history = body[prompt_id]
+                    break
+                now = time.monotonic()
+                if now - last_progress >= PROGRESS_REPORT_INTERVAL_SECONDS:
+                    try:
+                        await ctx.report_progress(
+                            progress=now - poll_start, total=MUSIC_POLL_TIMEOUT_SECONDS,
+                            message="ACE-Step 1.5 still rendering...",
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- best effort, must not break generation
+                        logger.warning("report_progress failed (%s: %s)", type(exc).__name__, exc)
+                    last_progress = now
+                await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+            if history is None:
+                raise TimeoutError(
+                    f"ComfyUI did not finish music prompt {prompt_id} within {MUSIC_POLL_TIMEOUT_SECONDS}s"
+                )
+
+            status = history.get("status", {})
+            if status.get("status_str") == "error":
+                raise RuntimeError(f"ComfyUI reported an error for prompt {prompt_id}: {status}")
+
+            # STILL UNCONFIRMED (see MUSIC_WORKFLOW_TEMPLATE's own comment):
+            # SaveAudioAdvanced is a newer, audio-specific Save* node, unlike
+            # SaveImage/SaveVideo which both confirmed "images" empirically
+            # -- checking both keys rather than gambling on one, so a wrong
+            # guess here degrades to a clear "produced no audio output"
+            # error (fixable by checking a real /history response) instead
+            # of silently looking in the wrong place. Node "111" here.
+            node_output = history.get("outputs", {}).get("111", {})
+            audios = node_output.get("audio") or node_output.get("images") or []
+            if not audios:
+                raise RuntimeError(f"ComfyUI finished prompt {prompt_id} but produced no audio output")
+            audio_ref = audios[0]
+
+            view_resp = await client.get(
+                f"{COMFYUI_URL}/view",
+                params={
+                    "filename": audio_ref["filename"],
+                    "subfolder": audio_ref.get("subfolder", ""),
+                    "type": audio_ref.get("type", "output"),
+                },
+                timeout=60.0,
+            )
+            view_resp.raise_for_status()
+            audio_bytes = view_resp.content
+            logger.info("fetched output audio %s (%d bytes)", audio_ref["filename"], len(audio_bytes))
+
+            os.makedirs(SHARED_OUTPUT_DIR, exist_ok=True)
+            out_path = os.path.join(SHARED_OUTPUT_DIR, f"{uuid.uuid4().hex}.mp3")
+            with open(out_path, "wb") as f:
+                f.write(audio_bytes)
+            logger.info("saved audio to shared path %s", out_path)
+
+            return (
+                f"Song generated successfully and saved to {out_path}\n\n"
+                f"To actually attach it, include this exact line on its own "
+                f"in your reply (don't just describe the song):\n"
+                f"MEDIA:{out_path}"
+            )
+        finally:
+            # CHANGED 2026-09-10, before generate_music's own cleanup path
+            # was ever actually exercised: originally used generate_image's
+            # gentler pattern (_free_comfyui_vram + a settle delay) on the
+            # assumption that ACE-Step 1.5's plain-safetensors checkpoint
+            # (not GGUF-loaded like Wan2.2) would release cleanly the same
+            # way Z-Image Turbo does. A real incident the same day showed
+            # exactly the failure this assumption risked -- a manual ComfyUI
+            # UI test (bypassing this tool, and so this cleanup code,
+            # entirely) left ACE-Step's checkpoint resident long enough that
+            # qwen3.8-27b-Expert's next load hit a genuine CUDA OOM
+            # (cudaMalloc failed on a 12.7GB buffer -- confirmed via the real
+            # upstream stderr, not just llama-swap's generic wrapper error;
+            # see /areas/ai-box-k3s.md for the full trace). That incident
+            # doesn't itself prove generate_music's own cleanup is
+            # insufficient (the UI test never ran it at all), but given how
+            # expensive a wrong guess is here -- a crash-looping main chat
+            # model -- this switches to generate_video's harder, already-
+            # proven-necessary pattern (full ComfyUI pod restart, not just
+            # /free) as a precaution rather than waiting for a second real
+            # incident to confirm it the hard way.
             await asyncio.shield(_restart_comfyui_and_wait_ready(client, ctx))
             await asyncio.shield(_redis.delete(BUSY_KEY))
 
