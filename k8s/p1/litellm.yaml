@@ -196,6 +196,52 @@
 # fallback comment). 60s keeps real-dead-backend detection reasonably fast
 # (still nowhere near the old multi-minute hang this was added to fix)
 # while giving a cold multi-model load realistic room to finish.
+# CLOUD ALIASES FOR DELIBERATE USE (added 2026-09-11): closes the last
+# "planned" item from the roadmap that wasn't actually a fallback -- this is
+# for a real deliberate pick ("I want Opus for this specific thing"), not
+# an automatic failure/busy redirect (those two are covered above and are
+# unaffected by this). Two new model_list entries below, each a real
+# frontier model reachable only by explicitly asking for it in a message.
+#
+# MODEL CHOICE: Eldar picked "Claude Opus" + "GPT-5 / OpenAI flagship" via
+# AskUserQuestion. Slugs verified live against openrouter.ai (WebFetch,
+# 2026-09-11), not assumed from training data -- this model landscape moves
+# fast and the assistant's own knowledge cutoff (Jan 2026) is already stale
+# here: OpenAI's actual current flagship turned out to be GPT-6 Astra
+# (released 2026-09-04/05, days before this was written), not any GPT-5.x
+# variant -- GPT-5.4/5.5/5.6 are now the PREVIOUS generation.
+# REVISED same day, Eldar's explicit call: GPT-6 Astra ($10/$50 per M tok)
+# is deliberately NOT wired here -- same top-of-the-line tier as Anthropic's
+# "Fable", both too expensive/precious for routine Hermes use. Eldar's own
+# framing: Opus and GPT-5.6 Sol are the "maximum" tier he wants available
+# inside Hermes day-to-day; Astra/Fable stay manual-only, reached rarely and
+# directly from his PC, never wired into aibox. Aliased to GPT-5.6 Sol
+# instead -- OpenAI's own "flagship model in the GPT-5.6 series" (the
+# generation below Astra), noticeably cheaper than even Opus:
+#   - anthropic/claude-opus-5 -- $5/$25 per M tok (in/out), 1M context
+#   - openai/gpt-5.6-sol -- $2/$10 per M tok (in/out), 1.1M context
+# Both still real money per call, unlike the local models or even the
+# openrouter-fallback (Gemini Flash, cheaper still) used for automatic
+# fallback above -- deliberately not wired into any automatic path. Re-
+# verify both slugs against openrouter.ai/models the same way before ever
+# touching this block again -- this landscape moves fast enough that even
+# this comment's "current" framing will go stale.
+#
+# INVOCATION (Eldar's pick via AskUserQuestion): a phrase-trigger in
+# custom_router_hook.py, same deterministic-fast-path pattern already used
+# for DEEP_REASONING_TRIGGERS below -- not an Open WebUI dropdown pick (would
+# also work as one incidentally, since every model_list entry is visible to
+# any OpenAI-compatible client that lists LiteLLM's /models, but that wasn't
+# the ask). See CLOUD_ALIAS_TRIGGERS/_wants_cloud_alias() further down.
+# Checked BEFORE the media-gen-busy check (unlike every other routing rule
+# in this file) -- deliberately: these are plain cloud API calls that don't
+# touch aibox's GPU at all, so there's no reason an explicit "use opus"
+# request should get silently downgraded to the cheaper Gemini-Flash busy-
+# fallback just because ComfyUI happens to be generating something at the
+# same moment.
+# NOT YET DEPLOYED/TESTED on aibox as of this comment -- needs a real
+# induced request ("use opus for this") after rollout to confirm the trigger
+# actually fires and the OpenRouter call succeeds with the real key.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -320,6 +366,23 @@ data:
       - model_name: openrouter-fallback
         litellm_params:
           model: openrouter/google/gemini-3.8-flash
+          api_key: os.environ/OPENROUTER_API_KEY
+
+      # Deliberate-use cloud aliases -- see the top-of-file "CLOUD ALIASES
+      # FOR DELIBERATE USE" comment for the full story (model choice,
+      # pricing, why GPT-5.6 Sol and not GPT-6 Astra). Never targeted by the
+      # classifier or either fallback mechanism -- only reachable via the
+      # CLOUD_ALIAS_TRIGGERS phrase-match in custom_router_hook.py below,
+      # or by naming the model directly. GPT-6 Astra and Claude's "Fable"
+      # tier deliberately NOT wired here -- Eldar's own top-of-the-line
+      # reserve, manual-only from his PC, not for routine Hermes use.
+      - model_name: claude-opus-alias
+        litellm_params:
+          model: openrouter/anthropic/claude-opus-5
+          api_key: os.environ/OPENROUTER_API_KEY
+      - model_name: gpt-sol-alias
+        litellm_params:
+          model: openrouter/openai/gpt-5.6-sol
           api_key: os.environ/OPENROUTER_API_KEY
 
     litellm_settings:
@@ -641,9 +704,68 @@ data:
         return False
 
 
+    # ADDED 2026-09-11, same deterministic-fast-path/latest-turn-only pattern
+    # as DEEP_REASONING_TRIGGERS above (and the same 2026-09-09 bug already
+    # fixed once there -- checking the whole conversation instead of just the
+    # latest user turn would let one old "use opus" message stick to every
+    # later unrelated reply). Deliberately real phrases ("use X", "ask X",
+    # "switch to X"), not a bare model name alone -- these are paid API calls
+    # with no cap, so a broad single-word match ("opus", "gpt") would be too
+    # easy to trip by accident inside an unrelated sentence. First match wins
+    # if a message somehow names both.
+    CLOUD_ALIAS_TRIGGERS = {
+        "claude-opus-alias": (
+            "use opus", "ask opus", "switch to opus", "via opus",
+            "with opus", "use claude opus", "ask claude opus",
+        ),
+        "gpt-sol-alias": (
+            "use sol", "ask sol", "switch to sol", "via sol", "with sol",
+            "use gpt sol", "use gpt-5.6", "use gpt-5.6 sol",
+        ),
+        # Deliberately no trigger phrases for gpt-6-astra or a "Fable"-tier
+        # Claude model -- neither has a model_list entry at all, on
+        # purpose (see the top-of-file comment). If one gets added later
+        # for real manual-only use, it should NOT get a phrase trigger here
+        # either -- that's exactly the routine-use path Eldar wants to
+        # avoid for that tier.
+    }
+
+
+    def _wants_cloud_alias(messages):
+        for m in reversed(messages):
+            if m.get("role") != "user":
+                continue
+            content = m.get("content")
+            if isinstance(content, str):
+                lowered = content.lower()
+                for model_name, triggers in CLOUD_ALIAS_TRIGGERS.items():
+                    for t in triggers:
+                        if t in lowered:
+                            logger.info(
+                                "cloud-alias trigger matched %r -> %s, in: %r",
+                                t, model_name, content[:200],
+                            )
+                            return model_name
+            # only the latest user turn counts -- stop here either way
+            return None
+        return None
+
+
     class ArchRouterHook(CustomLogger):
         async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
             if data.get("model") != "auto":
+                return data
+
+            # Checked before EVERYTHING else, including the media-gen-busy
+            # check right below -- a deliberate "use opus" ask is a plain
+            # cloud API call that never touches aibox's GPU, so it has no
+            # reason to wait on or be downgraded by whatever ComfyUI is
+            # doing. See the top-of-file "CLOUD ALIASES FOR DELIBERATE USE"
+            # comment and CLOUD_ALIAS_TRIGGERS above.
+            alias_model = _wants_cloud_alias(data.get("messages", []))
+            if alias_model:
+                data["model"] = alias_model
+                logger.info("auto -> cloud alias -> %s", alias_model)
                 return data
 
             # Checked before anything else -- if ComfyUI has the GPU, every
