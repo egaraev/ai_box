@@ -60,6 +60,17 @@ metadata:
     app: vault-mcp
 spec:
   replicas: 1
+  # Recreate, not the default RollingUpdate -- a rolling update briefly
+  # wants two pods up at once (a surge pod), which for this Deployment
+  # means two pods trying to hold the hermes-cache PVC mount
+  # simultaneously. Hit this for real 2026-09-13: after adding hermes-cache,
+  # the surge pod sat Pending indefinitely while the old one kept running.
+  # No real cost to a few seconds of downtime for a single-replica MCP
+  # tool server -- same reasoning media-gen-mcp already uses this for
+  # (that one's about concurrency, this one's about the volume, but the
+  # fix is identical: never have two of these pods trying to exist at once).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: vault-mcp
