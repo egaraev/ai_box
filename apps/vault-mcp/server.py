@@ -28,13 +28,28 @@ the same reason vault_sync.py's are: two different notes sharing identical
 short chunk text (a repeated heading, a common one-liner) would otherwise
 collide onto the same Qdrant point and silently overwrite each other.
 
-ASSUMPTION NOT YET CONFIRMED: ingest_file's file_path is checked against
-SHARED_INPUT_DIR (/shared-output, the same hostPath media-gen-mcp already
-shares with hermes-agent for generated-image delivery) on the assumption
-that incoming Telegram attachments land there too, not just outgoing
-generated images. First real ingest_file call with a real Telegram-sent
-file will confirm or disprove this -- if wrong, repoint SHARED_INPUT_DIR at
-wherever Hermes actually puts incoming files.
+ingest_file's file_path is checked against two allowed roots (CONFIRMED,
+2026-09-13, by asking Hermes itself where it saves things -- not guessed):
+  - /shared-output -- the hostPath media-gen-mcp already shares with
+    hermes-agent for OUTGOING generated-image delivery.
+  - /opt/data/cache -- the hermes-data PVC's cache/ subdirectory, where
+    hermes-agent actually saves INCOMING Telegram attachments
+    (cache/images/, cache/audio/). Mounted here read-only via subPath so
+    this pod never sees the rest of that PVC (config.yaml/honcho.json/.env
+    live at its root -- see k8s/p3/hermes-agent.yaml). Both pods run on
+    this cluster's single node, so a second pod mounting the same PVC (even
+    read-write at the API level, since ReadWriteOnce is node-scoped, not
+    pod-scoped) is expected to work -- NOT YET CONFIRMED against a real
+    pod start, check both pods reach Running after this deploys.
+
+IMPORTANT, told directly to Eldar: don't let Hermes/Jarvis actually create
+its own "/opt/data/obsidian_vault/" directory, even though it offered to in
+chat. That path lives inside hermes-agent's own private PVC, entirely
+separate from the real vault at /data/obsidian_vault -- anything saved
+there would never be seen by scripts/vault_sync.py or by this server's own
+search_vault, a silent duplicate "vault" that looks like it worked. The
+real fix is this server's ingest_file tool reading from where Hermes
+already saves things (above), not Hermes writing into a new location.
 """
 import base64
 import hashlib
@@ -63,7 +78,15 @@ VISION_MODEL = "qwen3.8-27b-Expert-Vision"   # same locked vision route Hermes's
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", "/data/obsidian_vault"))
 INBOX_DIR = VAULT_PATH / "Inbox"             # everything this server writes lands here -- Eldar re-files it in Obsidian later if he wants
 ATTACHMENTS_DIR = VAULT_PATH / "Attachments"
-SHARED_INPUT_DIR = Path(os.environ.get("SHARED_INPUT_DIR", "/shared-output"))
+
+# Where ingest_file is allowed to read from -- see this file's top comment
+# for how these two were confirmed. Anything outside both is refused rather
+# than read, so a compromised/confused Hermes call can't point this server
+# at an arbitrary host path.
+ALLOWED_INPUT_ROOTS = [
+    Path(os.environ.get("SHARED_INPUT_DIR", "/shared-output")),
+    Path(os.environ.get("HERMES_CACHE_DIR", "/opt/data/cache")),
+]
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
@@ -389,10 +412,13 @@ def _extract_pdf_text(path: Path) -> str:
 async def ingest_file(file_path: str, title: str | None = None, tags: list[str] | None = None, audience: str | None = None) -> str:
     """Save a file (image, PDF, or other document) into Eldar's Obsidian vault and index its content for search.
 
-    file_path must be a path this server can already read -- i.e. wherever
-    Hermes already has the file (e.g. a Telegram attachment saved to shared
-    storage), not an arbitrary path on your own side. If you're not sure
-    what path to pass, say so rather than guessing.
+    file_path must be a path this server can already read -- either
+    /opt/data/cache/images/... or /opt/data/cache/audio/... (where your own
+    incoming Telegram attachments already land) or /shared-output/... (where
+    generated media gets written). Not an arbitrary path on your own side --
+    if you're not sure what path to pass, say so rather than guessing, and
+    never create files under /opt/data/obsidian_vault -- that is NOT the
+    real vault.
 
     What happens depends on the file type:
     - PDF: text is extracted and indexed.
@@ -414,12 +440,10 @@ async def ingest_file(file_path: str, title: str | None = None, tags: list[str] 
         Confirmation with the vault paths (note + attachment) and whether
         text/caption extraction succeeded.
     """
-    src = Path(file_path)
-    try:
-        src = src.resolve()
-        src.relative_to(SHARED_INPUT_DIR.resolve())
-    except ValueError:   # resolved path isn't under SHARED_INPUT_DIR -- refuse rather than read an arbitrary host path
-        raise ValueError(f"file_path must be under {SHARED_INPUT_DIR} (got {file_path})")
+    src = Path(file_path).resolve()
+    if not any(src.is_relative_to(root.resolve()) for root in ALLOWED_INPUT_ROOTS):   # Path.is_relative_to, py3.9+ (base image is 3.12)
+        allowed = " or ".join(str(r) for r in ALLOWED_INPUT_ROOTS)
+        raise ValueError(f"file_path must be under {allowed} (got {file_path})")
     if not src.is_file():
         raise ValueError(f"no such file: {file_path}")
 

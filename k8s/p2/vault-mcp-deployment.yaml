@@ -39,13 +39,18 @@
 #   loudly rather than silently start writing into a freshly-created empty
 #   directory that isn't really the vault.
 # - shared-output: same hostPath (/data/media-gen-output) already shared
-#   between hermes-agent and media-gen-mcp for generated-image delivery
-#   (k8s/media-gen/media-gen-mcp-deployment.yaml, k8s/p3/hermes-agent.yaml).
-#   Mounted read-only here -- ingest_file only ever needs to READ a file
-#   Hermes already placed there, never write to it. ASSUMPTION NOT YET
-#   CONFIRMED: that incoming Telegram attachments land in this same
-#   directory, not just outgoing generated images -- see server.py's own
-#   top-of-file comment.
+#   between hermes-agent and media-gen-mcp for OUTGOING generated-media
+#   delivery. Mounted read-only -- ingest_file only ever needs to read a
+#   file placed here, never write to it.
+# - hermes-cache: the cache/ subdirectory of hermes-data (the PVC
+#   hermes-agent.yaml mounts whole at /opt/data), where hermes-agent
+#   actually saves INCOMING Telegram attachments (images/, audio/) --
+#   confirmed 2026-09-13 by asking Hermes directly, not guessed (the
+#   original assumption here was /shared-output for incoming files too,
+#   which was wrong). subPath: cache + readOnly keeps this pod from ever
+#   seeing that PVC's root, where config.yaml/honcho.json/.env live. See
+#   server.py's own top-of-file comment for the full story, including why
+#   Hermes must NOT be told to create its own /opt/data/obsidian_vault/.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -77,6 +82,8 @@ spec:
               value: "/data/obsidian_vault"
             - name: SHARED_INPUT_DIR
               value: "/shared-output"
+            - name: HERMES_CACHE_DIR
+              value: "/opt/data/cache"
             # Same base_url/auth pattern media-gen-mcp/hermes-agent/open-webui
             # already use to reach LiteLLM (k8s/p1/litellm.yaml): Bearer auth
             # against its LITELLM_MASTER_KEY, sourced from the same
@@ -94,6 +101,18 @@ spec:
             - name: shared-output
               mountPath: /shared-output
               readOnly: true
+            # Confirmed 2026-09-13 by asking Hermes directly where it saves
+            # incoming attachments: /opt/data/cache/images/ and
+            # .../audio/ -- NOT /shared-output (that's outgoing generated
+            # media only). /opt/data is the hermes-data PVC (hermes-agent.yaml)
+            # -- subPath: cache mounts ONLY that subdirectory here, so this
+            # pod never sees config.yaml/honcho.json/.env, which live at
+            # that PVC's root. Same absolute path in both pods (no
+            # translation needed for a file_path Hermes reports verbatim).
+            - name: hermes-cache
+              mountPath: /opt/data/cache
+              subPath: cache
+              readOnly: true
           resources:
             requests:
               cpu: "100m"
@@ -110,6 +129,17 @@ spec:
           hostPath:
             path: /data/media-gen-output
             type: DirectoryOrCreate
+        # Same PVC hermes-agent.yaml mounts whole (as "data") at /opt/data --
+        # here only its cache/ subPath is mounted, read-only (see the
+        # volumeMounts comment above). Both pods always land on this
+        # cluster's single node, and ReadWriteOnce is node-scoped, not
+        # pod-scoped, so a second pod mounting the same PVC is expected to
+        # work -- NOT YET CONFIRMED against a real pod start, check both
+        # hermes-agent and vault-mcp reach Running after this applies.
+        - name: hermes-cache
+          persistentVolumeClaim:
+            claimName: hermes-data
+            readOnly: true
 ---
 apiVersion: v1
 kind: Service
