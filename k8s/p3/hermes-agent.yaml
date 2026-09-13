@@ -365,6 +365,32 @@ spec:
           # "honcho-ai") so a future point release can't silently change
           # behavior on a routine pod restart -- bump deliberately, the same
           # way the image digest above is pinned.
+          #
+          # Dashboard fix (2026-09-13): HERMES_DASHBOARD=1 below does NOT
+          # start the web dashboard here, despite being documented that way
+          # for the s6-overlay Docker image -- confirmed directly against a
+          # running pod, not assumed. `hermes --help`'s own description of
+          # `gateway run --no-supervise` says HERMES_DASHBOARD is only read
+          # by the s6 supervisor that `gateway run` normally gets redirected
+          # into inside that image; this container bypasses s6 entirely
+          # (this custom sh -c script execs `hermes gateway run` directly
+          # for the honcho-fix above), so that redirect never happens and
+          # the env var is inert here. `hermes gateway run --help` confirms
+          # it: no dashboard-related flag or env handling at all. The
+          # dashboard is its own subcommand (`hermes dashboard`, default
+          # port 9119 / host 127.0.0.1) -- started explicitly below,
+          # backgrounded so it doesn't block the gateway becoming PID 1 via
+          # exec, and pointed at 0.0.0.0 so the existing Service/NodePort
+          # (9119 -> 30119) can actually reach it. --host 0.0.0.0 requires
+          # an auth provider, which HERMES_DASHBOARD_BASIC_AUTH_USERNAME/
+          # _PASSWORD below already supply (they were already set before
+          # this fix -- just never wired to a running process). --skip-build
+          # avoids an npm build step this slim runtime image may not
+          # support; --no-open skips trying to launch a local browser (no
+          # display in a container). Shares /opt/data (config.yaml,
+          # honcho.json, sessions) with the gateway automatically since
+          # it's the same container/filesystem -- no separate PVC mount
+          # needed.
           command: ["sh", "-c"]
           args:
             - |
@@ -372,6 +398,8 @@ spec:
               python3 -m ensurepip --upgrade
               echo "[honcho-fix] installing honcho-ai==2.4.0"
               python3 -m pip install --no-cache-dir honcho-ai==2.4.0
+              echo "[dashboard-fix] starting web dashboard on :9119 (background -- see comment above)"
+              hermes dashboard --host 0.0.0.0 --port 9119 --skip-build --no-open &
               echo "[honcho-fix] starting hermes"
               exec hermes gateway run
           ports:
