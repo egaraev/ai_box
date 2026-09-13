@@ -387,6 +387,22 @@ data:
 
     litellm_settings:
       callbacks: ["custom_router_hook.proxy_handler_instance"]
+      # Honcho's embedding calls to nomic-embed-text-v1.5 always pass an
+      # explicit `dimensions` param (EMBEDDING_VECTOR_DIMENSIONS=768 in
+      # k8s/p2/honcho.yaml) -- LiteLLM's own param-validation treats this as
+      # an OpenAI-text-embedding-3-and-later-only parameter and rejects it
+      # with a 400 for nomic-embed-text-v1.5 too. Confirmed live via
+      # honcho-api/honcho-deriver logs, 2026-09-13: every embedding call
+      # (dialectic prefetch, message representation save, deriver batch
+      # save) failed identically with "litellm.UnsupportedParamsError:
+      # Setting dimensions is not supported...", which is why Honcho's own
+      # dialectic CHAT worked fine (200s, real LLM round-trips logged) but
+      # every save/observation silently failed -- the error message itself
+      # names the fix. drop_params makes LiteLLM strip a param the target
+      # doesn't support instead of erroring on it -- safe here specifically
+      # since nomic-embed-text-v1.5 already natively outputs 768-dim
+      # vectors regardless of whether this param reaches it.
+      drop_params: true
       # GENERAL AUTO-FALLBACK -- TEMPORARILY DISABLED 2026-09-09 (Eldar's
       # explicit request, while actively testing local-LLM tool-calling
       # behavior post the casual-route model swap): with this on, a local
