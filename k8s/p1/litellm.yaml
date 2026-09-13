@@ -624,7 +624,23 @@ data:
         # qwen3-8b -> llama-3.1-8b, for an unrelated context-length reason.
         "casual": "hermes3-llama-3.1-8b",
         "reasoning": "qwen3.8-27b-Expert",
-        "other": "qwen3.8-27b-Expert",
+        # "other" CHANGED 2026-09-13 (Eldar's own finding, confirmed via
+        # 6h of real routing logs): arch-router answers "other" whenever a
+        # request doesn't confidently fit vision/medical/casual/reasoning
+        # -- in practice this was firing mostly on trivial exchanges
+        # ("Alive?", "Its fixed", short Honcho test pings) and, notably,
+        # Hermes's own internal "review this conversation, consider saving
+        # to memory" housekeeping prompt, which routes through this same
+        # "auto" endpoint on every turn. None of that needed the 27B
+        # model. Was qwen3.8-27b-Expert (same as "reasoning") -- that made
+        # every low-confidence classification silently expensive/slow
+        # instead of defaulting to fast. Trade-off accepted knowingly: a
+        # genuinely complex request the classifier ISN'T confident enough
+        # to call "reasoning" now gets the fast model's answer instead of
+        # the careful one, where before it accidentally got the careful
+        # one. Revisit if that trade-off starts showing up as a real
+        # quality problem, not just a hunch.
+        "other": "hermes3-llama-3.1-8b",
     }
 
     SYSTEM_PROMPT = """You are a helpful assistant designed to find the best suited route.
@@ -698,6 +714,30 @@ data:
         "thorough analysis", "step by step", "step-by-step", "deep dive",
         "in detail", "don't rush", "do not rush", "take your time",
         "double check", "double-check", "carefully consider",
+        # ADDED 2026-09-13 (Eldar's request). "think harder"/"ultrathink"
+        # mirror Claude Code's own real graduated-thinking trigger phrases
+        # (https://claudefa.st/blog/guide/performance/deep-thinking-techniques)
+        # -- established precedent for this exact pattern. The rest are
+        # Eldar's requested intents (think/analyse/find out/double check/
+        # investigate/design/architect/plan), written as multi-word
+        # phrases rather than bare words on purpose, same discipline as
+        # the rest of this list -- a bare "plan"/"design"/"analyse" would
+        # match ordinary casual usage ("any plans for the weekend", "what
+        # do you think") and reintroduce the over-triggering bug this
+        # list already had fixed once before (see the bug note above).
+        # Deliberately did NOT add a technical-vocabulary keyword list
+        # (e.g. "kubernetes"/"docker"/"api") despite that being LiteLLM's
+        # own Auto Router v2 pattern -- ROUTES["casual"]'s own description
+        # above explicitly wants one-line tech questions ("what's a
+        # Kubernetes pod") to stay on the fast model, so topic-vocabulary
+        # keywords would directly undo that 2026-09-09 fix. Left to
+        # arch-router's own semantic judgment instead, which already
+        # correctly classified a real troubleshooting thread as
+        # "reasoning" on 2026-09-13 without needing a keyword for it.
+        "think harder", "ultrathink",
+        "investigate this", "look into this", "dig into this",
+        "find out why", "figure out why",
+        "help me design", "help me plan", "help me architect",
     )
 
 
