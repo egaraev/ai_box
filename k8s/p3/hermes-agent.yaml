@@ -492,6 +492,20 @@ spec:
             # can't see, and the image silently never reaches Telegram.
             - name: shared-output
               mountPath: /shared-output
+            # Added 2026-09-13 so Hermes can copy a file it already has
+            # (from its own cache under /opt/data/cache/images|audio, see
+            # the "data" mount above) directly into the real Obsidian vault
+            # -- specifically into Attachments/ -- using its own file/code
+            # tools, no cross-pod plumbing involved. Read-write, same
+            # hostPath apps/vault-mcp/server.py's own pod mounts at the
+            # identical path (k8s/p2/vault-mcp-deployment.yaml), so a path
+            # Hermes uses here is the exact path to hand vault-mcp's
+            # ingest_file tool afterward. Earlier design had vault-mcp
+            # reach INTO hermes-agent's own PVC instead (the wrong
+            # direction) and hit a real dead end -- see vault-mcp's
+            # server.py top comment for that story.
+            - name: vault-data
+              mountPath: /data/obsidian_vault
           resources:
             requests:
               cpu: "500m"
@@ -528,6 +542,14 @@ spec:
           hostPath:
             path: /data/media-gen-output
             type: DirectoryOrCreate
+        # Same hostPath as vault-mcp's own "vault-data" volume
+        # (k8s/p2/vault-mcp-deployment.yaml) -- type: Directory, not
+        # DirectoryOrCreate, since the vault already exists and a silent
+        # freshly-created empty dir here would be the wrong failure mode.
+        - name: vault-data
+          hostPath:
+            path: /data/obsidian_vault
+            type: Directory
 ---
 apiVersion: v1
 kind: Service

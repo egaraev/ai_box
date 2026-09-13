@@ -30,26 +30,22 @@
 # ArgoCD sync k8s/p2 the normal way) in addition to any image rebuild:
 #   kubectl apply -f k8s/p2/vault-mcp-deployment.yaml
 #
-# THREE VOLUMES, all plain hostPath (no PVC) -- see the hermes-cache volume's
-# own comment below for why a PVC mount specifically doesn't work for a
-# second pod here, confirmed live 2026-09-13:
+# TWO VOLUMES, both plain hostPath, both fully owned by this pod (no
+# cross-pod reads into another pod's storage -- see server.py's own
+# top-of-file comment for the multi-attempt story of why that mattered):
 # - vault-data: the real Obsidian vault at /data/obsidian_vault (same
 #   hostPath scripts/vault_sync.py already reads/writes on the host
-#   directly) -- mounted read-write so ingest_note/ingest_file can create
-#   Inbox/ and Attachments/ entries. type: Directory (not DirectoryOrCreate)
-#   since the vault already exists; if it's ever missing this should fail
-#   loudly rather than silently start writing into a freshly-created empty
-#   directory that isn't really the vault.
+#   directly, and the SAME path k8s/p3/hermes-agent.yaml now also mounts
+#   read-write into Hermes's own pod) -- mounted read-write here too so
+#   ingest_note/ingest_file can create Inbox/ and Attachments/ entries.
+#   type: Directory (not DirectoryOrCreate) since the vault already exists;
+#   if it's ever missing this should fail loudly rather than silently start
+#   writing into a freshly-created empty directory that isn't really the
+#   vault.
 # - shared-output: same hostPath (/data/media-gen-output) already shared
 #   between hermes-agent and media-gen-mcp for OUTGOING generated-media
 #   delivery. Mounted read-only -- ingest_file only ever needs to read a
 #   file placed here, never write to it.
-# - hermes-cache: where hermes-agent actually saves INCOMING Telegram
-#   attachments (images/, audio/) -- confirmed 2026-09-13 by asking Hermes
-#   directly, not guessed (the original assumption here was /shared-output
-#   for incoming files too, which was wrong). See server.py's own
-#   top-of-file comment for the full story, including why Hermes must NOT
-#   be told to create its own /opt/data/obsidian_vault/.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -59,20 +55,6 @@ metadata:
     app: vault-mcp
 spec:
   replicas: 1
-  # Recreate, not the default RollingUpdate -- a rolling update briefly
-  # wants two pods up at once (a surge pod), which for this Deployment
-  # means two pods trying to hold the hermes-cache PVC mount
-  # simultaneously. Hit this for real 2026-09-13: after adding hermes-cache,
-  # the surge pod sat Pending indefinitely while the old one kept running.
-  # No real cost to a few seconds of downtime for a single-replica MCP
-  # tool server -- same reasoning media-gen-mcp already uses this for
-  # (that one's about concurrency, this one's about the volume, but the
-  # fix is identical: never have two of these pods trying to exist at once).
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app: vault-mcp
   template:
     metadata:
       labels:
@@ -92,8 +74,6 @@ spec:
               value: "/data/obsidian_vault"
             - name: SHARED_INPUT_DIR
               value: "/shared-output"
-            - name: HERMES_CACHE_DIR
-              value: "/opt/data/cache"
             # Same base_url/auth pattern media-gen-mcp/hermes-agent/open-webui
             # already use to reach LiteLLM (k8s/p1/litellm.yaml): Bearer auth
             # against its LITELLM_MASTER_KEY, sourced from the same
@@ -111,15 +91,6 @@ spec:
             - name: shared-output
               mountPath: /shared-output
               readOnly: true
-            # Confirmed 2026-09-13 by asking Hermes directly where it saves
-            # incoming attachments: /opt/data/cache/images/ and .../audio/
-            # -- NOT /shared-output (that's outgoing generated media only).
-            # Same absolute path in both pods, so a file_path Hermes reports
-            # verbatim (like the img_5d5d26064ad7.jpg example it gave) needs
-            # no translation to work here too.
-            - name: hermes-cache
-              mountPath: /opt/data/cache
-              readOnly: true
           resources:
             requests:
               cpu: "100m"
@@ -136,30 +107,9 @@ spec:
           hostPath:
             path: /data/media-gen-output
             type: DirectoryOrCreate
-        # NOT a PVC mount -- tried that first (persistentVolumeClaim,
-        # claimName: hermes-data, readOnly: true) and it hung forever in
-        # Pending, confirmed live 2026-09-13: hermes-agent's own pod never
-        # stops running and already holds that PVC (as "data", read-write,
-        # its primary /opt/data volume), and k3s's default storage class
-        # (local-path-provisioner, "local" PV type) does not support a
-        # second pod mounting the same PVC concurrently, even read-only,
-        # even on the same node -- ReadWriteOnce is NOT node-scoped in
-        # practice here the way it is for real multi-attach CSI drivers.
-        # Fix: skip the PVC/PV abstraction entirely and hostPath straight
-        # into the exact directory local-path-provisioner already stores
-        # that PVC's data in on disk (confirmed via `kubectl get pv
-        # <hermes-data's bound PV> -o yaml` -> spec.local.path) -- same
-        # hostPath pattern as vault-data/shared-output above, which never
-        # had this problem because hostPath mounts have no such exclusivity.
-        # FRAGILE: this path embeds the PV's auto-generated name (which
-        # embeds the PVC's UID) -- if hermes-data is ever deleted and
-        # recreated (not a routine operation, but possible), this path goes
-        # stale and needs updating by re-running the kubectl get pv command
-        # above and fixing the path here.
-        - name: hermes-cache
-          hostPath:
-            path: /data/k3s/storage/pvc-4a2d1a49-13e1-4dca-9ba6-434a1d9b123c_ai-agents_hermes-data/cache
-            type: Directory
+  selector:
+    matchLabels:
+      app: vault-mcp
 ---
 apiVersion: v1
 kind: Service

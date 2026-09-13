@@ -28,28 +28,35 @@ the same reason vault_sync.py's are: two different notes sharing identical
 short chunk text (a repeated heading, a common one-liner) would otherwise
 collide onto the same Qdrant point and silently overwrite each other.
 
-ingest_file's file_path is checked against two allowed roots (CONFIRMED,
-2026-09-13, by asking Hermes itself where it saves things -- not guessed):
-  - /shared-output -- the hostPath media-gen-mcp already shares with
-    hermes-agent for OUTGOING generated-image delivery.
-  - /opt/data/cache -- the hermes-data PVC's cache/ subdirectory, where
-    hermes-agent actually saves INCOMING Telegram attachments
-    (cache/images/, cache/audio/). Mounted here read-only via subPath so
-    this pod never sees the rest of that PVC (config.yaml/honcho.json/.env
-    live at its root -- see k8s/p3/hermes-agent.yaml). Both pods run on
-    this cluster's single node, so a second pod mounting the same PVC (even
-    read-write at the API level, since ReadWriteOnce is node-scoped, not
-    pod-scoped) is expected to work -- NOT YET CONFIRMED against a real
-    pod start, check both pods reach Running after this deploys.
+ingest_file does NOT reach into hermes-agent's own storage to read a
+freshly-received attachment (an earlier version of this tried that -- read
+into the hermes-data PVC's cache/ subdirectory where incoming Telegram
+attachments land -- and hit a real dead end, see below). Instead,
+hermes-agent.yaml now ALSO mounts the real vault (/data/obsidian_vault) at
+the identical path this server uses, read-write. So the flow is:
+  1. Hermes copies the file it already has (from its own cache) into
+     /data/obsidian_vault/Attachments/ itself, using its own file/code
+     tools -- both source and destination are in ITS OWN pod, no cross-pod
+     access of any kind needed for this step.
+  2. Hermes calls ingest_file with that now-in-the-vault path.
+  3. This server extracts text (PDF) / captions (image) / links the
+     attachment from a new note, then indexes it -- exactly like before,
+     just reading from the vault it already owns instead of reaching into
+     someone else's pod.
+ingest_file's file_path is therefore checked against VAULT_PATH itself
+(plus /shared-output, for the rarer case of linking a media-gen output).
 
-IMPORTANT, told directly to Eldar: don't let Hermes/Jarvis actually create
-its own "/opt/data/obsidian_vault/" directory, even though it offered to in
-chat. That path lives inside hermes-agent's own private PVC, entirely
-separate from the real vault at /data/obsidian_vault -- anything saved
-there would never be seen by scripts/vault_sync.py or by this server's own
-search_vault, a silent duplicate "vault" that looks like it worked. The
-real fix is this server's ingest_file tool reading from where Hermes
-already saves things (above), not Hermes writing into a new location.
+WHY NOT read hermes-agent's cache directly (tried first, reverted
+2026-09-13): hermes-agent's own pod never stops running and already holds
+the hermes-data PVC read-write as its primary volume; k3s's default
+storage (local-path-provisioner) does not support a second pod mounting
+that PVC concurrently, even read-only, even on the same node -- confirmed
+live, the second pod sat Pending indefinitely. A hostPath straight into
+local-path-provisioner's on-disk storage for that PVC was tried next and
+ALSO stayed Pending for an unclear reason -- rather than keep debugging a
+narrower fix for the wrong-shaped problem, Eldar's own suggestion (mount
+the vault into Hermes's pod instead) sidesteps the whole class of issue:
+this server now only ever touches volumes it fully owns.
 """
 import base64
 import hashlib
@@ -80,12 +87,13 @@ INBOX_DIR = VAULT_PATH / "Inbox"             # everything this server writes lan
 ATTACHMENTS_DIR = VAULT_PATH / "Attachments"
 
 # Where ingest_file is allowed to read from -- see this file's top comment
-# for how these two were confirmed. Anything outside both is refused rather
-# than read, so a compromised/confused Hermes call can't point this server
-# at an arbitrary host path.
+# for why it's just these two (both volumes this pod fully owns, no
+# cross-pod reads into someone else's storage). Anything outside both is
+# refused rather than read, so a compromised/confused Hermes call can't
+# point this server at an arbitrary host path.
 ALLOWED_INPUT_ROOTS = [
+    VAULT_PATH,
     Path(os.environ.get("SHARED_INPUT_DIR", "/shared-output")),
-    Path(os.environ.get("HERMES_CACHE_DIR", "/opt/data/cache")),
 ]
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
@@ -412,13 +420,14 @@ def _extract_pdf_text(path: Path) -> str:
 async def ingest_file(file_path: str, title: str | None = None, tags: list[str] | None = None, audience: str | None = None) -> str:
     """Save a file (image, PDF, or other document) into Eldar's Obsidian vault and index its content for search.
 
-    file_path must be a path this server can already read -- either
-    /opt/data/cache/images/... or /opt/data/cache/audio/... (where your own
-    incoming Telegram attachments already land) or /shared-output/... (where
-    generated media gets written). Not an arbitrary path on your own side --
-    if you're not sure what path to pass, say so rather than guessing, and
-    never create files under /opt/data/obsidian_vault -- that is NOT the
-    real vault.
+    file_path must already be under the vault itself
+    (/data/obsidian_vault/...) or under /shared-output/... (where generated
+    media gets written). If you have a file from your own cache
+    (/opt/data/cache/images/... or .../audio/...) that isn't in the vault
+    yet, copy it into /data/obsidian_vault/Attachments/ yourself first (you
+    have write access there), then call this with that new path. Not an
+    arbitrary path on your own side otherwise -- if you're not sure what
+    path to pass, say so rather than guessing.
 
     What happens depends on the file type:
     - PDF: text is extracted and indexed.
@@ -452,10 +461,13 @@ async def ingest_file(file_path: str, title: str | None = None, tags: list[str] 
     ext = src.suffix.lower()
 
     ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    dest = ATTACHMENTS_DIR / src.name
-    if dest.exists():
-        dest = ATTACHMENTS_DIR / f"{src.stem}-{uuid.uuid4().hex[:8]}{src.suffix}"
-    shutil.copy2(src, dest)
+    if src.parent == ATTACHMENTS_DIR:
+        dest = src   # Hermes already placed it there itself -- use as-is, don't duplicate it under a new name
+    else:
+        dest = ATTACHMENTS_DIR / src.name
+        if dest.exists() and dest.resolve() != src.resolve():
+            dest = ATTACHMENTS_DIR / f"{src.stem}-{uuid.uuid4().hex[:8]}{src.suffix}"
+        shutil.copy2(src, dest)
     attachment_ref = str(dest.relative_to(VAULT_PATH))
 
     extracted = ""
