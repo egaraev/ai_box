@@ -108,9 +108,10 @@ data:
     DASH_PORT = int(os.environ.get("DASH_PORT", "8600"))
 
     # Hand-maintained mirror of custom_router_hook.py's ROUTE_TO_MODEL -- see
-    # header comment. Last checked against the live hook 2026-09-13.
+    # header comment. Last checked against the live hook (the actual dict
+    # literal, not the comments near it -- those were stale) 2026-09-13.
     ROUTE_TABLE = [
-        ("vision", "qwopus-general"),
+        ("vision", "qwen3.8-27b-Expert-Vision"),
         ("medical", "medgemma-1.5-4b"),
         ("casual", "hermes3-llama-3.1-8b"),
         ("reasoning / other (default)", "qwen3.8-27b-Expert"),
