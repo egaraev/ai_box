@@ -350,7 +350,27 @@ spec:
           # breaks again.
           image: nousresearch/hermes-agent@sha256:6305b1b16f945aa7201610d9e3ba69b9e26d57ee00693215cc8ff36c0b4c3616
           imagePullPolicy: IfNotPresent
-          args: ["gateway", "run"]
+          # Honcho memory fix (2026-09-13): the base image ships without pip
+          # in its venv and without the Honcho provider's Python client
+          # ("honcho-ai" on PyPI, importable as "honcho") at all -- confirmed
+          # directly against a running pod, not assumed. A derivative image
+          # was tried first but abandoned: /var/lib on this node is its own
+          # tiny 4.9GB partition (shared by the OS, snapd, kubelet, and the
+          # containerd store backing every running pod), and `docker build`
+          # pulls the base image into its own separate store rather than
+          # reusing the copy k3s already has cached, so building a derivative
+          # image needs a second ~1GB copy this node doesn't have room for.
+          # Installing at startup instead needs zero extra disk and no
+          # image build/import step. Version is pinned (not bare
+          # "honcho-ai") so a future point release can't silently change
+          # behavior on a routine pod restart -- bump deliberately, the same
+          # way the image digest above is pinned.
+          command: ["sh", "-c"]
+          args:
+            - |
+              python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+              python3 -m pip install --no-cache-dir honcho-ai==2.4.0 >/dev/null 2>&1 || true
+              exec hermes gateway run
           ports:
             - containerPort: 8642
               name: api
