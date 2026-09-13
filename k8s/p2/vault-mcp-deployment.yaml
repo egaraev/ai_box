@@ -30,7 +30,9 @@
 # ArgoCD sync k8s/p2 the normal way) in addition to any image rebuild:
 #   kubectl apply -f k8s/p2/vault-mcp-deployment.yaml
 #
-# TWO VOLUMES:
+# THREE VOLUMES, all plain hostPath (no PVC) -- see the hermes-cache volume's
+# own comment below for why a PVC mount specifically doesn't work for a
+# second pod here, confirmed live 2026-09-13:
 # - vault-data: the real Obsidian vault at /data/obsidian_vault (same
 #   hostPath scripts/vault_sync.py already reads/writes on the host
 #   directly) -- mounted read-write so ingest_note/ingest_file can create
@@ -42,15 +44,12 @@
 #   between hermes-agent and media-gen-mcp for OUTGOING generated-media
 #   delivery. Mounted read-only -- ingest_file only ever needs to read a
 #   file placed here, never write to it.
-# - hermes-cache: the cache/ subdirectory of hermes-data (the PVC
-#   hermes-agent.yaml mounts whole at /opt/data), where hermes-agent
-#   actually saves INCOMING Telegram attachments (images/, audio/) --
-#   confirmed 2026-09-13 by asking Hermes directly, not guessed (the
-#   original assumption here was /shared-output for incoming files too,
-#   which was wrong). subPath: cache + readOnly keeps this pod from ever
-#   seeing that PVC's root, where config.yaml/honcho.json/.env live. See
-#   server.py's own top-of-file comment for the full story, including why
-#   Hermes must NOT be told to create its own /opt/data/obsidian_vault/.
+# - hermes-cache: where hermes-agent actually saves INCOMING Telegram
+#   attachments (images/, audio/) -- confirmed 2026-09-13 by asking Hermes
+#   directly, not guessed (the original assumption here was /shared-output
+#   for incoming files too, which was wrong). See server.py's own
+#   top-of-file comment for the full story, including why Hermes must NOT
+#   be told to create its own /opt/data/obsidian_vault/.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -113,16 +112,13 @@ spec:
               mountPath: /shared-output
               readOnly: true
             # Confirmed 2026-09-13 by asking Hermes directly where it saves
-            # incoming attachments: /opt/data/cache/images/ and
-            # .../audio/ -- NOT /shared-output (that's outgoing generated
-            # media only). /opt/data is the hermes-data PVC (hermes-agent.yaml)
-            # -- subPath: cache mounts ONLY that subdirectory here, so this
-            # pod never sees config.yaml/honcho.json/.env, which live at
-            # that PVC's root. Same absolute path in both pods (no
-            # translation needed for a file_path Hermes reports verbatim).
+            # incoming attachments: /opt/data/cache/images/ and .../audio/
+            # -- NOT /shared-output (that's outgoing generated media only).
+            # Same absolute path in both pods, so a file_path Hermes reports
+            # verbatim (like the img_5d5d26064ad7.jpg example it gave) needs
+            # no translation to work here too.
             - name: hermes-cache
               mountPath: /opt/data/cache
-              subPath: cache
               readOnly: true
           resources:
             requests:
@@ -140,17 +136,30 @@ spec:
           hostPath:
             path: /data/media-gen-output
             type: DirectoryOrCreate
-        # Same PVC hermes-agent.yaml mounts whole (as "data") at /opt/data --
-        # here only its cache/ subPath is mounted, read-only (see the
-        # volumeMounts comment above). Both pods always land on this
-        # cluster's single node, and ReadWriteOnce is node-scoped, not
-        # pod-scoped, so a second pod mounting the same PVC is expected to
-        # work -- NOT YET CONFIRMED against a real pod start, check both
-        # hermes-agent and vault-mcp reach Running after this applies.
+        # NOT a PVC mount -- tried that first (persistentVolumeClaim,
+        # claimName: hermes-data, readOnly: true) and it hung forever in
+        # Pending, confirmed live 2026-09-13: hermes-agent's own pod never
+        # stops running and already holds that PVC (as "data", read-write,
+        # its primary /opt/data volume), and k3s's default storage class
+        # (local-path-provisioner, "local" PV type) does not support a
+        # second pod mounting the same PVC concurrently, even read-only,
+        # even on the same node -- ReadWriteOnce is NOT node-scoped in
+        # practice here the way it is for real multi-attach CSI drivers.
+        # Fix: skip the PVC/PV abstraction entirely and hostPath straight
+        # into the exact directory local-path-provisioner already stores
+        # that PVC's data in on disk (confirmed via `kubectl get pv
+        # <hermes-data's bound PV> -o yaml` -> spec.local.path) -- same
+        # hostPath pattern as vault-data/shared-output above, which never
+        # had this problem because hostPath mounts have no such exclusivity.
+        # FRAGILE: this path embeds the PV's auto-generated name (which
+        # embeds the PVC's UID) -- if hermes-data is ever deleted and
+        # recreated (not a routine operation, but possible), this path goes
+        # stale and needs updating by re-running the kubectl get pv command
+        # above and fixing the path here.
         - name: hermes-cache
-          persistentVolumeClaim:
-            claimName: hermes-data
-            readOnly: true
+          hostPath:
+            path: /data/k3s/storage/pvc-4a2d1a49-13e1-4dca-9ba6-434a1d9b123c_ai-agents_hermes-data/cache
+            type: Directory
 ---
 apiVersion: v1
 kind: Service
