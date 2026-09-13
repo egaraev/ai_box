@@ -760,6 +760,90 @@ data:
         return False
 
 
+    # ADDED 2026-09-13 (Eldar's finding + fix): investigating the same
+    # "why does qwen3.8 get used so much" complaint that led to the
+    # ROUTE_TO_MODEL["other"] fix above turned up a second, separate cause.
+    # A fully isolated "Alive?" test (no conversation history, no keyword
+    # anywhere in it) got classified by arch-router's own LLM judgment as
+    # "reasoning" -- confirmed live via this hook's own log line:
+    # `arch-router raw response: "{'route': 'reasoning'}"`, decode speed
+    # corroborating (43.47 tok/s, qwen3.8-27b-Expert's documented range,
+    # not the 8B model's). The ROUTE_TO_MODEL["other"] fix above doesn't
+    # touch this case at all -- "Alive?" was never classified "other", it
+    # was explicitly "reasoning". So: a deterministic fast path for trivial
+    # greetings/pings, same pattern as DEEP_REASONING_TRIGGERS/_has_image
+    # above -- skip the 1.5B classifier's judgment call entirely for a
+    # message that's nothing but a greeting/farewell/thanks/status-ping,
+    # straight to "casual".
+    #
+    # WHOLE-MESSAGE match, not substring (deliberately different from
+    # DEEP_REASONING_TRIGGERS' substring match above): a substring check
+    # would misfire on "hey, can you help me architect this system"
+    # (matches "hey") or "thanks for double-checking that build" (matches
+    # "thanks"). For reasoning triggers a false positive just means an
+    # occasional casual message gets the careful model -- a safe failure
+    # direction. For casual triggers a false positive means a genuinely
+    # substantial request silently gets the fast model -- not safe -- so
+    # this only fires when the ENTIRE message (whitespace/punctuation
+    # stripped from the ends, lowercased) matches one of these phrases,
+    # nothing else in it. List entries are themselves already
+    # punctuation-free for the same reason -- _wants_casual strips "?"/"!"
+    # etc. off the incoming message before comparing, so a trailing "?" in
+    # a trigger phrase here would never match anything.
+    #
+    # Curated from real-world small-talk taxonomies (Rasa's well-known
+    # default smalltalk intents -- greet/goodbye/thankyou/bot_challenge --
+    # are the standard reference for this category) plus the actual case
+    # that found this bug ("Alive?").
+    CASUAL_TRIGGERS = (
+        # status / aliveness pings -- the category that found this bug
+        "alive", "are you there", "you there", "still there", "you up",
+        "you awake", "anybody home", "anybody there", "ping", "test",
+        "testing", "just testing", "can you hear me", "can you see this",
+        # greetings
+        "hi", "hello", "hey", "hiya", "yo", "sup", "good morning",
+        "good afternoon", "good evening", "morning", "evening", "howdy",
+        # farewells
+        "bye", "goodbye", "bye bye", "see you", "see ya", "later",
+        "catch you later", "good night", "night", "talk later",
+        "talk soon", "take care",
+        # thanks / acknowledgment
+        "thanks", "thank you", "thanks a lot", "thanks so much", "thx",
+        "ty", "cheers", "appreciate it", "much appreciated", "got it",
+        "noted", "ok", "okay", "cool", "cool thanks", "great thanks",
+        "perfect thanks", "sounds good", "alright", "nice one",
+        "awesome thanks",
+        # how-are-you small talk
+        "how are you", "how are you doing", "how's it going",
+        "hows it going", "what's up", "whats up", "you good", "all good",
+        "how have you been",
+        # bot/identity chit-chat
+        "who are you", "what are you", "are you a bot", "are you human",
+        "are you real", "are you an ai",
+    )
+
+
+    def _wants_casual(messages):
+        for m in reversed(messages):
+            if m.get("role") != "user":
+                continue
+            content = m.get("content")
+            if isinstance(content, str):
+                # Strip whitespace and common leading/trailing punctuation,
+                # lowercase -- the ENTIRE message must match, see comment
+                # above for why this isn't a substring check.
+                normalized = content.strip().lower().strip(" \t\n.!?,;:-")
+                if normalized in CASUAL_TRIGGERS:
+                    logger.info(
+                        "casual trigger matched (whole message): %r",
+                        content[:200],
+                    )
+                    return True
+            # only the latest user turn counts -- stop here either way
+            return False
+        return False
+
+
     # ADDED 2026-09-11, same deterministic-fast-path/latest-turn-only pattern
     # as DEEP_REASONING_TRIGGERS above (and the same 2026-09-09 bug already
     # fixed once there -- checking the whole conversation instead of just the
@@ -856,6 +940,20 @@ data:
                 data["model"] = ROUTE_TO_MODEL["reasoning"]
                 logger.info(
                     "auto -> reasoning (explicit deep-thought keyword) -> %s",
+                    data["model"],
+                )
+                return data
+
+            # Deterministic fast path, same idea as the checks above: a
+            # message that's nothing but a greeting/farewell/thanks/status-
+            # ping always goes straight to "casual", no classifier judgment
+            # call. See CASUAL_TRIGGERS above for why this exists (the
+            # "Alive?" -> reasoning finding) and why it's a WHOLE-message
+            # match rather than substring.
+            if _wants_casual(messages):
+                data["model"] = ROUTE_TO_MODEL["casual"]
+                logger.info(
+                    "auto -> casual (greeting/ping keyword) -> %s",
                     data["model"],
                 )
                 return data
