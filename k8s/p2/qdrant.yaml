@@ -1,0 +1,95 @@
+# Qdrant — the RAG/knowledge-base vector store (obsidian_vault collection and
+# friends), NOT Honcho's store: Honcho stays on Postgres/pgvector (see
+# honcho.yaml's own header -- the published honcho image doesn't bundle the
+# qdrant-client extra, so wiring Qdrant into Honcho directly isn't worth a
+# custom image). This is a separate, standalone deployment for a different
+# purpose: documents Eldar actually wrote down (family/legal/household
+# reference material via an Obsidian vault), reached by a future MCP tool an
+# agent deliberately calls -- not facts Honcho's deriver extracts from chat.
+#
+# Recovered 2026-09-13 from an earlier abandoned attempt (unrelated crash
+# reason, nothing to do with this design) -- same shape, re-added here now
+# that the RAG build is back at the front of the roadmap. k8s/bootstrap/
+# p2-app.yaml (ArgoCD) already watches this whole k8s/p2/ directory tree, so
+# no extra Application/wiring is needed for this file to sync.
+#
+# Embedding model: nomic-embed-text-v1.5 (768-dim), the same CPU-only
+# llama-swap entry Honcho's deriver already uses, served via LiteLLM
+# (:4000/v1/embeddings) -- decided 2026-09-13 so the whole platform shares
+# one embedding stack instead of reintroducing a second local model.
+# Collections created against this instance need vector size 768, distance
+# Cosine, to match. Not yet created -- that happens when the N8N ingestion
+# pipeline (still to be built) does its first real upsert.
+#
+# No auth (QDRANT__SERVICE__API_KEY unset) -- same home-lab trust posture as
+# Postgres (POSTGRES_HOST_AUTH_METHOD=trust) and Honcho (AUTH_USE_AUTH=false)
+# elsewhere in this repo: single-node cluster, no public ingress. Revisit
+# with real per-service auth at P8 (Istio mTLS/observability hardening).
+#
+# PVC'd like Postgres (not emptyDir like Redis): this holds real ingested
+# document vectors, Eldar's actual data, not disposable cache/queue state --
+# losing it on a pod restart would mean a full vault re-ingest. 10Gi is the
+# same size the recovered manifest used; capacity confirmed comfortable via
+# `free -h`/`df -h /data` on 2026-09-13 (54Gi RAM free, 1.2TB disk free) for
+# a corpus this size (thousands, not millions, of points).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qdrant-data
+  namespace: ai-memory
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qdrant
+  namespace: ai-memory
+  labels:
+    app: qdrant
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: qdrant
+  template:
+    metadata:
+      labels:
+        app: qdrant
+    spec:
+      containers:
+        - name: qdrant
+          image: qdrant/qdrant:latest
+          ports:
+            - containerPort: 6333
+              name: http
+            - containerPort: 6334
+              name: grpc
+          volumeMounts:
+            - name: data
+              mountPath: /qdrant/storage
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: qdrant-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant
+  namespace: ai-memory
+spec:
+  selector:
+    app: qdrant
+  ports:
+    - port: 6333
+      targetPort: 6333
+      name: http
+    - port: 6334
+      targetPort: 6334
+      name: grpc
