@@ -84,3 +84,27 @@ spec:
     - port: 8188
       targetPort: 8188
       name: http
+---
+# Browser access to ComfyUI's own native web UI (served at "/" on 8188 --
+# no separate dashboard path like the other services) -- additive NodePort
+# Service, same pattern as k8s/p1/dashboards.yaml and k8s/p2/qdrant.yaml's
+# qdrant-nodeport: points at the same pod the ClusterIP Service above
+# already exposes, nothing about that Service changes. NOT meant for
+# concurrent use with real chat/agent traffic -- see the top-of-file
+# comment: ComfyUI and llama-swap share the one GPU via a full-swap design,
+# so generating an image here will evict whatever chat model is currently
+# loaded.
+apiVersion: v1
+kind: Service
+metadata:
+  name: comfyui-nodeport
+  namespace: ai-models
+spec:
+  type: NodePort
+  selector:
+    app: comfyui
+  ports:
+    - port: 8188
+      targetPort: 8188
+      nodePort: 30188
+      name: http
