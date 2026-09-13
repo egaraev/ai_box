@@ -1,0 +1,6 @@
+# Same mcp/httpx versions confirmed working for media-gen-mcp
+# (apps/media-gen-mcp/requirements.txt) -- see that file's comment for how
+# the mcp>=2.0 floor was determined (FastMCP renamed MCPServer in mcp 2.x).
+mcp>=2.0
+httpx>=0.27
+pypdf>=4.0

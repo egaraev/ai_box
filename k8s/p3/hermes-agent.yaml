@@ -198,10 +198,21 @@ data:
     # always going to fire first regardless of anything on the ComfyUI
     # side. Set comfortably above that 600s server-side ceiling so Hermes
     # never gives up before media-gen-mcp itself would.
+    # vault (added 2026-09-13, RAG roadmap step): apps/vault-mcp/,
+    # deployed by k8s/p2/vault-mcp-deployment.yaml. Two tools --
+    # search_vault (Qdrant search over the Obsidian vault) and
+    # ingest_note/ingest_file (write+index new vault content). timeout 180s
+    # is generous for a normal search/text-ingest (a couple seconds) and
+    # still comfortable for the slowest real path, ingest_file captioning
+    # an image via the local vision model (~60s worst case) -- nowhere near
+    # media-gen's multi-minute generation calls, so no need for 900s here.
     mcp_servers:
       media-gen:
         url: "http://media-gen-mcp.ai-mcp.svc.cluster.local:8000/mcp"
         timeout: 900
+      vault:
+        url: "http://vault-mcp.ai-mcp.svc.cluster.local:8000/mcp"
+        timeout: 180
 
     # No platforms.api_server block here on purpose -- the API server is
     # controlled entirely by env vars (API_SERVER_ENABLED/_HOST/_KEY/_CORS_ORIGINS,

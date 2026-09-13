@@ -1,0 +1,125 @@
+# vault-mcp: the HTTP MCP server Hermes calls to search and ingest into
+# Eldar's Obsidian vault (search_vault/ingest_note/ingest_file). Source
+# lives in apps/vault-mcp/ in this repo -- built and run locally on aibox,
+# no registry involved, same reasoning as media-gen-mcp (one less moving
+# part on a single-user home cluster). imagePullPolicy: IfNotPresent means
+# k3s/containerd uses whatever image tag already exists on the node instead
+# of trying (and failing) to pull it from Docker Hub.
+#
+# Lives in this k8s/p2/ directory (not a new k8s/vault/ dir) purely so
+# ArgoCD's existing aibox-p2 Application (k8s/bootstrap/p2-app.yaml, which
+# watches the whole k8s/p2 path regardless of what namespace a manifest in
+# it declares) picks this up automatically -- same trick
+# media-gen-mcp-deployment.yaml uses living under k8s/media-gen/ while
+# declaring namespace: ai-mcp. Runs in ai-mcp per README.md's namespace
+# table ("All MCP server pods"), same as media-gen-mcp.
+#
+# BUILD / DEPLOY (run on aibox, not from this repo checkout on its own --
+# the image has to exist as a local containerd/docker image on the node
+# before this Deployment can start):
+#   cd ~/repos/aibox-platform/apps/vault-mcp
+#   docker build -t vault-mcp:latest .
+#   docker save vault-mcp:latest | sudo k3s ctr images import -
+# After editing server.py, repeat both of those, then:
+#   kubectl rollout restart deployment/vault-mcp -n ai-mcp
+# (a plain `git push` + ArgoCD sync alone does NOT pick up a code change --
+# only a manifest change self-triggers; the image itself has to be rebuilt
+# and reimported by hand first, same gap as media-gen-mcp.)
+#
+# When THIS FILE itself changes -- `kubectl apply -f` it directly (or let
+# ArgoCD sync k8s/p2 the normal way) in addition to any image rebuild:
+#   kubectl apply -f k8s/p2/vault-mcp-deployment.yaml
+#
+# TWO VOLUMES:
+# - vault-data: the real Obsidian vault at /data/obsidian_vault (same
+#   hostPath scripts/vault_sync.py already reads/writes on the host
+#   directly) -- mounted read-write so ingest_note/ingest_file can create
+#   Inbox/ and Attachments/ entries. type: Directory (not DirectoryOrCreate)
+#   since the vault already exists; if it's ever missing this should fail
+#   loudly rather than silently start writing into a freshly-created empty
+#   directory that isn't really the vault.
+# - shared-output: same hostPath (/data/media-gen-output) already shared
+#   between hermes-agent and media-gen-mcp for generated-image delivery
+#   (k8s/media-gen/media-gen-mcp-deployment.yaml, k8s/p3/hermes-agent.yaml).
+#   Mounted read-only here -- ingest_file only ever needs to READ a file
+#   Hermes already placed there, never write to it. ASSUMPTION NOT YET
+#   CONFIRMED: that incoming Telegram attachments land in this same
+#   directory, not just outgoing generated images -- see server.py's own
+#   top-of-file comment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault-mcp
+  namespace: ai-mcp
+  labels:
+    app: vault-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vault-mcp
+  template:
+    metadata:
+      labels:
+        app: vault-mcp
+    spec:
+      containers:
+        - name: vault-mcp
+          image: vault-mcp:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: QDRANT_URL
+              value: "http://qdrant.ai-memory.svc.cluster.local:6333"
+            - name: VAULT_PATH
+              value: "/data/obsidian_vault"
+            - name: SHARED_INPUT_DIR
+              value: "/shared-output"
+            # Same base_url/auth pattern media-gen-mcp/hermes-agent/open-webui
+            # already use to reach LiteLLM (k8s/p1/litellm.yaml): Bearer auth
+            # against its LITELLM_MASTER_KEY, sourced from the same
+            # litellm-secret Secret.
+            - name: LITELLM_URL
+              value: "http://litellm.ai-models.svc.cluster.local:4000/v1"
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master_key
+          volumeMounts:
+            - name: vault-data
+              mountPath: /data/obsidian_vault
+            - name: shared-output
+              mountPath: /shared-output
+              readOnly: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "768Mi"
+      volumes:
+        - name: vault-data
+          hostPath:
+            path: /data/obsidian_vault
+            type: Directory
+        - name: shared-output
+          hostPath:
+            path: /data/media-gen-output
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault-mcp
+  namespace: ai-mcp
+spec:
+  selector:
+    app: vault-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
