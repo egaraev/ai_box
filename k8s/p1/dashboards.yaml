@@ -1,0 +1,428 @@
+# Browser access to the L2.5 model-router stack, added 2026-09-13. There's
+# no ingress on aibox yet (ai-gateway/Traefik is still on the roadmap), so
+# this uses NodePort Services in the meantime -- open a browser at
+# http://<aibox-ip>:<port> directly, no port-forward needed. Revisit once
+# ai-gateway exists and do this properly with one entrypoint + real paths.
+#
+# LiteLLM and llama-swap already ship their own web UIs (LiteLLM's built-in
+# Admin UI at /ui, llama-swap's built-in model-status UI at /) -- these
+# NodePorts are ADDITIVE Service objects pointing at the same pods/ports
+# the existing ClusterIP Services already expose, so nothing about the
+# existing litellm/llama-swap Services in litellm.yaml/llama-swap-
+# deployment.yaml changes. Same pattern for qdrant-nodeport in k8s/p2/
+# qdrant.yaml (Qdrant's own dashboard is built in at /dashboard).
+#
+# router-dashboard (this file's only new *workload*, everything else here
+# is just a Service) is a small custom Catalog-only view over LiteLLM +
+# llama-swap + Qdrant health/config -- see apps/router-dashboard/dashboard.py
+# for the full story (ported from Eldar's old Windows-lab ai-lab/
+# step15_semantic_router/models_dashboard.py, Activity tab deliberately
+# left out this round -- it needed editing custom_router_hook.py, the live
+# routing hook, which wasn't in scope for a first pass). Stock python:3.13-
+# slim image + a startup `pip install pyyaml` (same lightweight pattern as
+# hermes-agent.yaml's honcho-ai install -- no custom image, no disk-space
+# risk, pyyaml is tiny) rather than building a dedicated image for one
+# ~250-line script.
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-nodeport
+  namespace: ai-models
+spec:
+  type: NodePort
+  selector:
+    app: litellm
+  ports:
+    - port: 4000
+      targetPort: 4000
+      nodePort: 30400
+      name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-swap-nodeport
+  namespace: ai-models
+spec:
+  type: NodePort
+  selector:
+    app: llama-swap
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30808
+      name: http
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: router-dashboard-code
+  namespace: ai-models
+data:
+  dashboard.py: |
+    # router-dashboard — a small read-only health/catalog view over the L2.5
+    # model-router stack (LiteLLM :4000, llama-swap :8080) plus Qdrant :6333.
+    #
+    # Adapted from Eldar's old Windows-lab ai-lab/step15_semantic_router/
+    # models_dashboard.py (Catalog tab only, kept simple by request 2026-09-13):
+    # that version's Activity tab needed litellm_hooks.py to log every request
+    # via events.py -- aibox's custom_router_hook.py doesn't do that today, and
+    # wiring it up means editing the live routing hook that serves all real
+    # chat traffic, so it was deliberately left out of this first pass. Add it
+    # later if the Catalog view alone isn't enough.
+    #
+    # One real structural difference from the Windows lab: there, model_list's
+    # model_name values WERE the route names (cheap/code/vision/...). Here,
+    # model_list's model_name values are the real model names (qwen3.8-27b-
+    # Expert, hermes3-llama-3.1-8b, ...) -- the route name -> model mapping
+    # lives in custom_router_hook.py's ROUTE_TO_MODEL dict, which isn't
+    # parseable from config.yaml. ROUTE_TABLE below is a hand-maintained mirror
+    # of that dict -- update it by hand if custom_router_hook.py's routing
+    # changes; k8s/p1/litellm.yaml's custom_router_hook.py is the actual source
+    # of truth. Everything else on this page (model list, health, fallback
+    # status) is read live, not hand-maintained.
+    #
+    # No DB, no Docker, no extra pip installs beyond pyyaml (stdlib http.server
+    # + urllib otherwise) -- same zero-dependency philosophy as the original.
+    #
+    # Run: python3 dashboard.py, then open http://<node>:30860 (or whatever
+    # DASH_PORT/its NodePort maps to).
+    #
+    # Env overrides: LITELLM_BASE, LITELLM_KEY, LLAMASWAP_BASE, QDRANT_BASE,
+    # CONFIG_PATH (default /litellm-extra/config.yaml -- the same litellm-config
+    # ConfigMap mounted into the litellm pod itself, mounted read-only here
+    # too), DASH_PORT (default 8600).
+
+    import json
+    import os
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import yaml
+
+    LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://litellm.ai-models.svc.cluster.local:4000")
+    LITELLM_KEY = os.environ.get("LITELLM_KEY", "")
+    LLAMASWAP_BASE = os.environ.get("LLAMASWAP_BASE", "http://llama-swap.ai-models.svc.cluster.local:8080")
+    QDRANT_BASE = os.environ.get("QDRANT_BASE", "http://qdrant.ai-memory.svc.cluster.local:6333")
+    CONFIG_PATH = os.environ.get("CONFIG_PATH", "/litellm-extra/config.yaml")
+    DASH_PORT = int(os.environ.get("DASH_PORT", "8600"))
+
+    # Hand-maintained mirror of custom_router_hook.py's ROUTE_TO_MODEL -- see
+    # header comment. Last checked against the live hook 2026-09-13.
+    ROUTE_TABLE = [
+        ("vision", "qwopus-general"),
+        ("medical", "medgemma-1.5-4b"),
+        ("casual", "hermes3-llama-3.1-8b"),
+        ("reasoning / other (default)", "qwen3.8-27b-Expert"),
+    ]
+
+
+    def _get_json(url, headers=None, timeout=2.0):
+        req = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+
+
+    # (location, provider) from a litellm model string + api_base
+    def classify(model_str, api_base):
+        m = (model_str or "").lower()
+        if api_base and "llama-swap" in api_base:
+            return "local", "llama-swap"
+        if m.startswith("openrouter/"):
+            return "cloud", "OpenRouter"
+        return "cloud", (m.split("/")[0] if "/" in m else "unknown")
+
+
+    def load_config():
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f)
+
+
+    def load_models(cfg):
+        out = []
+        for entry in cfg.get("model_list", []):
+            name = entry.get("model_name")
+            lp = entry.get("litellm_params", {}) or {}
+            model = lp.get("model", "")
+            api_base = lp.get("api_base", "")
+            loc, prov = classify(model, api_base)
+            out.append({
+                "name": name, "model": model, "location": loc, "provider": prov,
+                "api_base": api_base,
+            })
+        return out
+
+
+    # litellm_settings.fallbacks is only present when the general cloud
+    # auto-fallback is switched on (currently commented out in litellm.yaml,
+    # 2026-09-09 -- Eldar's call, mid local-LLM testing) -- so this is a live
+    # read of whether that's on right now, not a hand-maintained note.
+    def load_fallback_status(cfg):
+        fb = (cfg.get("litellm_settings", {}) or {}).get("fallbacks")
+        return {"enabled": bool(fb), "mapping": fb or []}
+
+
+    def gather():
+        data = {"litellm": {"ok": False}, "llamaswap": {"ok": False, "models": [], "running": []},
+                "qdrant": {"ok": False, "collections": []},
+                "models": [], "fallback": {"enabled": False, "mapping": []},
+                "config_path": CONFIG_PATH}
+
+        try:
+            cfg = load_config()
+            data["models"] = load_models(cfg)
+            data["fallback"] = load_fallback_status(cfg)
+        except Exception as e:
+            data["config_error"] = str(e)
+
+        try:
+            _get_json(f"{LITELLM_BASE}/v1/models", headers={"Authorization": f"Bearer {LITELLM_KEY}"})
+            data["litellm"]["ok"] = True
+        except Exception as e:
+            data["litellm"]["error"] = str(e)
+
+        try:
+            j = _get_json(f"{LLAMASWAP_BASE}/v1/models")
+            data["llamaswap"]["models"] = [m.get("id") for m in j.get("data", [])]
+            data["llamaswap"]["ok"] = True
+        except Exception as e:
+            data["llamaswap"]["error"] = str(e)
+
+        for path in ("/running", "/api/running"):
+            try:
+                j = _get_json(f"{LLAMASWAP_BASE}{path}")
+                running = j.get("running") or j.get("models") or j
+                if isinstance(running, list):
+                    data["llamaswap"]["running"] = [
+                        (x.get("model") if isinstance(x, dict) else x) for x in running
+                    ]
+                    break
+            except Exception:
+                continue
+
+        try:
+            j = _get_json(f"{QDRANT_BASE}/collections")
+            data["qdrant"]["collections"] = [c.get("name") for c in j.get("result", {}).get("collections", [])]
+            data["qdrant"]["ok"] = True
+        except Exception as e:
+            data["qdrant"]["error"] = str(e)
+
+        return data
+
+
+    PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
+    <title>aibox · router dashboard</title>
+    <style>
+    :root{--bg:#0d1117;--card:#161b22;--line:#26303b;--txt:#e6edf3;--dim:#8b949e;
+    --local:#3fb950;--cloud:#58a6ff;--auto:#d29922;--off:#f85149;}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);
+    font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;padding:24px}
+    h1{font-size:18px;margin:0 0 2px}.sub{color:var(--dim);margin-bottom:18px}
+    .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+    .up{background:var(--local)}.down{background:var(--off)}
+    .hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+    .btn{background:#21262d;border:1px solid var(--line);color:var(--txt);border-radius:6px;
+    padding:6px 12px;cursor:pointer;font-size:13px}.btn:hover{border-color:#3d444d}
+    .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:18px}
+    @media(max-width:800px){.cards{grid-template-columns:1fr}}
+    .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+    .stat .n{font-size:15px;font-weight:700}.stat .l{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:18px}
+    @media(max-width:900px){.grid{grid-template-columns:1fr}}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+    .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);
+    margin:0 0 12px;font-weight:600}
+    table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:7px 8px;
+    border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:middle}
+    th{color:var(--dim);font-weight:500;font-size:12px}
+    .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+    .tag{display:inline-block;font-size:11px;padding:1px 8px;border-radius:20px;border:1px solid var(--line)}
+    .t-local{color:var(--local);border-color:#1c3b25}.t-cloud{color:var(--cloud);border-color:#1c3350}
+    .arrow{color:var(--dim)}.small{color:var(--dim);font-size:12px}
+    </style></head><body>
+    <div class="hdr"><div>
+    <h1>aibox · router dashboard</h1>
+    <div class="sub" id="sub">loading…</div></div>
+    <button class="btn" onclick="load()">↻ Refresh</button></div>
+
+    <div class="cards" id="health"></div>
+
+    <div class="card"><h2>Live route table (arch-router-1.5b → target model)</h2>
+      <div class="small" style="margin-bottom:8px">Hand-maintained mirror of custom_router_hook.py's ROUTE_TO_MODEL — not live-read from the hook itself.</div>
+      <table><thead><tr><th>Route</th><th></th><th>Target model</th></tr></thead><tbody id="routes"></tbody></table>
+    </div>
+
+    <div class="card"><h2>General cloud auto-fallback <span id="fb-h"></span></h2>
+      <div id="fb-body"></div>
+    </div>
+
+    <div class="grid">
+      <div class="card"><h2>LiteLLM model_list (:4000)</h2>
+        <table><thead><tr><th>Name</th><th>Location</th><th>Underlying model</th></tr></thead>
+        <tbody id="models"></tbody></table>
+      </div>
+      <div class="card"><h2>llama-swap models (:8080)</h2>
+        <table><thead><tr><th>Model</th><th>State</th></tr></thead>
+        <tbody id="ls"></tbody></table>
+      </div>
+    </div>
+
+    <div class="card"><h2>Qdrant collections (:6333)</h2>
+      <div id="qd"></div>
+    </div>
+
+    <script>
+    function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+    function hdot(ok){return '<span class="dot '+(ok?'up':'down')+'"></span>'+(ok?'online':'offline');}
+
+    const ROUTES = __ROUTES__;
+
+    async function load(){
+      let m;
+      try{ m = await (await fetch('/api/models')).json(); }
+      catch(e){ document.getElementById('sub').textContent='dashboard error: '+e; return; }
+
+      document.getElementById('health').innerHTML = [
+        ['LiteLLM :4000', m.litellm.ok], ['llama-swap :8080', m.llamaswap.ok], ['Qdrant :6333', m.qdrant.ok]
+      ].map(([l,ok])=>'<div class="stat"><div class="n">'+hdot(ok)+'</div><div class="l">'+l+'</div></div>').join('');
+
+      document.getElementById('routes').innerHTML = ROUTES.map(([role,model])=>
+        '<tr><td class="mono">'+esc(role)+'</td><td class="arrow">→</td><td class="mono">'+esc(model)+'</td></tr>').join('');
+
+      document.getElementById('fb-h').innerHTML = m.fallback.enabled
+        ? '<span class="tag t-cloud">on</span>' : '<span class="tag" style="color:var(--dim)">off</span>';
+      document.getElementById('fb-body').innerHTML = m.fallback.enabled
+        ? '<table><tbody>'+m.fallback.mapping.map(row=>Object.entries(row).map(([k,v])=>
+            '<tr><td class="mono">'+esc(k)+'</td><td class="arrow">→</td><td class="mono">'+esc((v||[]).join(', '))+'</td></tr>').join('')).join('')+'</tbody></table>'
+        : '<div class="small">Disabled — a local model failing does NOT silently answer from cloud right now (deliberately off during local-LLM testing). The media-gen busy-flag redirect is separate and stays active either way.</div>';
+
+      document.getElementById('models').innerHTML = (m.models||[]).map(r=>
+        '<tr><td class="mono">'+esc(r.name)+'</td>'
+        +'<td><span class="tag '+(r.location==='local'?'t-local':'t-cloud')+'">'+esc(r.location)+'</span> <span class="small">'+esc(r.provider)+'</span></td>'
+        +'<td class="mono small">'+esc(r.model)+'</td></tr>').join('');
+
+      const running = new Set(m.llamaswap.running||[]);
+      document.getElementById('ls').innerHTML = (m.llamaswap.models||[]).length
+        ? m.llamaswap.models.map(mm=>'<tr><td class="mono">'+esc(mm)+'</td><td>'+
+            (running.has(mm)?'<span class="dot up"></span>running':'<span class="small">idle</span>')+'</td></tr>').join('')
+        : '<tr><td colspan="2" class="small">'+(m.llamaswap.error?('offline — '+esc(m.llamaswap.error)):'no models reported')+'</td></tr>';
+
+      document.getElementById('qd').innerHTML = m.qdrant.ok
+        ? ((m.qdrant.collections||[]).length
+            ? m.qdrant.collections.map(c=>'<span class="tag t-local" style="margin-right:6px">'+esc(c)+'</span>').join('')
+            : '<div class="small">reachable, 0 collections — nothing ingested yet</div>')
+        : '<div class="small">offline — '+esc(m.qdrant.error||'')+'</div>';
+
+      document.getElementById('sub').textContent =
+        (m.models||[]).length+' models configured · updated '+new Date().toLocaleTimeString();
+    }
+    load(); setInterval(load, 8000);
+    </script></body></html>"""
+
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, code, body, ctype="text/html; charset=utf-8"):
+            b = body.encode("utf-8") if isinstance(body, str) else body
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+
+        def do_GET(self):
+            if self.path.startswith("/api/models"):
+                self._send(200, json.dumps(gather()), "application/json")
+            elif self.path in ("/", "/index.html"):
+                self._send(200, PAGE.replace("__ROUTES__", json.dumps(ROUTE_TABLE)))
+            else:
+                self._send(404, "not found", "text/plain")
+
+        def log_message(self, *a):  # quiet
+            pass
+
+
+    def main():
+        print(f"[router-dashboard] http://0.0.0.0:{DASH_PORT}  "
+              f"(litellm={LITELLM_BASE}, llama-swap={LLAMASWAP_BASE}, qdrant={QDRANT_BASE})")
+        print(f"[router-dashboard] config: {CONFIG_PATH}")
+        ThreadingHTTPServer(("0.0.0.0", DASH_PORT), Handler).serve_forever()
+
+
+    if __name__ == "__main__":
+        main()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: router-dashboard
+  namespace: ai-models
+  labels:
+    app: router-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: router-dashboard
+  template:
+    metadata:
+      labels:
+        app: router-dashboard
+    spec:
+      containers:
+        - name: router-dashboard
+          image: python:3.13-slim
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "[router-dashboard] installing pyyaml"
+              pip install --no-cache-dir --break-system-packages pyyaml
+              echo "[router-dashboard] starting dashboard"
+              exec python3 /app/dashboard.py
+          ports:
+            - containerPort: 8600
+              name: http
+          env:
+            - name: LITELLM_BASE
+              value: "http://litellm.ai-models.svc.cluster.local:4000"
+            - name: LLAMASWAP_BASE
+              value: "http://llama-swap.ai-models.svc.cluster.local:8080"
+            - name: QDRANT_BASE
+              value: "http://qdrant.ai-memory.svc.cluster.local:6333"
+            - name: CONFIG_PATH
+              value: "/litellm-extra/config.yaml"
+            - name: LITELLM_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master_key
+          volumeMounts:
+            - name: dashboard-code
+              mountPath: /app
+              readOnly: true
+            # Same litellm-config ConfigMap litellm.yaml's own Deployment
+            # mounts -- read-only here too, this pod only ever reads it.
+            - name: litellm-config
+              mountPath: /litellm-extra
+              readOnly: true
+      volumes:
+        - name: dashboard-code
+          configMap:
+            name: router-dashboard-code
+        - name: litellm-config
+          configMap:
+            name: litellm-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: router-dashboard
+  namespace: ai-models
+spec:
+  type: NodePort
+  selector:
+    app: router-dashboard
+  ports:
+    - port: 8600
+      targetPort: 8600
+      nodePort: 30860
+      name: http

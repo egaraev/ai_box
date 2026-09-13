@@ -93,3 +93,23 @@ spec:
     - port: 6334
       targetPort: 6334
       name: grpc
+---
+# Browser access to Qdrant's own built-in dashboard (:6333/dashboard) --
+# additive NodePort Service, added 2026-09-13 alongside the same pattern
+# for LiteLLM/llama-swap/router-dashboard in k8s/p1/dashboards.yaml. Points
+# at the same pod the ClusterIP Service above already exposes -- nothing
+# about that Service changes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant-nodeport
+  namespace: ai-memory
+spec:
+  type: NodePort
+  selector:
+    app: qdrant
+  ports:
+    - port: 6333
+      targetPort: 6333
+      nodePort: 30633
+      name: http
