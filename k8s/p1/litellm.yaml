@@ -817,6 +817,15 @@ data:
         "how are you", "how are you doing", "how's it going",
         "hows it going", "what's up", "whats up", "you good", "all good",
         "how have you been",
+        # casual status/mood replies -- ADDED 2026-09-13 (Eldar's finding:
+        # a lone "chilling" took ~15s round-tripping through the arch-
+        # router LLM classifier before landing on "casual" anyway -- same
+        # deterministic-fast-path logic applies here as everywhere else in
+        # this file: if the classifier reliably lands on casual for it,
+        # skip the round trip entirely instead of paying for it every time)
+        "chilling", "chillin", "just chilling", "relaxing", "vibing",
+        "nothing much", "not much", "nm", "bored", "tired", "sleepy",
+        "just here", "just browsing", "same old", "same as usual",
         # bot/identity chit-chat
         "who are you", "what are you", "are you a bot", "are you human",
         "are you real", "are you an ai",
