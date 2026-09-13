@@ -110,11 +110,17 @@ data:
     # Hand-maintained mirror of custom_router_hook.py's ROUTE_TO_MODEL -- see
     # header comment. Last checked against the live hook (the actual dict
     # literal, not the comments near it -- those were stale) 2026-09-13.
+    # UPDATED 2026-09-13: "other" used to be lumped in with "reasoning" as a
+    # shared default (both pointed at qwen3.8-27b-Expert) -- split out same
+    # day the ROUTE_TO_MODEL fix landed, since "other" now routes to the
+    # fast model instead (see custom_router_hook.py's own comment on that
+    # dict entry for why).
     ROUTE_TABLE = [
         ("vision", "qwen3.8-27b-Expert-Vision"),
         ("medical", "medgemma-1.5-4b"),
         ("casual", "hermes3-llama-3.1-8b"),
-        ("reasoning / other (default)", "qwen3.8-27b-Expert"),
+        ("other", "hermes3-llama-3.1-8b"),
+        ("reasoning (default)", "qwen3.8-27b-Expert"),
     ]
 
 
