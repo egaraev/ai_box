@@ -368,8 +368,11 @@ spec:
           command: ["sh", "-c"]
           args:
             - |
-              python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
-              python3 -m pip install --no-cache-dir honcho-ai==2.4.0 >/dev/null 2>&1 || true
+              echo "[honcho-fix] bootstrapping pip into the venv"
+              python3 -m ensurepip --upgrade
+              echo "[honcho-fix] installing honcho-ai==2.4.0"
+              python3 -m pip install --no-cache-dir honcho-ai==2.4.0
+              echo "[honcho-fix] starting hermes"
               exec hermes gateway run
           ports:
             - containerPort: 8642
