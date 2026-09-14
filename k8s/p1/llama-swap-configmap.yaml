@@ -279,6 +279,25 @@ data:
         # passes doesn't need 8 threads to itself; trimmed to free real
         # headroom for arch-router-1.5b, which is on the hot path for
         # every single chat message. NOT YET CONFIRMED on aibox.
+        #
+        # -c 8192 -> 32768, --parallel 4 ADDED 2026-09-14: this model never
+        # set --parallel, so it silently ran on llama-server's default of 4
+        # slots -- splitting -c 8192 into 2048 tokens PER SLOT, not 8192 as
+        # the flag implied. Found via a real failure: vault_sync.py's
+        # /v1/embeddings call on a note with one big unbroken blockquote
+        # (10957 chars, 4614 tokens) got rejected with the JSON body itself
+        # naming the real cause -- 'n_ctx': 2048 -- confirmed via a per-
+        # chunk isolation test that every other, smaller chunk in the same
+        # note embedded fine. Same root shape as the qwen3.8-27b-Expert-
+        # Vision -b fix above (an unset llama-server default silently
+        # capping real input), just the -c/n_ctx side instead of -b/
+        # n_batch. Fix: -c 32768 keeps each of the 4 slots at the original
+        # intended 8192-token budget (32768/4) instead of losing 3/4 of it
+        # to the default -- comfortable headroom above the 4614-token case
+        # that failed. --parallel 4 added explicitly so this doesn't again
+        # depend on an undocumented default. CPU-only model (env:
+        # CUDA_VISIBLE_DEVICES= below) -- no VRAM ceiling to weigh against,
+        # unlike the GPU models' -c/-b tuning elsewhere in this file.
         cmd: |
           llama-server
           -m /models/nomic-embed-text-v1.5/nomic-embed-text-v1.5.Q8_0.gguf
@@ -288,7 +307,8 @@ data:
           --pooling mean
           -ngl 0
           -t 2
-          -c 8192
+          --parallel 4
+          -c 32768
           -b 8192
           -ub 8192
         env:
