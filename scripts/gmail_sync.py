@@ -108,6 +108,20 @@ DEFAULT_QUERY = "from:me subject:(" + " OR ".join(TOPICS) + ")"
 DEFAULT_SINCE = ""
 MAX_RESULTS   = 500
 
+# Same gid/convention as vault-mcp's own _chgrp_writable (apps/vault-mcp/
+# server.py) -- if that one ever changes, change this too. The N8N pod
+# writes into the vault as root same as vault-mcp's pod does, and root can
+# chown to any group regardless of who currently owns the file, so this is
+# safe to call unconditionally on anything this script just wrote. Without
+# it, notes/attachments land root:root and Eldar (and Hermes/vault-mcp,
+# gid 10000) can't edit or delete them later.
+HERMES_GID = 10000
+
+def chgrp_writable(path, dir_mode=0o775, file_mode=0o664):
+    mode = dir_mode if path.is_dir() else file_mode
+    os.chown(path, -1, HERMES_GID)   # -1 leaves the owner (root) unchanged, only the group changes
+    path.chmod(mode)
+
 # Same NodePort/env-var convention as scripts/vault_sync.py -- overridable
 # so this also works run in-cluster (N8N Execute Command), where localhost
 # doesn't reach the node's NodePorts.
@@ -234,8 +248,17 @@ def ocr_image(image_bytes, mime_type):
             },
             timeout=90,
         )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
+        # print the server's own response body on a non-2xx instead of just
+        # raise_for_status()'s terse "500 Server Error" -- that body is the
+        # only way to tell "wrong model name" from "vision route down" from
+        # "image too large" apart, and the previous version threw it away
+        if r.status_code != 200:
+            print(f"    ⚠ image OCR failed: HTTP {r.status_code} -- {r.text[:500]}")
+            return ""
+        content = r.json()["choices"][0]["message"]["content"].strip()
+        if not content:
+            print(f"    ⚠ image OCR returned an empty response (model: {VISION_MODEL})")
+        return content
     except Exception as exc:   # LiteLLM/vision route down, bad image data, timeout, ... -- OCR is a bonus, not worth failing the sync over
         print(f"    ⚠ image OCR failed: {exc}")
         return ""
@@ -396,19 +419,47 @@ def get_image_attachments(service, msg_id, payload):
 # OCRs it via ocr_image. Returns a markdown block -- an Obsidian embed link
 # per image followed by its transcribed text -- ready to append to the note
 # body; images whose OCR found nothing still get the embed link alone.
+# Turns arbitrary text into a filesystem-safe slug (used for both note
+# filenames -- via title_to_filename below -- and, now, OCR'd attachment
+# filenames): lowercase-preserving, punctuation stripped, spaces/underscores
+# collapsed to single hyphens, capped at max_len.
+def slugify(text, max_len=60):
+    safe = re.sub(r"[^\w\s-]", "", text).strip()
+    safe = re.sub(r"[\s_]+", "-", safe)
+    safe = re.sub(r"-{2,}", "-", safe)
+    return safe[:max_len].strip("-")
+
+
+# Saves each image into vault_root/Attachments (same top-level folder
+# vault-mcp's ingest_file uses, regardless of which topic folder the note
+# itself lands in -- so Health/Legal/etc. notes and Hermes's own uploads
+# never collide on filenames across two different Attachments dirs) and
+# OCRs it via ocr_image. Named after its OWN transcribed content (e.g.
+# "dr-suska-business-card.jpg"), not the meaningless IMG_20260904_105815.jpg
+# a phone camera gives it -- falls back to the original filename's base
+# only when OCR found nothing to name it after. Returns a markdown block --
+# an Obsidian embed link per image followed by its transcribed text --
+# ready to append to the note body; images whose OCR found nothing still
+# get the embed link alone.
 def format_attachments(vault_root, images):
     attachments_dir = vault_root / "Attachments"
     attachments_dir.mkdir(parents=True, exist_ok=True)
+    chgrp_writable(attachments_dir)
 
     blocks = []
     for filename, mime_type, data in images:
-        dest = attachments_dir / filename
+        text = ocr_image(data, mime_type)
+
+        ext = Path(filename).suffix or ""
+        first_line = text.strip().splitlines()[0] if text.strip() else ""
+        base = slugify(first_line) or Path(filename).stem
+        dest = attachments_dir / f"{base}{ext}"
         if dest.exists():
             import uuid
-            dest = attachments_dir / f"{dest.stem}-{uuid.uuid4().hex[:8]}{dest.suffix}"
+            dest = attachments_dir / f"{base}-{uuid.uuid4().hex[:8]}{ext}"
         dest.write_bytes(data)
+        chgrp_writable(dest)
 
-        text = ocr_image(data, mime_type)
         print(f"    ✓ attachment OCR'd: Attachments/{dest.name}" if text
               else f"    ⚠ attachment saved, OCR found no text: Attachments/{dest.name}")
 
@@ -419,10 +470,7 @@ def format_attachments(vault_root, images):
 
 
 def title_to_filename(title, date_str=""):
-    safe = re.sub(r"[^\w\s-]", "", title).strip()
-    safe = re.sub(r"[\s_]+", "-", safe)
-    safe = re.sub(r"-{2,}", "-", safe)
-    safe = safe[:60]
+    safe = slugify(title)
 
     try:
         from email.utils import parsedate_to_datetime
@@ -497,7 +545,18 @@ def sync(vault_root, query, since="", dry_run=False):
 
     print(f"[gmail] {len(messages)} messages found, {len(synced_ids)} already synced")
 
-    new_ids = set()
+    # Marks a message done and, outside dry-run, writes the state file right
+    # away rather than batching one save for the end of the whole loop --
+    # this is the only thing standing between a run that gets killed partway
+    # (n8n's task-runner timeout, a pod restart) and having to redo every
+    # message from scratch next time instead of just the ones still left.
+    # The file is tiny (a few hundred IDs at most) so saving every message
+    # costs nothing.
+    def mark_synced(msg_id):
+        synced_ids.add(msg_id)
+        if not dry_run:
+            save_state(synced_ids)
+
     created = 0
 
     for item in messages:
@@ -515,7 +574,7 @@ def sync(vault_root, query, since="", dry_run=False):
 
         topic, folder = detect_topic(subject)
         if not topic:
-            new_ids.add(msg_id)
+            mark_synced(msg_id)
             continue
 
         sender = decode_mime_header(headers.get("From", "Unknown"))
@@ -525,13 +584,17 @@ def sync(vault_root, query, since="", dry_run=False):
 
         if not body and not images:
             print(f"  ⚠ no body, no image attachments -- skipping: {subject[:60]}")
-            new_ids.add(msg_id)
+            mark_synced(msg_id)
             continue
 
         # OCR'd attachment text becomes the body when the email itself has
         # none (a photo with a bare subject line, e.g.) -- appended after it
-        # otherwise. Skipped entirely in dry-run: OCR costs a real LLM call
-        # per image, not worth spending on a preview that writes nothing.
+        # otherwise. Has to happen BEFORE title/filename below: clean_title's
+        # only fallback (bare topic word as the whole subject) reads the
+        # body's first line to title itself from, and for an image-only
+        # email that line doesn't exist until OCR has run. Skipped entirely
+        # in dry-run: OCR costs a real LLM call per image, not worth
+        # spending on a preview that writes nothing.
         if images and not dry_run:
             attachments_md = format_attachments(vault_root, images)
             body = f"{body}\n\n{attachments_md}" if body else attachments_md
@@ -544,6 +607,20 @@ def sync(vault_root, query, since="", dry_run=False):
         target_dir = vault_root / folder
         note_path  = target_dir / filename
 
+        # Checked here -- after OCR (needed for the title above) but before
+        # the tag-extraction LLM call below -- because tag extraction is
+        # the part that actually happens for every topic-matched message,
+        # images or not. A rescan of an already-synced-on-disk message used
+        # to redo that unconditionally, which is how a state-file reset
+        # turned into ~90 wasted LLM calls and blew the task-runner
+        # timeout; OCR itself only runs for the rare message that actually
+        # has an image, so re-running it in that same rescan is cheap by
+        # comparison and not worth a second, earlier duplicate of this check.
+        if not dry_run and note_path.exists():
+            print(f"  ⚠ already exists (skipping): {folder}/{filename}")
+            mark_synced(msg_id)
+            continue
+
         tag_source = body or title
         tags = [] if dry_run else extract_tags(title + "\n\n" + tag_source[:800], folder)
 
@@ -553,18 +630,14 @@ def sync(vault_root, query, since="", dry_run=False):
             print(f"  (dry-run) would create: {folder}/{filename}")
             print(f"    tags: {tags}")
         else:
-            if note_path.exists():
-                print(f"  ⚠ already exists (skipping): {folder}/{filename}")
-            else:
-                target_dir.mkdir(parents=True, exist_ok=True)
-                note_path.write_text(content, encoding="utf-8")
-                print(f"  ✓ created: {folder}/{filename}  tags={tags}")
-                created += 1
+            target_dir.mkdir(parents=True, exist_ok=True)
+            chgrp_writable(target_dir)
+            note_path.write_text(content, encoding="utf-8")
+            chgrp_writable(note_path)   # otherwise this (root, in the N8N pod) write leaves the note root:root -- Eldar/Hermes can't edit or delete it later
+            print(f"  ✓ created: {folder}/{filename}  tags={tags}")
+            created += 1
 
-        new_ids.add(msg_id)
-
-    if not dry_run and new_ids:
-        save_state(synced_ids | new_ids)
+        mark_synced(msg_id)
 
     print(f"[gmail] done -- {created} new notes created")
     return created
