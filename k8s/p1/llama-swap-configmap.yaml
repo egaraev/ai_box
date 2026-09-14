@@ -194,6 +194,28 @@ data:
         # full diagnosis) -- this model is also ANDed into resident_router
         # below, so it hits the exact same contention with arch-router-1.5b
         # whenever the vision route is active. NOT YET CONFIRMED on aibox.
+        #
+        # -b 8192 ADDED 2026-09-14: real OCR failures on a photographed
+        # note (via gmail_sync.py's attachment pipeline) hit "input (4614
+        # tokens) is larger than the max context size (2048 tokens).
+        # skipping" in /logs/stream/upstream -- confirmed via a live
+        # ps aux capture that this model's actual running argv had no -b/
+        # -ub at all, so it was silently on llama.cpp's default n_batch of
+        # 2048 (matches the error's "2048" exactly -- not -c, which was
+        # already correctly 65536 live). A real photo's vision-encoded
+        # tokens can comfortably exceed 2048, so mtmd's whole-image chunk
+        # (submitted as one n_batch-sized unit) got rejected outright.
+        # Fix: raise -b to 8192 for real headroom above any one image.
+        # -ub deliberately left untouched (defaults to 512) -- per
+        # qwen3.8-27b-Expert's own hard-won lesson right above this block,
+        # -ub (not -b) is what actually drives the VRAM-costly compute/
+        # graph_reserve buffer, and 512 is already the value this exact
+        # quant+mmproj combo was proven to work under at 65536 context (see
+        # the 2026-09-06 clean-pod benchmark above). -b just changes how
+        # many tokens can be accepted/queued at once, not how big a single
+        # GPU compute step is, so this should be low VRAM risk -- watch
+        # /logs/stream/upstream on the next real OCR test to confirm no
+        # new cudaMalloc OOM shows up before calling this settled.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B/vision/Qwen3.8-27B-UD-Q3_K_XL.gguf
@@ -206,6 +228,7 @@ data:
           --no-mmap
           --parallel 1
           -fa on
+          -b 8192
           -c 65536 -ctk q4_0 -ctv q4_0
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
           --presence-penalty 1.5 --repeat-penalty 1.0
