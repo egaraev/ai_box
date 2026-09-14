@@ -86,6 +86,21 @@ spec:
               value: "Europe/Warsaw"   # Eldar's own timezone -- so Schedule Trigger cron times match his local clock, not UTC
             - name: TZ
               value: "Europe/Warsaw"
+            # The Execute Command node turned out to be unusable on this
+            # image (confirmed live 2026-09-14: files + manifest entry both
+            # present, yet n8n reports "Unrecognized node type:
+            # n8n-nodes-base.executeCommand" -- root cause still unclear,
+            # possibly this Docker Hardened Image build excludes it at a
+            # level neither the manifest nor an env var exposes). Workaround,
+            # same one the original Windows-lab workflow already used: a
+            # Code node calling child_process.execSync directly. n8n's Code
+            # node sandboxes which Node built-ins it may require() -- by
+            # default child_process is NOT allowed ("Module 'child_process'
+            # is disallowed", confirmed live testing a bare Code node) --
+            # this env var explicitly whitelists it. Standard documented n8n
+            # behavior, unlike the executeCommand mystery above.
+            - name: NODE_FUNCTION_ALLOW_BUILTIN
+              value: "child_process"
             # n8n's own default data folder is ~/.n8n (database.sqlite --
             # workflows, credentials, executions, the owner account itself).
             # Since this container runs as root (see Dockerfile), $HOME here
