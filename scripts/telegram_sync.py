@@ -20,7 +20,12 @@
 #   First run only (interactive login -- saves a reusable session file):
 #     python3 scripts/telegram_sync.py --auth
 #   (If a .telegram_session file already exists from the Windows lab, copy
-#   it into this scripts/ folder instead and skip --auth entirely.)
+#   it into this scripts/ folder instead and skip --auth entirely. Running
+#   inside the N8N pod: --auth needs a real terminal, so do this one-time
+#   step via `kubectl exec -it ... -- python3 /opt/scripts/telegram_sync.py
+#   --auth` once TELEGRAM_SYNC_STATE_DIR/TELEGRAM_API_ID/TELEGRAM_API_HASH
+#   are set in n8n-deployment.yaml -- the resulting session file lands on
+#   the persistent n8n-data volume, see STATE_DIR below.)
 #
 # Usage:
 #   export LITELLM_MASTER_KEY=$(kubectl get secret -n ai-models litellm-secret -o jsonpath='{.data.master_key}' | base64 -d)
@@ -40,9 +45,21 @@ from pathlib import Path
 
 # ── config ───────────────────────────────────────────────────────────────────
 
-HERE         = Path(__file__).resolve().parent
-STATE_FILE   = HERE / ".telegram_sync_state.json"
-SESSION_FILE = str(HERE / ".telegram_session")
+HERE = Path(__file__).resolve().parent
+
+# Where the state file + session file live. Defaults to right next to this
+# script (HERE), same as always, for the host scripts/.venv case -- but
+# inside the N8N pod this script's own directory (/opt/scripts) is baked
+# into the image, not on any mounted volume, so anything written there is
+# gone the next time the pod restarts (n8n-deployment.yaml uses Recreate,
+# and an image rebuild wipes it too). TELEGRAM_SYNC_STATE_DIR overrides this
+# to a subfolder of the n8n-data hostPath mount instead, which IS persistent
+# -- set only in n8n-deployment.yaml's env block, unset (falls back to HERE)
+# everywhere else, so nothing changes for the host-venv case.
+STATE_DIR = Path(os.environ.get("TELEGRAM_SYNC_STATE_DIR", str(HERE)))
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+STATE_FILE   = STATE_DIR / ".telegram_sync_state.json"
+SESSION_FILE = str(STATE_DIR / ".telegram_session")
 
 DEFAULT_VAULT_AI = Path("/data/obsidian_vault/AI")
 

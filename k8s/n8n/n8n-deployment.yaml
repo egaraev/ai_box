@@ -110,14 +110,39 @@ spec:
                 secretKeyRef:
                   name: litellm-secret
                   key: master_key
-            # TELEGRAM_API_ID / TELEGRAM_API_HASH and the Gmail OAuth
-            # credential files are deliberately NOT wired up here yet --
-            # gmail_sync.py/telegram_sync.py aren't scheduled in any
-            # workflow yet (their own OAuth/API setup is still an open
-            # item, see /areas/ai-box-k3s.md). Add them to this env block
-            # (and a Secret/volume for the Gmail credential JSON files +
-            # Telegram session file) when that work happens -- no need to
-            # touch this file just to add the vault_sync.py schedule.
+            # GMAIL_SYNC_STATE_DIR / GMAIL_MCP_DIR / TELEGRAM_SYNC_STATE_DIR:
+            # point gmail_sync.py/telegram_sync.py's own state+session+
+            # credential files at subfolders of the n8n-data hostPath mount
+            # (already below, /home/node/.n8n) instead of their HERE-relative
+            # (/opt/scripts, baked into the image) or $HOME-relative (/root,
+            # also ephemeral -- confirmed live, see chat 2026-09-14) defaults
+            # -- otherwise every pod Recreate would silently lose Telegram's
+            # login session and both scripts' "already synced" bookkeeping.
+            # No separate volume needed -- these are just subdirectories
+            # under the one hostPath already mounted below; each script
+            # creates its own subfolder on first run (STATE_DIR.mkdir(...)).
+            - name: GMAIL_SYNC_STATE_DIR
+              value: "/home/node/.n8n/gmail-sync"
+            - name: GMAIL_MCP_DIR
+              value: "/home/node/.n8n/gmail-mcp"
+            - name: TELEGRAM_SYNC_STATE_DIR
+              value: "/home/node/.n8n/telegram-sync"
+            # Telegram app registered at https://my.telegram.org/apps
+            # (app title "ai_integration"). Literal values here, not a
+            # Secret -- same comfort level as GENERIC_TIMEZONE above, fine
+            # for a single-user home cluster (see k8s/secrets/README.md if
+            # that changes later).
+            - name: TELEGRAM_API_ID
+              value: "32474119"
+            - name: TELEGRAM_API_HASH
+              value: "80bccc31ddb1fc2e54a03efcc5d62804"
+            # The actual credential/session FILES still need to be copied
+            # onto the aibox host (not something a k8s manifest can express)
+            # -- see the chat from 2026-09-14 for the one-time copy from
+            # /home/eldar/temp_files/ into /data/n8n/gmail-mcp/ and
+            # /data/n8n/telegram-sync/ (== /home/node/.n8n/gmail-mcp and
+            # /home/node/.n8n/telegram-sync inside the pod, per
+            # GMAIL_MCP_DIR/TELEGRAM_SYNC_STATE_DIR above).
           volumeMounts:
             - name: vault-data
               mountPath: /data/obsidian_vault

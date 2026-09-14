@@ -20,8 +20,13 @@
 #
 #   Needs Gmail OAuth credentials at ~/.gmail-mcp/credentials.json and
 #   ~/.gmail-mcp/gcp-oauth.keys.json -- reuse the same ones the Windows lab
-#   used if the gmail-mcp plugin isn't already set up on aibox (see chat for
-#   where those live on the Windows box), or set gmail-mcp up fresh here.
+#   used if the gmail-mcp plugin isn't already set up on aibox (Google's
+#   OAuth refresh token isn't tied to one machine, so just copying both
+#   files over works, no need to redo the consent flow), or set gmail-mcp up
+#   fresh here. Running inside the N8N pod: GMAIL_MCP_DIR (set in
+#   n8n-deployment.yaml) points this at a subfolder of the persistent
+#   n8n-data volume instead of $HOME/.gmail-mcp (which is /root, ephemeral,
+#   see STATE_DIR below) -- copy the two files there.
 #
 # Usage:
 #   export LITELLM_MASTER_KEY=$(kubectl get secret -n ai-models litellm-secret -o jsonpath='{.data.master_key}' | base64 -d)
@@ -40,10 +45,24 @@ from pathlib import Path
 
 # ── paths / config ──────────────────────────────────────────────────────────
 
-HERE       = Path(__file__).resolve().parent
-STATE_FILE = HERE / ".gmail_sync_state.json"
+HERE = Path(__file__).resolve().parent
 
-GMAIL_MCP_DIR   = Path.home() / ".gmail-mcp"
+# Where the state file lives. Defaults to right next to this script (HERE),
+# same as always, for the host scripts/.venv case -- but inside the N8N pod
+# this script's own directory (/opt/scripts) is baked into the image, not on
+# any mounted volume, so anything written there is gone the next time the
+# pod restarts. GMAIL_SYNC_STATE_DIR overrides this to a subfolder of the
+# n8n-data hostPath mount instead (persistent) -- set only in
+# n8n-deployment.yaml's env block, unset (falls back to HERE) everywhere
+# else. Same reasoning as telegram_sync.py's STATE_DIR.
+STATE_DIR = Path(os.environ.get("GMAIL_SYNC_STATE_DIR", str(HERE)))
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+STATE_FILE = STATE_DIR / ".gmail_sync_state.json"
+
+# GMAIL_MCP_DIR: defaults to ~/.gmail-mcp (matches the gmail-mcp plugin
+# convention) -- overridable the same way for the pod, since $HOME there is
+# /root (confirmed live), not wherever the actual credential files live.
+GMAIL_MCP_DIR   = Path(os.environ.get("GMAIL_MCP_DIR", str(Path.home() / ".gmail-mcp")))
 TOKEN_FILE      = GMAIL_MCP_DIR / "credentials.json"
 OAUTH_KEYS_FILE = GMAIL_MCP_DIR / "gcp-oauth.keys.json"
 
