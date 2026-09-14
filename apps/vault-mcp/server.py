@@ -274,11 +274,19 @@ def _slugify(title: str) -> str:
 # sends this to LiteLLM's OpenAI-compatible embeddings endpoint:
 #   {"model": "nomic-embed-text-v1.5", "input": ["chunk one text", "chunk two text"]}
 # returns a list of vectors in the same order as texts
-async def embed_texts(client: httpx.AsyncClient, texts: list[str]) -> list[list[float]]:
+# nomic-embed-text-v1.5 wants a "search_document: " prefix on text being
+# indexed and "search_query: " on text a search is run with -- without it,
+# vectors cluster too close together to tell related notes from unrelated
+# ones (see scripts/vault_sync.py's embed_texts for the full story; this is
+# the same fix applied here since this function serves both _index_note,
+# the document side, and search_vault, the query side). prefix must be
+# "search_document" or "search_query" -- both call sites below pass one
+# explicitly rather than defaulting, so it's never accidentally left off.
+async def embed_texts(client: httpx.AsyncClient, texts: list[str], prefix: str) -> list[list[float]]:
     headers = {"Authorization": f"Bearer {LITELLM_API_KEY}"}
     resp = await client.post(
         f"{LITELLM_URL}/embeddings",
-        json={"model": EMBED_MODEL, "input": texts},
+        json={"model": EMBED_MODEL, "input": [f"{prefix}: {t}" for t in texts]},
         headers=headers,
         timeout=60.0,
     )
@@ -371,7 +379,7 @@ async def _index_note(client: httpx.AsyncClient, path: Path, source: str, title:
     if not blocks:
         return 0
 
-    vectors = await embed_texts(client, [b["text"] for b in blocks])
+    vectors = await embed_texts(client, [b["text"] for b in blocks], "search_document")
 
     points = []
     for block, vector in zip(blocks, vectors):
@@ -423,7 +431,7 @@ async def search_vault(query: str, top_k: int = 5, tags: list[str] | None = None
         raise ValueError("query must not be empty")
 
     async with httpx.AsyncClient() as client:
-        vector = (await embed_texts(client, [query]))[0]
+        vector = (await embed_texts(client, [query], "search_query"))[0]
         hits = await qdrant_search(client, vector, top_k, tags)
 
     if not hits:

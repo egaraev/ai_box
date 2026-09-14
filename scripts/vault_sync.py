@@ -186,13 +186,29 @@ def chunk_hash(text):
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
+# nomic-embed-text-v1.5 is trained to expect a "search_document: " prefix on
+# anything being INDEXED (as opposed to "search_query: " on the text a
+# search is later run with, see link_notes.py's embed_query) -- without it,
+# the model still returns vectors, but they cluster much closer together
+# regardless of actual topic, which is exactly what made link_notes.py's
+# similarity scores come back nearly flat across unrelated notes (confirmed
+# 2026-09-14: e.g. 14 completely different AI notes all scoring within
+# 0.007 of each other against one query). Added here on the indexing side
+# and in link_notes.py/vault-mcp's server.py on the query side, all three
+# at once -- a document embedded with the prefix only lines up meaningfully
+# against a query embedded with ITS prefix, so this only helps once every
+# embedding call into this collection uses the matching one. Existing
+# vectors were embedded without any prefix; run `vault_sync.py --resync`
+# after deploying this to re-embed the whole vault, or old and new vectors
+# will sit inconsistently in the same collection.
+#
 # sends this to LiteLLM's OpenAI-compatible embeddings endpoint:
-#   {"model": "nomic-embed-text-v1.5", "input": ["chunk one text", "chunk two text"]}
+#   {"model": "nomic-embed-text-v1.5", "input": ["search_document: chunk one text", "search_document: chunk two text"]}
 # returns a list of vectors in the same order as texts, e.g.
 #   [[0.012, -0.045, ...], [0.031, 0.002, ...]]
 async def embed_texts(texts):
     headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
-    payload = {"model": EMBED_MODEL, "input": texts}
+    payload = {"model": EMBED_MODEL, "input": [f"search_document: {t}" for t in texts]}
     async with aiohttp.ClientSession() as session:
         async with session.post(f"{LITELLM_URL}/v1/embeddings", json=payload, headers=headers,
                                  timeout=aiohttp.ClientTimeout(total=60)) as resp:
