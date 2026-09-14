@@ -7,11 +7,40 @@ config block -- see k8s/p3/hermes-agent.yaml). Two tools:
   search_vault  -- embed a query via LiteLLM, search Qdrant's obsidian_vault
                    collection, return the matching chunks as text.
   ingest_note   -- write text Eldar gives Hermes as a new vault note
-                   (Inbox/<slug>.md), then chunk+embed+upsert it.
+                   (<folder>/<slug>.md, folder defaults to Inbox), then
+                   chunk+embed+upsert it.
   ingest_file   -- same, but for a file already readable by this server
-                   (image/PDF/other): extracts text (PDF) or generates a
-                   caption (image) via the local vision model, copies the
+                   (image/PDF/docx/other): extracts text, OCRs images and
+                   scanned PDFs via the local vision model, copies the
                    original into Attachments/, links it from the note.
+
+Folder routing (2026-09-14): both tools take an optional folder param so
+Hermes can route a save straight into Family/Health/Legal/Household/
+Reference/AI instead of everything always landing in Inbox/ for Eldar to
+re-file by hand later. Restricted to a fixed whitelist (ALLOWED_FOLDERS
+below) rather than any string Hermes sends, so a hallucinated/typo'd folder
+name can't create new top-level folders Eldar never asked for.
+
+OCR (2026-09-14): Eldar's real use case for images/PDFs here is photographed
+notes/documents, not scenery -- so images are read via the vision model with
+a verbatim-transcription prompt (not a scene-description caption), and a PDF
+with no extractable text layer (a scanned/photographed PDF) falls back to
+rasterizing each page and running the same vision-OCR path per page. Both
+paths fall back further to local pytesseract if the vision model call itself
+fails (LiteLLM down/unreachable) -- weaker on skewed/handwritten text, but
+doesn't depend on anything else being up. docx is extracted directly via
+python-docx (it's already digital text, no OCR needed).
+Tables (2026-09-14): a PDF with a real text layer also gets run through
+camelot for table structure -- pypdf's extract_text() flattens a table into
+hard-to-read run-on text, so any tables camelot finds are appended as plain
+pipe rows, same lightweight rendering _extract_docx_text uses for docx
+tables. Only attempted on the pypdf (real text layer) path, not the OCR
+fallback path -- camelot needs actual vector table structure to find, which
+a scanned/photographed page doesn't have, so it would just find nothing
+there anyway.
+Deliberately still NOT added: ocrmypdf. Its system toolchain (ghostscript/
+qpdf/tesseract) mostly duplicates what pymupdf+vision-OCR already covers
+here for the scanned-PDF case. Revisit if a real need shows up.
 
 Chunking/embedding/point-id logic here is a deliberate DUPLICATE of
 scripts/vault_sync.py's own copies, not a shared import -- that script runs
@@ -83,8 +112,30 @@ EMBED_MODEL = "nomic-embed-text-v1.5"
 VISION_MODEL = "qwen3.8-27b-Expert-Vision"   # same locked vision route Hermes's own image-in-chat path already uses (custom_router_hook.py's _has_image check)
 
 VAULT_PATH = Path(os.environ.get("VAULT_PATH", "/data/obsidian_vault"))
-INBOX_DIR = VAULT_PATH / "Inbox"             # everything this server writes lands here -- Eldar re-files it in Obsidian later if he wants
+INBOX_DIR = VAULT_PATH / "Inbox"             # default folder when ingest_note/ingest_file's folder param is left unset
 ATTACHMENTS_DIR = VAULT_PATH / "Attachments"
+
+# Folders ingest_note/ingest_file's folder param is allowed to route a note
+# into -- a fixed whitelist, not any string Hermes sends, so a confused or
+# hallucinated folder name can't scatter notes outside Eldar's real
+# top-level vault structure or silently create a new folder he never asked
+# for. Matches Eldar's actual Obsidian top-level folders as of 2026-09-14 --
+# if he adds a new one in Obsidian, add it here too or Hermes won't be able
+# to route into it.
+ALLOWED_FOLDERS = {"Inbox", "Family", "Health", "Legal", "Household", "Reference", "AI"}
+
+# Created at import time, not lazily inside ingest_note/ingest_file. Found
+# 2026-09-14: on a vault where ingest_file had never yet succeeded even
+# once, Attachments/ didn't exist -- but the tool's own docstring tells
+# Hermes to copy a file INTO Attachments/ itself BEFORE calling ingest_file,
+# so that first-ever call was guaranteed to fail with "No such file or
+# directory" no matter what. Hermes misreported that as a permissions
+# problem (see /areas/ai-box-k3s.md) -- creating every dir up front, as soon
+# as this server starts, closes that chicken-and-egg gap for good (now
+# covers all of ALLOWED_FOLDERS, not just Inbox, for the same reason).
+for _folder_name in ALLOWED_FOLDERS:
+    (VAULT_PATH / _folder_name).mkdir(parents=True, exist_ok=True)
+ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Where ingest_file is allowed to read from -- see this file's top comment
 # for why it's just these two (both volumes this pod fully owns, no
@@ -97,6 +148,15 @@ ALLOWED_INPUT_ROOTS = [
 ]
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+# Hard cap on how many pages of a scanned/no-text-layer PDF get OCR'd via the
+# vision model. The vision model route is locked --parallel 1 (see
+# /areas/ai-box-k3s.md), so pages OCR this way are strictly sequential --
+# one page can take 30-90s, and the vault MCP tool call itself times out at
+# 180s (hermes-agent.yaml's mcp_servers.vault.timeout). Past this cap the
+# note still gets the pages that were OCR'd plus a note that it was
+# truncated, rather than the whole call failing/timing out.
+MAX_OCR_PDF_PAGES = 3
 
 mcp = MCPServer("vault")
 
@@ -248,12 +308,15 @@ async def qdrant_search(client: httpx.AsyncClient, vector: list[float], top_k: i
 # ingest_file, both of which just build the body text differently and hand
 # it here ----
 
-def _write_note(title: str, tags, audience, body: str) -> tuple[Path, str]:
-    INBOX_DIR.mkdir(parents=True, exist_ok=True)
+def _write_note(title: str, tags, audience, body: str, folder: str = "Inbox") -> tuple[Path, str]:
+    if folder not in ALLOWED_FOLDERS:
+        raise ValueError(f"folder must be one of {sorted(ALLOWED_FOLDERS)} (got {folder!r})")
+    target_dir = VAULT_PATH / folder
+    target_dir.mkdir(parents=True, exist_ok=True)
     slug = _slugify(title)
-    path = INBOX_DIR / f"{slug}.md"
+    path = target_dir / f"{slug}.md"
     if path.exists():   # don't clobber an earlier note with the same title -- give this one its own file
-        path = INBOX_DIR / f"{slug}-{uuid.uuid4().hex[:8]}.md"
+        path = target_dir / f"{slug}-{uuid.uuid4().hex[:8]}.md"
 
     front_lines = []
     if tags:
@@ -344,14 +407,14 @@ async def search_vault(query: str, top_k: int = 5, tags: list[str] | None = None
 
 
 @mcp.tool()
-async def ingest_note(content: str, title: str, tags: list[str] | None = None, audience: str | None = None) -> str:
+async def ingest_note(content: str, title: str, tags: list[str] | None = None, audience: str | None = None, folder: str = "Inbox") -> str:
     """Save text content as a new note in Eldar's Obsidian vault and index it for search.
 
     Use this when Eldar asks you to remember/save/note down something --
     pasted text, a summary, something he dictated -- as a durable,
-    searchable note rather than only in this conversation. The note is
-    written to the vault's Inbox/ folder; Eldar re-files it into his own
-    folder structure later if he wants.
+    searchable note rather than only in this conversation. Route it into the
+    most fitting folder below rather than defaulting to Inbox whenever the
+    content clearly fits one -- Inbox is for anything that doesn't.
 
     Args:
         content: The note body, as markdown. Real headings (#, ##, ...) are
@@ -362,6 +425,10 @@ async def ingest_note(content: str, title: str, tags: list[str] | None = None, a
         audience: Optional -- "everyone", "adults", or "eldar-only" if this
             note should eventually be scoped to specific family members.
             Leave unset for a normal note.
+        folder: Which top-level vault folder to file this under -- one of
+            "Inbox" (default; anything that doesn't clearly fit elsewhere),
+            "Family", "Health", "Legal", "Household", "Reference", or "AI".
+            Any other value is rejected.
 
     Returns:
         Confirmation with the vault path and how many chunks were indexed.
@@ -371,7 +438,7 @@ async def ingest_note(content: str, title: str, tags: list[str] | None = None, a
     if not title or not title.strip():
         raise ValueError("title must not be empty")
 
-    path, source = _write_note(title, tags, audience, content.strip())
+    path, source = _write_note(title, tags, audience, content.strip(), folder)
 
     async with httpx.AsyncClient() as client:
         chunk_count = await _index_note(client, path, source, title, tags, audience)
@@ -379,34 +446,59 @@ async def ingest_note(content: str, title: str, tags: list[str] | None = None, a
     return f"Saved to {source} and indexed ({chunk_count} chunks)."
 
 
+# Last-resort OCR when the vision model call itself fails (LiteLLM down/
+# unreachable) -- classic tesseract via pytesseract, no LLM involved. Weaker
+# than the vision model on skewed photos or handwriting, but doesn't depend
+# on anything else being up.
+def _ocr_image_locally(image_bytes: bytes) -> str:
+    import io
+    import pytesseract
+    from PIL import Image
+    image = Image.open(io.BytesIO(image_bytes))
+    return pytesseract.image_to_string(image).strip()
+
+
 # sends this to LiteLLM's vision-capable model:
 #   {"model": "qwen3.8-27b-Expert-Vision", "messages": [{"role": "user",
 #    "content": [{"type": "text", "text": "..."}, {"type": "image_url",
-#    "image_url": {"url": "data:image/png;base64,..."}}]}], "max_tokens": 500}
-# returns the usual OpenAI chat shape: {"choices": [{"message": {"content": "a photo of..."}}]}
-async def _caption_image(client: httpx.AsyncClient, image_bytes: bytes, mime_type: str) -> str:
+#    "image_url": {"url": "data:image/png;base64,..."}}]}], "max_tokens": 2000}
+# returns the usual OpenAI chat shape: {"choices": [{"message": {"content": "..."}}]}
+#
+# Prompted for verbatim transcription, not a scene caption -- the real use
+# case here is photographed notes/documents Eldar wants findable by their
+# actual content, not "a photo of a piece of paper". Falls back to local
+# pytesseract (see above) if the vision model call itself fails.
+async def _ocr_image(client: httpx.AsyncClient, image_bytes: bytes, mime_type: str) -> str:
     b64 = base64.b64encode(image_bytes).decode("ascii")
     headers = {"Authorization": f"Bearer {LITELLM_API_KEY}"}
-    resp = await client.post(
-        f"{LITELLM_URL}/chat/completions",
-        headers=headers,
-        json={
-            "model": VISION_MODEL,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this image in detail, including any visible text. "
-                                              "This description will be used to make the image searchable "
-                                              "later, so be specific and thorough."},
-                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
-                ],
-            }],
-            "max_tokens": 500,
-        },
-        timeout=60.0,
+    prompt = (
+        "Transcribe ALL visible text in this image, verbatim and in full, exactly as written "
+        "(keep the original language -- don't translate it). Preserve line breaks and structure "
+        "(headings, lists, tables) as plain text where it's clear. If there is little or no text, "
+        "instead describe what the image shows in one or two sentences."
     )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    try:
+        resp = await client.post(
+            f"{LITELLM_URL}/chat/completions",
+            headers=headers,
+            json={
+                "model": VISION_MODEL,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+                    ],
+                }],
+                "max_tokens": 2000,
+            },
+            timeout=90.0,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except httpx.HTTPError as exc:
+        logger.warning("vision OCR failed (%s) -- falling back to local pytesseract", exc)
+        return _ocr_image_locally(image_bytes)
 
 
 def _extract_pdf_text(path: Path) -> str:
@@ -416,8 +508,68 @@ def _extract_pdf_text(path: Path) -> str:
     return "\n\n".join(pages).strip()
 
 
+# Only meaningful on a PDF with a real text layer (see this file's top
+# comment) -- pypdf's extract_text() flattens a table into hard-to-read
+# run-on text, so any tables camelot finds get appended separately as plain
+# pipe rows. camelot's "lattice" flavor (the default) needs visible table
+# borders/lines to find a table; if Eldar's real PDFs turn out to have
+# borderless tables, switch to flavor="stream" (whitespace-based instead).
+def _extract_pdf_tables(path: Path) -> str:
+    import camelot
+    tables = camelot.read_pdf(str(path), pages="all")
+    if len(tables) == 0:
+        return ""
+    parts = []
+    for i, table in enumerate(tables):
+        rows = table.df.values.tolist()
+        lines = [" | ".join(str(cell).strip() for cell in row) for row in rows]
+        parts.append(f"Table {i + 1} (page {table.page}):\n" + "\n".join(lines))
+    return "\n\n".join(parts)
+
+
+# Fallback for a PDF with no extractable text layer (scanned/photographed).
+# Rasterizes each page to a PNG via pymupdf (no external system binary
+# needed, unlike poppler/pdf2image) and runs it through the same vision-OCR
+# path images use. Capped at MAX_OCR_PDF_PAGES -- see that constant's
+# comment for why (the vision route is strictly sequential).
+async def _extract_pdf_via_ocr(client: httpx.AsyncClient, path: Path) -> str:
+    import fitz   # pymupdf
+    doc = fitz.open(str(path))
+    try:
+        page_count = doc.page_count
+        pages_to_ocr = min(page_count, MAX_OCR_PDF_PAGES)
+        texts = []
+        for i in range(pages_to_ocr):
+            png_bytes = doc[i].get_pixmap(dpi=200).tobytes("png")
+            texts.append(await _ocr_image(client, png_bytes, "image/png"))
+        result = "\n\n---\n\n".join(t for t in texts if t)
+        if page_count > MAX_OCR_PDF_PAGES:
+            result += f"\n\n[OCR truncated -- {page_count - MAX_OCR_PDF_PAGES} more page(s) not processed]"
+        return result
+    finally:
+        doc.close()
+
+
+# docx is already digital text -- no OCR needed, just walk paragraphs and
+# tables in document order. Simple pipe-row rendering for tables (not a
+# proper markdown table, but good enough to be searchable and readable).
+def _extract_docx_text(path: Path) -> str:
+    import docx   # python-docx
+    document = docx.Document(str(path))
+    parts = []
+    for para in document.paragraphs:
+        if para.text.strip():
+            parts.append(para.text.strip())
+    for table in document.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells]
+            if any(cells):
+                parts.append(" | ".join(cells))
+    return "\n\n".join(parts).strip()
+
+
 @mcp.tool()
-async def ingest_file(file_path: str, title: str | None = None, tags: list[str] | None = None, audience: str | None = None) -> str:
+async def ingest_file(file_path: str, title: str | None = None, tags: list[str] | None = None, audience: str | None = None, folder: str = "Inbox") -> str:
     """Save a file (image, PDF, or other document) into Eldar's Obsidian vault and index its content for search.
 
     file_path must already be under the vault itself
@@ -430,9 +582,19 @@ async def ingest_file(file_path: str, title: str | None = None, tags: list[str] 
     path to pass, say so rather than guessing.
 
     What happens depends on the file type:
-    - PDF: text is extracted and indexed.
-    - Image: a detailed caption is generated (via the local vision model)
-      and indexed, so the image becomes findable by what it shows.
+    - PDF: text is extracted directly if the PDF has a real text layer, and
+      any tables on that layer are also extracted and appended (as plain
+      rows -- table structure that plain text extraction alone would
+      flatten into a hard-to-read run-on). If there's no text layer (a
+      scanned/photographed PDF), the first few pages are OCR'd via the
+      vision model instead (capped -- see the code comment on
+      MAX_OCR_PDF_PAGES; a very long scanned PDF only gets its first pages
+      indexed) -- no table extraction on that path, there's no real table
+      structure to find on a scanned page.
+    - Image: transcribed verbatim via the vision model (this is meant for
+      photos of notes/documents, not scenery -- it reads the actual text,
+      not just a scene description).
+    - .docx: text extracted directly (paragraphs + tables).
     - Anything else: read as plain text if possible; otherwise the file is
       still saved and linked from a note, but won't be text-searchable.
     The original file is always copied into the vault's Attachments/ folder
@@ -444,15 +606,33 @@ async def ingest_file(file_path: str, title: str | None = None, tags: list[str] 
         title: Optional title for the note. Defaults to the filename.
         tags: Optional list of freeform tags.
         audience: Optional -- "everyone", "adults", or "eldar-only".
+        folder: Which top-level vault folder to file the NOTE under (the
+            attachment itself always goes to Attachments/ regardless) -- one
+            of "Inbox" (default; anything that doesn't clearly fit
+            elsewhere), "Family", "Health", "Legal", "Household",
+            "Reference", or "AI". Any other value is rejected.
 
     Returns:
         Confirmation with the vault paths (note + attachment) and whether
         text/caption extraction succeeded.
     """
+    if folder not in ALLOWED_FOLDERS:   # fail before touching the filesystem, not after copying the attachment
+        raise ValueError(f"folder must be one of {sorted(ALLOWED_FOLDERS)} (got {folder!r})")
+
     src = Path(file_path).resolve()
     if not any(src.is_relative_to(root.resolve()) for root in ALLOWED_INPUT_ROOTS):   # Path.is_relative_to, py3.9+ (base image is 3.12)
         allowed = " or ".join(str(r) for r in ALLOWED_INPUT_ROOTS)
-        raise ValueError(f"file_path must be under {allowed} (got {file_path})")
+        # Spell out the fix, not just the rule -- this text is the whole thing
+        # Hermes sees when the call fails, and it kept re-guessing paths or
+        # inventing a different error instead of doing the copy the docstring
+        # already asks for. Repeating the actual fix here (copy into
+        # Attachments/, then retry with that path) where the caller can't miss it.
+        raise ValueError(
+            f"file_path must be under {allowed} (got {file_path}). "
+            f"If this file is from your own cache, first copy it into {ATTACHMENTS_DIR} "
+            f"yourself, then call ingest_file again with that new path under {ATTACHMENTS_DIR}. "
+            f"Report this exact error if you're unsure what path to use -- don't guess a different one."
+        )
     if not src.is_file():
         raise ValueError(f"no such file: {file_path}")
 
@@ -477,17 +657,35 @@ async def ingest_file(file_path: str, title: str | None = None, tags: list[str] 
         if ext == ".pdf":
             try:
                 extracted = _extract_pdf_text(dest)
-                status = "PDF text extracted" if extracted else "PDF had no extractable text (likely scanned/image-only)"
-            except Exception as exc:   # corrupted/encrypted PDF -- keep the attachment, just skip text extraction
+                if extracted:
+                    status = "PDF text extracted"
+                    try:
+                        tables = _extract_pdf_tables(dest)
+                        if tables:
+                            extracted = f"{extracted}\n\n{tables}"
+                            status = "PDF text extracted (+ tables)"
+                    except Exception as exc:   # table extraction is a bonus on top of already-successful text extraction -- don't lose the text over it
+                        logger.warning("PDF table extraction failed for %s: %s", dest, exc)
+                else:
+                    extracted = await _extract_pdf_via_ocr(client, dest)
+                    status = "PDF had no text layer -- OCR'd via vision model" if extracted else "PDF OCR found no text"
+            except Exception as exc:   # corrupted/encrypted PDF, or OCR fallback itself failed -- keep the attachment, just skip text extraction
                 logger.warning("PDF extraction failed for %s: %s", dest, exc)
                 status = f"PDF text extraction failed ({exc}) -- attachment saved anyway"
         elif ext in IMAGE_EXTENSIONS:
             try:
-                extracted = await _caption_image(client, dest.read_bytes(), mime_type)
-                status = "image captioned"
-            except httpx.HTTPError as exc:   # vision model unreachable/erroring -- keep the attachment, just skip captioning
-                logger.warning("image captioning failed for %s: %s", dest, exc)
-                status = f"image captioning failed ({exc}) -- attachment saved anyway"
+                extracted = await _ocr_image(client, dest.read_bytes(), mime_type)
+                status = "image OCR'd"
+            except Exception as exc:   # vision model AND local OCR fallback both failed -- keep the attachment, just skip extraction
+                logger.warning("image OCR failed for %s: %s", dest, exc)
+                status = f"image OCR failed ({exc}) -- attachment saved anyway"
+        elif ext == ".docx":
+            try:
+                extracted = _extract_docx_text(dest)
+                status = "docx text extracted" if extracted else "docx had no extractable text"
+            except Exception as exc:   # corrupted/unsupported docx -- keep the attachment, just skip text extraction
+                logger.warning("docx extraction failed for %s: %s", dest, exc)
+                status = f"docx text extraction failed ({exc}) -- attachment saved anyway"
         else:
             try:
                 extracted = dest.read_text(encoding="utf-8")
@@ -498,7 +696,7 @@ async def ingest_file(file_path: str, title: str | None = None, tags: list[str] 
         link = f"![[{attachment_ref}]]" if ext in IMAGE_EXTENSIONS else f"[[{attachment_ref}]]"
         body = f"{link}\n\n{extracted}" if extracted else link
 
-        path, source = _write_note(display_title, tags, audience, body)
+        path, source = _write_note(display_title, tags, audience, body, folder)
         chunk_count = await _index_note(client, path, source, display_title, tags, audience)
 
     return f"Saved attachment to {attachment_ref}, note at {source} ({status}, {chunk_count} chunks indexed)."

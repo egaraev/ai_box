@@ -285,6 +285,15 @@ data:
     - If it's genuinely unclear which of two folders fits, ask rather than
       guess -- a misfiled note is easy to fix, but a family member searching
       for it later has no way to know you guessed wrong.
+    - ingest_file only accepts a file_path already inside the vault or
+      /shared-output/ -- if the file is sitting in your own cache instead,
+      copy it into the vault's Attachments/ folder yourself first (you have
+      write access there), then call ingest_file with that new path. Do this
+      before calling ingest_file, not after it fails.
+    - If ingest_file (or any tool) still rejects the call, report the exact
+      error message back rather than guessing at a different path or making
+      up a reason it might have failed -- the real error is more useful to
+      Eldar than a plausible-sounding invented one.
 
     # Defaults
     - When something is genuinely ambiguous, ask -- don't guess on anything
