@@ -229,6 +229,23 @@ data:
         # it OOMs, the next lever is dropping -ub below its current default
         # (512) rather than pushing -c further, same fix already applied to
         # qwen3.8-27b-Expert's own compute-buffer OOM above.
+        #
+        # -c 81920 REVERTED back to 65536 2026-09-14: didn't OOM outright,
+        # but confirmed BAD via a live nvidia-smi capture taken while this
+        # model was loaded at 81920 -- 16303MiB total, 15789MiB used, only
+        # ~514MiB free, with llama-server alone holding 15156MiB. That's the
+        # card maxed to the edge, not cleanly fitting and not cleanly OOMing
+        # either, and prompt processing collapsed to 11-16 t/s (vs the
+        # normal ~1400-1600 t/s baseline documented above) as a direct
+        # result -- whatever happens at that VRAM boundary is catastrophically
+        # slow, not just tight. Confirms the 2026-09-06 ceiling finding above
+        # (100000 OOMs outright, 884.62 MiB short) extends downward: 81920
+        # already sits in the same razor-thin danger zone even though it
+        # technically loads without erroring. Back to the proven-safe 65536
+        # until the real fix (freeing the desktop's/ComfyUI's non-model VRAM
+        # baseline, same lever already identified on qwen3.8-27b-Expert
+        # above) actually happens -- more -c tuning alone won't fix this,
+        # the card just doesn't have the headroom.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B/vision/Qwen3.8-27B-UD-Q3_K_XL.gguf
@@ -242,7 +259,7 @@ data:
           --parallel 1
           -fa on
           -b 8192
-          -c 81920 -ctk q4_0 -ctv q4_0
+          -c 65536 -ctk q4_0 -ctv q4_0
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
           --presence-penalty 1.5 --repeat-penalty 1.0
           --reasoning-budget 4096
