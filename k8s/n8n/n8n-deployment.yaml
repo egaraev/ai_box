@@ -86,6 +86,20 @@ spec:
               value: "Europe/Warsaw"   # Eldar's own timezone -- so Schedule Trigger cron times match his local clock, not UTC
             - name: TZ
               value: "Europe/Warsaw"
+            # n8n's own default data folder is ~/.n8n (database.sqlite --
+            # workflows, credentials, executions, the owner account itself).
+            # Since this container runs as root (see Dockerfile), $HOME here
+            # is /root (confirmed live, chat 2026-09-14), NOT /home/node --
+            # so n8n was actually writing to /root/.n8n this whole time,
+            # which is nowhere on the n8n-data hostPath mount below (that
+            # mount sits at /home/node/.n8n, a path n8n never used). Every
+            # pod Recreate wiped it, hence being asked to re-register on
+            # every restart. N8N_USER_FOLDER overrides n8n's own default
+            # regardless of $HOME, same fix pattern as GMAIL_MCP_DIR/
+            # TELEGRAM_SYNC_STATE_DIR above for the same root-vs-HERE class
+            # of bug.
+            - name: N8N_USER_FOLDER
+              value: "/home/node/.n8n"
             # QDRANT_URL/LITELLM_URL: read by scripts/vault_sync.py (and,
             # once wired up, gmail_sync.py/telegram_sync.py) via
             # os.environ.get(..., "http://localhost:<nodeport>") -- that
