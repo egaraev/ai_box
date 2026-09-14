@@ -216,6 +216,19 @@ data:
         # GPU compute step is, so this should be low VRAM risk -- watch
         # /logs/stream/upstream on the next real OCR test to confirm no
         # new cudaMalloc OOM shows up before calling this settled.
+        # -c 65536 -> 81920 TESTED 2026-09-14: a real Telegram conversation
+        # (Hermes re-running vision OCR on an image mid-thread) hit
+        # ContextWindowExceededError at 67120 tokens -- just over the old
+        # 65536 ceiling, not anywhere near needing the full 100000 that was
+        # already confirmed OOM (884.62 MiB short on the mmproj buffer, see
+        # the 2026-09-06 benchmark above) at this same quant+mmproj combo.
+        # 81920 gives ~14.8k tokens of real headroom above the actual
+        # failure while staying 18% under the known-bad ceiling. NOT YET
+        # CONFIRMED live -- watch /logs/stream/upstream on first load after
+        # this deploys for a cudaMalloc OOM before calling this settled; if
+        # it OOMs, the next lever is dropping -ub below its current default
+        # (512) rather than pushing -c further, same fix already applied to
+        # qwen3.8-27b-Expert's own compute-buffer OOM above.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B/vision/Qwen3.8-27B-UD-Q3_K_XL.gguf
@@ -229,7 +242,7 @@ data:
           --parallel 1
           -fa on
           -b 8192
-          -c 65536 -ctk q4_0 -ctv q4_0
+          -c 81920 -ctk q4_0 -ctv q4_0
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
           --presence-penalty 1.5 --repeat-penalty 1.0
           --reasoning-budget 4096
