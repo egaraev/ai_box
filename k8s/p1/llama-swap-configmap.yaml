@@ -281,30 +281,45 @@ data:
         # every single chat message. NOT YET CONFIRMED on aibox.
         #
         # -c 8192 -> 32768, --parallel 4 ADDED 2026-09-14, THEN REVERTED THE
-        # SAME DAY: this model never set --parallel, so it silently ran on
-        # llama-server's default of 4 slots -- splitting -c 8192 into 2048
-        # tokens PER SLOT, not 8192 as the flag implied. Found via a real
-        # failure: vault_sync.py's /v1/embeddings call on a note with one
-        # big unbroken blockquote (10957 chars, 4614 tokens) got rejected,
-        # the JSON body itself naming the cause -- 'n_ctx': 2048 -- and a
-        # per-chunk isolation test confirmed every other, smaller chunk in
-        # the same note embedded fine. First attempt raised -c to 32768
-        # expecting 32768/4=8192 per slot -- deployed, live argv confirmed
-        # via `ps aux`, but the SAME chunk failed again with the exact same
-        # 'n_ctx': 2048 in the error, byte-for-byte identical. That's the
-        # tell: llama-server silently caps -c to the GGUF's real trained
-        # context and only logs a warning (same gotcha already hit and
-        # documented elsewhere on this box) -- nomic-embed-text-v1.5's real
-        # native context is 8192, so -c 32768 request got clamped straight
-        # back down to 8192 before the /4 split, landing on exactly 2048
-        # again. Real fix: --parallel 1 (not a bigger -c) so the model's
-        # actual fixed 8192-token ceiling goes to one slot whole, covering
-        # the 4614-token failure case with real headroom. -c left at 8192
-        # (matches the true ceiling honestly -- asking for more just gets
-        # silently ignored). Tradeoff: Honcho's EMBED_MESSAGES calls now
-        # queue through a single slot instead of 4 concurrent -- untested
-        # whether that matters in practice for this small/fast a model;
-        # revisit if Honcho embedding throughput becomes a real problem.
+        # SAME DAY, in two steps -- both turned out to be the wrong fix, kept
+        # here since the dead ends are worth knowing about:
+        #  1. This model never set --parallel, so it silently ran on
+        #     llama-server's default of 4 slots. Found via a real failure:
+        #     vault_sync.py's /v1/embeddings call on a note with one big
+        #     unbroken blockquote (10957 chars, 4614 tokens) got rejected,
+        #     the JSON body itself naming the cause -- 'n_ctx': 2048.
+        #     Assumed -c 8192 was being split 4 ways -- raised -c to 32768
+        #     expecting 32768/4=8192 per slot. Deployed, live argv confirmed
+        #     via `ps aux`, but the SAME chunk failed again with the exact
+        #     same 'n_ctx': 2048, byte-for-byte identical. Theory was wrong.
+        #  2. Guessed the model's real native context was 8192 and that
+        #     --parallel 1 (one slot, no division) would let that whole
+        #     8192 through -- deployed, live argv confirmed again, STILL
+        #     'n_ctx': 2048, even with only 1 slot and no division happening
+        #     at all. Also wrong.
+        # Ground truth came from `curl http://localhost:<port>/props` against
+        # the live process itself (bypassed llama-swap's own proxy logs and
+        # the unreliable /logs/stream/upstream endpoint): this GGUF's real
+        # n_ctx is 2048, full stop -- not 8192, and not a --parallel/-c
+        # tuning question at all. llama-server silently clamps any -c
+        # request above a GGUF's real trained context and only logs a
+        # warning (a gotcha already documented elsewhere on this box).
+        # No launch flag fixes this. The actual fix lives in
+        # scripts/vault_sync.py's chunker instead (MAX_CHUNK_CHARS +
+        # _split_oversized(), added 2026-09-14): it now splits any block
+        # over ~3000 chars -- comfortably under 2048 tokens even at this
+        # note's measured ~2.4 chars/token -- before ever calling
+        # /v1/embeddings, so no single chunk can exceed the real ceiling.
+        # -c 8192 / --parallel 1 below are left as-is from step 2: harmless
+        # now that chunking guarantees every request fits well inside the
+        # true 2048 limit, and -parallel 1 is arguably still correct anyway
+        # (a value like -c 8192 that's silently ignored doesn't matter, but
+        # a mis-set --parallel could still divide the real 2048 ceiling
+        # across slots). Tradeoff: Honcho's EMBED_MESSAGES calls now queue
+        # through a single slot instead of 4 concurrent -- untested whether
+        # that matters in practice for this small/fast a model; revisit if
+        # Honcho embedding throughput becomes a real problem, but rule out
+        # queueing latency (not the 2048 ceiling) as the cause first if so.
         # CPU-only model (env: CUDA_VISIBLE_DEVICES= below) -- no VRAM
         # ceiling to weigh against, unlike the GPU models' -c/-b tuning
         # elsewhere in this file.

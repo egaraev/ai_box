@@ -80,10 +80,49 @@ def split_frontmatter(text):
     return front, text[match.end():]
 
 
+# Real ceiling confirmed on aibox, 2026-09-14: nomic-embed-text-v1.5's
+# actual GGUF here caps out at n_ctx=2048 regardless of any llama-server
+# -c/--parallel setting -- confirmed via its own /props endpoint after
+# trying both, so this is the model's real native context, not a config
+# bug to tune around. A single big unbroken block (a long pasted
+# blockquote, e.g. -- the real case that surfaced this: 10957 chars/4614
+# tokens in one chunk, silently rejected) can blow past that in one
+# embed call. MAX_CHUNK_CHARS is a conservative char-based stand-in for a
+# token count -- the failing chunk measured ~2.4 chars/token, denser than
+# the usual ~4 chars/token rule of thumb for English, so this is picked
+# with real margin below 2048 tokens either way, not tuned to that one
+# sample's exact ratio.
+MAX_CHUNK_CHARS = 3000
+
+
+# Splits one oversized block's text into pieces each under
+# MAX_CHUNK_CHARS -- prefers breaking on a blank line, then any line
+# break, before falling back to a hard cut, so pieces stay reasonably
+# readable instead of splitting mid-sentence when avoidable.
+def _split_oversized(text):
+    if len(text) <= MAX_CHUNK_CHARS:
+        return [text]
+
+    pieces = []
+    remaining = text
+    while len(remaining) > MAX_CHUNK_CHARS:
+        cut = remaining.rfind("\n\n", 0, MAX_CHUNK_CHARS)
+        if cut == -1:
+            cut = remaining.rfind("\n", 0, MAX_CHUNK_CHARS)
+        if cut == -1:
+            cut = MAX_CHUNK_CHARS
+        pieces.append(remaining[:cut].strip())
+        remaining = remaining[cut:].strip()
+    if remaining:
+        pieces.append(remaining)
+    return pieces
+
+
 def _flush_block(blocks, lines, block_type, headings):
     text = "\n".join(lines).strip()
     if text:
-        blocks.append({"text": text, "chunk_type": block_type, "heading_path": " > ".join(headings)})
+        for piece in _split_oversized(text):
+            blocks.append({"text": piece, "chunk_type": block_type, "heading_path": " > ".join(headings)})
     lines.clear()
 
 
