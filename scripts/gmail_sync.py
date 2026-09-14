@@ -21,6 +21,15 @@
 # scale to topics that didn't exist yet when it was written, and Hermes's own
 # ingest_note already tags freeform the same way.
 #
+# Image attachments now get OCR'd too (2026-09-14): any image on a
+# topic-matched email is saved into vault_root/Attachments (same dir
+# vault-mcp's ingest_file uses) and transcribed via the same locked vision
+# route/prompt ingest_file uses for photographed notes -- verbatim text, not
+# a scene caption. The transcription becomes the note body when the email
+# itself has none (a bare-subject photo), or gets appended below it
+# otherwise, and an Obsidian embed link (![[Attachments/...]]) always goes
+# in either way so the original image stays one click away.
+#
 # Tracks synced message IDs in a local state file so re-running only
 # processes new mail. Standalone for now (same as vault_sync.py) -- runs via
 # the N8N Code node, see aibox-ingestion-pipeline.json.
@@ -106,6 +115,10 @@ LITELLM_URL = os.environ.get("LITELLM_URL", "http://localhost:30400")
 LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY")
 # Fast local model, called directly -- see header comment on why this isn't "auto"
 TAG_MODEL = "hermes3-llama-3.1-8b"
+# Same locked vision route vault-mcp's ingest_file / Hermes's own
+# image-in-chat path already use (custom_router_hook.py's _has_image check) --
+# verbatim transcription of a photographed note/document, not a scene caption.
+VISION_MODEL = "qwen3.8-27b-Expert-Vision"
 
 # ── topic detection ──────────────────────────────────────────────────────────
 
@@ -185,6 +198,49 @@ def _llm_generate(prompt, num_predict=80):
         return ""
 
 
+# sends this to LiteLLM's vision-capable model (same route/prompt vault-mcp's
+# ingest_file uses for photographed notes -- verbatim transcription, not a
+# scene caption):
+#   {"model": "qwen3.8-27b-Expert-Vision", "messages": [{"role": "user",
+#    "content": [{"type": "text", "text": "..."}, {"type": "image_url",
+#    "image_url": {"url": "data:image/jpeg;base64,..."}}]}], "max_tokens": 2000}
+# returns the usual OpenAI chat shape: {"choices": [{"message": {"content": "..."}}]}
+# Returns "" (never raises) on failure -- a bad OCR call shouldn't drop the
+# whole email, the attachment itself still gets saved either way.
+def ocr_image(image_bytes, mime_type):
+    import base64
+    import requests
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    prompt = (
+        "Transcribe ALL visible text in this image, verbatim and in full, exactly as written "
+        "(keep the original language -- don't translate it). Preserve line breaks and structure "
+        "(headings, lists, tables) as plain text where it's clear. If there is little or no text, "
+        "instead describe what the image shows in one or two sentences."
+    )
+    try:
+        r = requests.post(
+            f"{LITELLM_URL}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"},
+            json={
+                "model": VISION_MODEL,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+                    ],
+                }],
+                "max_tokens": 2000,
+            },
+            timeout=90,
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as exc:   # LiteLLM/vision route down, bad image data, timeout, ... -- OCR is a bonus, not worth failing the sync over
+        print(f"    ⚠ image OCR failed: {exc}")
+        return ""
+
+
 # Asks the LLM for 2-5 short topic tags -- freeform, no fixed vocabulary
 # (unlike the old AI-only KNOWN_TAGS list), so this works for any topic
 # without hand-curating a tag list per topic. folder tells the LLM what kind
@@ -253,24 +309,113 @@ def decode_mime_header(value):
 
 # Extracts the plain-text body from a Gmail API message payload
 # (recurses into multipart messages until it finds a text/plain part)
+# strips tags out of an HTML email body down to plain text -- good enough for
+# a note body, not trying to be a real HTML renderer
+def html_to_text(html_body):
+    import html as html_module
+    text = re.sub(r"(?is)<(script|style).*?</\1>", "", html_body)
+    text = re.sub(r"(?i)<br\s*/?>|</p>|</div>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html_module.unescape(text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def get_body(msg):
     payload = msg.get("payload", {})
 
-    def _extract(part):
-        mime = part.get("mimeType", "")
-        if mime == "text/plain":
-            data = part.get("body", {}).get("data", "")
-            if data:
-                import base64
-                return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
-        if mime.startswith("multipart/"):
+    # decodes one part's base64url body data, for whichever mime type the
+    # caller already confirmed it wants
+    def _decode(part):
+        data = part.get("body", {}).get("data", "")
+        if not data:
+            return ""
+        import base64
+        return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+
+    # most emails are multipart/alternative with a text/plain part alongside
+    # the text/html one -- prefer plain when it's there, fall back to html
+    # (stripped to text) since Gmail's default rich-text compose sends
+    # html-only, no plain-text part at all
+    def _find(part, mime_wanted):
+        if part.get("mimeType", "") == mime_wanted:
+            return _decode(part)
+        if part.get("mimeType", "").startswith("multipart/"):
             for sub in part.get("parts", []):
-                text = _extract(sub)
-                if text:
-                    return text
+                found = _find(sub, mime_wanted)
+                if found:
+                    return found
         return ""
 
-    return _extract(payload).strip()
+    plain = _find(payload, "text/plain")
+    if plain:
+        return plain.strip()
+
+    html_body = _find(payload, "text/html")
+    if html_body:
+        return html_to_text(html_body)
+
+    return ""
+
+
+# Walks a message's MIME parts collecting image attachments (inline or
+# regular). Gmail's API only inlines attachment bytes directly for very
+# small parts (body.data) -- anything else needs a second call keyed by
+# body.attachmentId.
+# returns a list of (filename, mime_type, raw_bytes) tuples, one per image
+def get_image_attachments(service, msg_id, payload):
+    import base64
+    images = []
+
+    def _walk(part):
+        filename = part.get("filename", "")
+        mime     = part.get("mimeType", "")
+        if filename and mime.startswith("image/"):
+            body = part.get("body", {})
+            if body.get("data"):
+                data = base64.urlsafe_b64decode(body["data"] + "==")
+            elif body.get("attachmentId"):
+                att = service.users().messages().attachments().get(
+                    userId="me", messageId=msg_id, id=body["attachmentId"]
+                ).execute()
+                data = base64.urlsafe_b64decode(att["data"] + "==")
+            else:
+                data = None
+            if data:
+                images.append((filename, mime, data))
+        for sub in part.get("parts", []):
+            _walk(sub)
+
+    _walk(payload)
+    return images
+
+
+# Saves each image into vault_root/Attachments (same top-level folder
+# vault-mcp's ingest_file uses, regardless of which topic folder the note
+# itself lands in -- so Health/Legal/etc. notes and Hermes's own uploads
+# never collide on filenames across two different Attachments dirs) and
+# OCRs it via ocr_image. Returns a markdown block -- an Obsidian embed link
+# per image followed by its transcribed text -- ready to append to the note
+# body; images whose OCR found nothing still get the embed link alone.
+def format_attachments(vault_root, images):
+    attachments_dir = vault_root / "Attachments"
+    attachments_dir.mkdir(parents=True, exist_ok=True)
+
+    blocks = []
+    for filename, mime_type, data in images:
+        dest = attachments_dir / filename
+        if dest.exists():
+            import uuid
+            dest = attachments_dir / f"{dest.stem}-{uuid.uuid4().hex[:8]}{dest.suffix}"
+        dest.write_bytes(data)
+
+        text = ocr_image(data, mime_type)
+        print(f"    ✓ attachment OCR'd: Attachments/{dest.name}" if text
+              else f"    ⚠ attachment saved, OCR found no text: Attachments/{dest.name}")
+
+        link = f"![[Attachments/{dest.name}]]"
+        blocks.append(f"{link}\n\n{text}" if text else link)
+
+    return "\n\n".join(blocks)
 
 
 def title_to_filename(title, date_str=""):
@@ -376,18 +521,31 @@ def sync(vault_root, query, since="", dry_run=False):
         sender = decode_mime_header(headers.get("From", "Unknown"))
         date   = headers.get("Date", "")
         body   = get_body(msg)
+        images = get_image_attachments(service, msg_id, msg.get("payload", {}))
 
-        if not body:
-            print(f"  ⚠ no body -- skipping: {subject[:60]}")
+        if not body and not images:
+            print(f"  ⚠ no body, no image attachments -- skipping: {subject[:60]}")
             new_ids.add(msg_id)
             continue
+
+        # OCR'd attachment text becomes the body when the email itself has
+        # none (a photo with a bare subject line, e.g.) -- appended after it
+        # otherwise. Skipped entirely in dry-run: OCR costs a real LLM call
+        # per image, not worth spending on a preview that writes nothing.
+        if images and not dry_run:
+            attachments_md = format_attachments(vault_root, images)
+            body = f"{body}\n\n{attachments_md}" if body else attachments_md
+        elif images:
+            names = ", ".join(name for name, _, _ in images)
+            print(f"    (dry-run) would OCR {len(images)} image attachment(s): {names}")
 
         title      = clean_title(subject, body, topic)
         filename   = title_to_filename(title, date) + ".md"
         target_dir = vault_root / folder
         note_path  = target_dir / filename
 
-        tags = [] if dry_run else extract_tags(title + "\n\n" + body[:800], folder)
+        tag_source = body or title
+        tags = [] if dry_run else extract_tags(title + "\n\n" + tag_source[:800], folder)
 
         content = format_note(title, subject, sender, date, body, tags)
 
