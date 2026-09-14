@@ -124,6 +124,33 @@ ATTACHMENTS_DIR = VAULT_PATH / "Attachments"
 # to route into it.
 ALLOWED_FOLDERS = {"Inbox", "Family", "Health", "Legal", "Household", "Reference", "AI"}
 
+# This server runs as root in its container (see Dockerfile -- no USER set),
+# same as most single-pod services on this cluster, but hermes-agent's own
+# gateway process deliberately drops to a non-root "hermes" user (uid/gid
+# 10000, see k8s/p3/hermes-agent.yaml) once it boots. That mismatch is real:
+# found 2026-09-14 when Hermes could copy a photo into Attachments/ (its own
+# writes, as itself) but then couldn't edit or delete the .md notes THIS
+# server had written moments earlier, because they came out owned root:root
+# and Hermes has no sudo in its container. Hermes worked around it by
+# re-ingesting under new titles instead of fixing the original note --
+# harmless but left duplicate hash-suffixed files behind every time.
+# Keeping this GID here as a plain constant (not read from the environment)
+# is a deliberate shortcut, not an oversight: it only has to match
+# hermes-agent.yaml's fixed uid/gid 10000, which isn't expected to change,
+# and adding a whole env-var/ConfigMap plumbing path for one number felt
+# like more moving parts than the problem deserves. If hermes-agent's uid
+# ever changes, update it here too.
+HERMES_GID = 10000
+
+def _chgrp_writable(path: Path, dir_mode=0o775, file_mode=0o664):
+    # Group-owns path by Hermes's gid and makes it group-writable, so the
+    # non-root hermes-agent process can edit or delete something this
+    # (root) process just created. Root can chown to any group regardless
+    # of who currently owns the file, so this is safe to call unconditionally.
+    mode = dir_mode if path.is_dir() else file_mode
+    os.chown(path, -1, HERMES_GID)   # -1 leaves the user (root) unchanged, only the group changes
+    path.chmod(mode)
+
 # Created at import time, not lazily inside ingest_note/ingest_file. Found
 # 2026-09-14: on a vault where ingest_file had never yet succeeded even
 # once, Attachments/ didn't exist -- but the tool's own docstring tells
@@ -133,9 +160,15 @@ ALLOWED_FOLDERS = {"Inbox", "Family", "Health", "Legal", "Household", "Reference
 # problem (see /areas/ai-box-k3s.md) -- creating every dir up front, as soon
 # as this server starts, closes that chicken-and-egg gap for good (now
 # covers all of ALLOWED_FOLDERS, not just Inbox, for the same reason).
+# Also re-applies _chgrp_writable to each on every startup (not just at
+# creation) so a restart alone heals any folder that somehow drifted back
+# to root-only permissions -- cheap, idempotent, no reason not to.
 for _folder_name in ALLOWED_FOLDERS:
-    (VAULT_PATH / _folder_name).mkdir(parents=True, exist_ok=True)
+    _folder_path = VAULT_PATH / _folder_name
+    _folder_path.mkdir(parents=True, exist_ok=True)
+    _chgrp_writable(_folder_path)
 ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+_chgrp_writable(ATTACHMENTS_DIR)
 
 # Where ingest_file is allowed to read from -- see this file's top comment
 # for why it's just these two (both volumes this pod fully owns, no
@@ -326,6 +359,7 @@ def _write_note(title: str, tags, audience, body: str, folder: str = "Inbox") ->
     frontmatter = "---\n" + "\n".join(front_lines) + "\n---\n\n" if front_lines else ""
 
     path.write_text(f"{frontmatter}# {title}\n\n{body}\n", encoding="utf-8")
+    _chgrp_writable(path)   # otherwise Hermes (non-root) can't edit or delete the note this (root) process just wrote
     source = str(path.relative_to(VAULT_PATH))
     return path, source
 
@@ -648,6 +682,7 @@ async def ingest_file(file_path: str, title: str | None = None, tags: list[str] 
         if dest.exists() and dest.resolve() != src.resolve():
             dest = ATTACHMENTS_DIR / f"{src.stem}-{uuid.uuid4().hex[:8]}{src.suffix}"
         shutil.copy2(src, dest)
+    _chgrp_writable(dest)   # copy2 preserves src's own mode/owner (root's, here) -- fix it up so Hermes can still touch its own attachment later
     attachment_ref = str(dest.relative_to(VAULT_PATH))
 
     extracted = ""
