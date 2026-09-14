@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 
@@ -93,6 +94,20 @@ def split_frontmatter(text):
 # with real margin below 2048 tokens either way, not tuned to that one
 # sample's exact ratio.
 MAX_CHUNK_CHARS = 3000
+
+# n8n's own Code node kills this script's execSync call after 300s (see
+# n8n-deployment.yaml's N8N_RUNNERS_HEARTBEAT_INTERVAL comment -- matched to
+# a 300000ms timeout on the Code node's own execSync call). Confirmed live
+# 2026-09-14: with the backlog grown past what 300s was originally tuned
+# for (2026-09-14's folder reorg touched mtimes on most of the vault, plus
+# Gmail/Telegram now feeding it continuously), a full run stopped finishing
+# in time and got hard-killed mid-embed by that ceiling. Worse, state used
+# to only get saved once, at the very end of the whole loop (see
+# save_state calls in run_sync below) -- so every kill threw away 100% of
+# that run's progress, and the next scheduled tick started over on the
+# exact same backlog. Stopping ourselves first, with margin, means the run
+# always exits cleanly and keeps whatever it already finished.
+TIME_BUDGET_SECONDS = 240
 
 
 # Splits one oversized block's text into pieces each under
@@ -307,7 +322,12 @@ async def ingest_note(client, path, dry_run=False):
 
 
 async def run_sync(resync, dry_run):
-    notes = sorted(VAULT_PATH.rglob("*.md"))
+    # _archive/ holds notes vault_merge_duplicates.py already archived and
+    # explicitly deleted the Qdrant points for -- skip them here or a
+    # --resync silently re-creates the exact points that merge just removed
+    # (confirmed happening in practice 2026-09-14: an --resync right after a
+    # merge re-indexed all 11 archived duplicates).
+    notes = sorted(n for n in VAULT_PATH.rglob("*.md") if "_archive" not in n.parts)
     if not notes:
         print(f"No .md files found under {VAULT_PATH}")
         return
@@ -331,20 +351,30 @@ async def run_sync(resync, dry_run):
         vector_size = len((await embed_texts(["test"]))[0])
         ensure_collection(client, vector_size)
 
+    start = time.monotonic()
     total_chunks = 0
+    processed = 0
     for note, mtime in to_process:
+        if not dry_run and time.monotonic() - start > TIME_BUDGET_SECONDS:
+            print(f"  time budget hit ({TIME_BUDGET_SECONDS}s) -- stopping early, "
+                  f"{len(to_process) - processed} note(s) left for the next scheduled run")
+            break
         try:
             n = await ingest_note(client, note, dry_run)
         except Exception as exc:   # one bad note shouldn't stop the whole sync
             print(f"  FAILED on {note.name}: {exc}")
             continue
         total_chunks += n
+        processed += 1
         if not dry_run:
+            # saved after EVERY note, not just once at the end -- so a run
+            # that gets cut off (the time budget above, or an actual OS
+            # kill) keeps everything it already finished instead of losing
+            # the whole run's work, see TIME_BUDGET_SECONDS comment above
             state[str(note)] = mtime
+            save_state(state)
 
-    if not dry_run:
-        save_state(state)
-    print(f"done -- {total_chunks} chunks across {len(to_process)} notes")
+    print(f"done -- {total_chunks} chunks across {processed} of {len(to_process)} note(s) due this run")
 
 
 # runs one sync pass over the vault (incremental by default, --resync for a
