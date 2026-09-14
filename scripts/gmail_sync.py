@@ -231,23 +231,39 @@ def ocr_image(image_bytes, mime_type):
         "(headings, lists, tables) as plain text where it's clear. If there is little or no text, "
         "instead describe what the image shows in one or two sentences."
     )
-    try:
-        r = requests.post(
-            f"{LITELLM_URL}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"},
-            json={
-                "model": VISION_MODEL,
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
-                    ],
-                }],
-                "max_tokens": 2000,
-            },
-            timeout=90,
-        )
+    payload = {
+        "model": VISION_MODEL,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+            ],
+        }],
+        "max_tokens": 2000,
+    }
+    headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
+
+    # Every model on aibox loads lazily (see aibox-config-restart-verify) --
+    # a 502/503 from LiteLLM here usually just means the vision model was
+    # cold and llama-swap hadn't finished swapping it in yet, not that the
+    # route is actually down. Confirmed 2026-09-14: a request landing right
+    # as the model was cold-starting 502'd, while later images in the same
+    # run (model now warm) OCR'd fine. One retry after a short wait covers
+    # this without giving up on real data.
+    import time
+    for attempt in range(2):
+        try:
+            r = requests.post(f"{LITELLM_URL}/v1/chat/completions", headers=headers, json=payload, timeout=90)
+        except Exception as exc:   # connection refused/timeout -- LiteLLM itself unreachable, retrying won't help
+            print(f"    ⚠ image OCR failed: {exc}")
+            return ""
+
+        if r.status_code in (502, 503) and attempt == 0:
+            print(f"    ⚠ image OCR got HTTP {r.status_code} (model likely still cold-loading) -- retrying once in 10s")
+            time.sleep(10)
+            continue
+
         # print the server's own response body on a non-2xx instead of just
         # raise_for_status()'s terse "500 Server Error" -- that body is the
         # only way to tell "wrong model name" from "vision route down" from
@@ -255,13 +271,13 @@ def ocr_image(image_bytes, mime_type):
         if r.status_code != 200:
             print(f"    ⚠ image OCR failed: HTTP {r.status_code} -- {r.text[:500]}")
             return ""
+
         content = r.json()["choices"][0]["message"]["content"].strip()
         if not content:
             print(f"    ⚠ image OCR returned an empty response (model: {VISION_MODEL})")
         return content
-    except Exception as exc:   # LiteLLM/vision route down, bad image data, timeout, ... -- OCR is a bonus, not worth failing the sync over
-        print(f"    ⚠ image OCR failed: {exc}")
-        return ""
+
+    return ""
 
 
 # Asks the LLM for 2-5 short topic tags -- freeform, no fixed vocabulary
@@ -412,22 +428,38 @@ def get_image_attachments(service, msg_id, payload):
     return images
 
 
-# Saves each image into vault_root/Attachments (same top-level folder
-# vault-mcp's ingest_file uses, regardless of which topic folder the note
-# itself lands in -- so Health/Legal/etc. notes and Hermes's own uploads
-# never collide on filenames across two different Attachments dirs) and
-# OCRs it via ocr_image. Returns a markdown block -- an Obsidian embed link
-# per image followed by its transcribed text -- ready to append to the note
-# body; images whose OCR found nothing still get the embed link alone.
 # Turns arbitrary text into a filesystem-safe slug (used for both note
-# filenames -- via title_to_filename below -- and, now, OCR'd attachment
-# filenames): lowercase-preserving, punctuation stripped, spaces/underscores
-# collapsed to single hyphens, capped at max_len.
-def slugify(text, max_len=60):
+# filenames -- via title_to_filename below -- and OCR'd attachment
+# filenames): punctuation stripped, spaces/underscores collapsed to single
+# hyphens, capped at max_bytes.
+#
+# Capped by BYTES, not characters: Python's \w (and this whole function)
+# treats Cyrillic/CJK/etc. letters as ordinary word characters, so they
+# pass straight through uncut -- and every one of those is 2-3 bytes in
+# UTF-8, not 1. A 60-CHARACTER cap on a Cyrillic title (real case, Eldar's
+# own vault, 2026-09-14) produced a ~110-BYTE filename that was unreadable
+# in `ls` and got nowhere near actually protecting the filesystem's real
+# (~255-byte) limit either -- the thing that actually needs capping is
+# bytes, so that's what this caps, backing off to the nearest character
+# boundary rather than splitting one in half.
+def slugify(text, max_bytes=50):
     safe = re.sub(r"[^\w\s-]", "", text).strip()
     safe = re.sub(r"[\s_]+", "-", safe)
     safe = re.sub(r"-{2,}", "-", safe)
-    return safe[:max_len].strip("-")
+
+    encoded = safe.encode("utf-8")
+    if len(encoded) > max_bytes:
+        encoded = encoded[:max_bytes]
+        while encoded:   # back off until this is a valid UTF-8 boundary
+            try:
+                safe = encoded.decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                encoded = encoded[:-1]
+        else:
+            safe = ""
+
+    return safe.strip("-")
 
 
 # Saves each image into vault_root/Attachments (same top-level folder
@@ -587,39 +619,49 @@ def sync(vault_root, query, since="", dry_run=False):
             mark_synced(msg_id)
             continue
 
-        # OCR'd attachment text becomes the body when the email itself has
-        # none (a photo with a bare subject line, e.g.) -- appended after it
-        # otherwise. Has to happen BEFORE title/filename below: clean_title's
-        # only fallback (bare topic word as the whole subject) reads the
-        # body's first line to title itself from, and for an image-only
-        # email that line doesn't exist until OCR has run. Skipped entirely
-        # in dry-run: OCR costs a real LLM call per image, not worth
-        # spending on a preview that writes nothing.
-        if images and not dry_run:
-            attachments_md = format_attachments(vault_root, images)
-            body = f"{body}\n\n{attachments_md}" if body else attachments_md
-        elif images:
-            names = ", ".join(name for name, _, _ in images)
-            print(f"    (dry-run) would OCR {len(images)} image attachment(s): {names}")
-
+        # clean_title only reads body content for its fallback -- a subject
+        # that's the bare topic word on its own, nothing else -- so for
+        # every other subject (the vast majority) this pre-OCR title is
+        # already the FINAL title, and checking existence with it now, before
+        # OCR runs, is what stops a rescan of an already-synced message from
+        # wastefully re-OCR'ing its image and writing a second,
+        # differently-named copy into Attachments/ that nothing ends up
+        # using. Confirmed happening in practice on 2026-09-14: three
+        # duplicate attachment files got created this way on a state-file-
+        # loss rescan before this check existed.
         title      = clean_title(subject, body, topic)
         filename   = title_to_filename(title, date) + ".md"
         target_dir = vault_root / folder
         note_path  = target_dir / filename
 
-        # Checked here -- after OCR (needed for the title above) but before
-        # the tag-extraction LLM call below -- because tag extraction is
-        # the part that actually happens for every topic-matched message,
-        # images or not. A rescan of an already-synced-on-disk message used
-        # to redo that unconditionally, which is how a state-file reset
-        # turned into ~90 wasted LLM calls and blew the task-runner
-        # timeout; OCR itself only runs for the rare message that actually
-        # has an image, so re-running it in that same rescan is cheap by
-        # comparison and not worth a second, earlier duplicate of this check.
         if not dry_run and note_path.exists():
             print(f"  ⚠ already exists (skipping): {folder}/{filename}")
             mark_synced(msg_id)
             continue
+
+        # OCR'd attachment text becomes the body when the email itself has
+        # none (a photo with a bare subject line, e.g.) -- appended after it
+        # otherwise. Skipped entirely in dry-run: OCR costs a real LLM call
+        # per image, not worth spending on a preview that writes nothing.
+        if images and not dry_run:
+            attachments_md = format_attachments(vault_root, images)
+            body = f"{body}\n\n{attachments_md}" if body else attachments_md
+            # The title above was computed from body text alone -- for the
+            # bare-topic-word-subject case (Eldar's own Health test email:
+            # subject was just "Health", nothing else) that meant an empty
+            # fallback, since the body's first line didn't exist until OCR
+            # just ran. Recompute and re-check now that it does, rather
+            # than write a note titled after nothing.
+            title      = clean_title(subject, body, topic)
+            filename   = title_to_filename(title, date) + ".md"
+            note_path  = target_dir / filename
+            if note_path.exists():
+                print(f"  ⚠ already exists (skipping): {folder}/{filename}")
+                mark_synced(msg_id)
+                continue
+        elif images:
+            names = ", ".join(name for name, _, _ in images)
+            print(f"    (dry-run) would OCR {len(images)} image attachment(s): {names}")
 
         tag_source = body or title
         tags = [] if dry_run else extract_tags(title + "\n\n" + tag_source[:800], folder)
