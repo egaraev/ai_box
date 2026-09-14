@@ -36,10 +36,17 @@ from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, Fi
 VAULT_PATH = Path("/data/obsidian_vault")
 STATE_FILE = VAULT_PATH / ".vault_sync_state.json"   # hidden dotfile -- not picked up by the *.md scan below
 
-QDRANT_URL = "http://localhost:30633"
+# localhost+NodePort is only reachable when this script runs directly on
+# the aibox host (its original design, a bare scripts/.venv process) --
+# both env-var overridable so the SAME script also works run in-cluster
+# (e.g. from the N8N Execute Command node, apps/n8n/Dockerfile), where
+# "localhost" is the container's own netns, not the node's, and has to be
+# pointed at the real in-cluster Service DNS instead (same convention
+# vault-mcp/media-gen-mcp/hermes-agent already use for these two).
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:30633")
 COLLECTION_NAME = "obsidian_vault"
 
-LITELLM_URL = "http://localhost:30400"
+LITELLM_URL = os.environ.get("LITELLM_URL", "http://localhost:30400")
 EMBED_MODEL = "nomic-embed-text-v1.5"
 LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY")
 
@@ -219,7 +226,12 @@ async def ingest_note(client, path, dry_run=False):
     for block, vector in zip(blocks, vectors):
         h = chunk_hash(block["text"])
         points.append(PointStruct(
-            id=str(uuid.uuid5(uuid.NAMESPACE_URL, h)),   # deterministic -- identical chunk text always maps to the same point
+            # keyed by source+text hash, not text hash alone -- two different notes that happen to
+            # share identical chunk text (a common heading, a repeated one-liner) used to collide onto
+            # the same point id and silently overwrite each other, quietly dropping one note's chunk.
+            # still deterministic per note (re-ingesting the same unchanged chunk in the same note
+            # reuses the same id, which is all delete_notes_points below actually needs).
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}::{h}")),
             vector=vector,
             payload={
                 "text": block["text"],

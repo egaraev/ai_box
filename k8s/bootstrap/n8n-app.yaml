@@ -1,0 +1,38 @@
+# N8N Application -- ingestion pipeline orchestration (Obsidian <-> Qdrant
+# sync, eventually Gmail/Telegram -> Obsidian). Same pattern as the other
+# phase Applications: ArgoCD watches k8s/n8n/ in this repo and keeps the
+# cluster in sync automatically. Not phase-numbered (P-something) since it
+# was built ahead of its strict roadmap slot to close the Obsidian->Qdrant
+# sync gap now, same reasoning media-gen-app.yaml documents for its own
+# out-of-sequence build.
+#
+# One-time manual apply required, same as every other bootstrap Application:
+#   kubectl apply -f k8s/bootstrap/n8n-app.yaml
+# After that, syncPolicy.automated takes over for anything under k8s/n8n/.
+#
+# Requires litellm-secret to already exist in the ai-integration namespace
+# (see k8s/secrets/README.md) or the n8n pod sits in
+# CreateContainerConfigError until it does -- and requires the
+# aibox-n8n:latest image to already be built+imported on the node (see
+# apps/n8n/Dockerfile's own top comment) or the pod sits ImagePullBackOff
+# instead, same gap as every other locally-built image on this cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aibox-n8n
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: git@github.com:egaraev/ai_box.git
+    targetRevision: main
+    path: k8s/n8n
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

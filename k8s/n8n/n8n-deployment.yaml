@@ -1,0 +1,178 @@
+# n8n: the L3 Integration/orchestration layer -- closes the gap where
+# anything landing in the Obsidian vault outside Hermes's own ingest_note/
+# ingest_file MCP calls (a manual Obsidian edit, or the future Gmail/
+# Telegram sync scripts) never gets indexed into Qdrant on its own. Source
+# image built from apps/n8n/Dockerfile -- built and run locally on aibox,
+# no registry involved, same reasoning/pattern as vault-mcp and
+# media-gen-mcp (one less moving part on a single-user home cluster).
+# imagePullPolicy: IfNotPresent means k3s/containerd uses whatever image
+# tag already exists on the node instead of trying (and failing) to pull it
+# from Docker Hub.
+#
+# Lives in its own k8s/n8n/ dir + its own bootstrap Application
+# (k8s/bootstrap/n8n-app.yaml), same "not phase-numbered, inserted ahead of
+# its strict P-slot" pattern as k8s/media-gen/ -- N8N is nominally P-later
+# in the roadmap doc but got built now because Eldar wanted the ingestion
+# gap closed today, not in strict phase order. Namespace ai-integration
+# per README.md's namespace table ("N8N/LangFuse/LangServe -- L3
+# Integration").
+#
+# BUILD / DEPLOY (run on aibox; see apps/n8n/Dockerfile's own top comment
+# for the exact build command -- it differs slightly from vault-mcp/
+# media-gen-mcp's since this image needs files from ../../scripts/, so the
+# build context is the repo root, not this app's own dir):
+#   cd ~/repos/aibox-platform
+#   docker build -f apps/n8n/Dockerfile -t aibox-n8n:latest .
+#   docker save aibox-n8n:latest | sudo k3s ctr images import -
+# After editing scripts/*.py or the Dockerfile, repeat both, then:
+#   kubectl rollout restart deployment/n8n -n ai-integration
+#
+# When THIS FILE itself changes -- `kubectl apply -f` it directly (or let
+# ArgoCD sync k8s/n8n the normal way) in addition to any image rebuild:
+#   kubectl apply -f k8s/n8n/n8n-deployment.yaml
+#
+# litellm-secret: this namespace (ai-integration) needs its OWN copy of
+# the Secret, same as every other namespace that calls LiteLLM (see
+# k8s/secrets/README.md's litellm-secret section, now updated to include
+# ai-integration in its namespace loop) -- Secrets don't cross namespaces,
+# so skipping that step leaves this pod stuck CreateContainerConfigError.
+#
+# TWO VOLUMES, both plain hostPath (same convention as vault-mcp/
+# hermes-agent, avoids k3s's local-path-provisioner multi-attach
+# limitations already hit twice on this project -- see vault-mcp/server.py's
+# top comment for that story):
+# - vault-data: the real Obsidian vault at /data/obsidian_vault, mounted
+#   read-write (same hostPath vault-mcp and hermes-agent both already
+#   mount) -- vault_sync.py needs read access to every note to reindex it,
+#   and the future gmail_sync.py/telegram_sync.py need write access to
+#   create new notes under AI/. type: Directory (not DirectoryOrCreate)
+#   since the vault already exists -- same reasoning as vault-mcp's own
+#   mount, fail loudly rather than silently start against an empty dir.
+# - n8n-data: n8n's OWN persistent state (workflows, credentials, the
+#   SQLite execution DB) at /home/node/.n8n -- without this, every pod
+#   restart would wipe every workflow you've built. type: DirectoryOrCreate
+#   since this is a brand new volume on first deploy.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n8n
+  namespace: ai-integration
+  labels:
+    app: n8n
+spec:
+  replicas: 1
+  # n8n's own SQLite execution DB (under /home/node/.n8n) isn't safe for
+  # concurrent access from two pods -- same reasoning honcho-api/open-webui/
+  # hermes-agent already use Recreate for their own PVC/hostPath state.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: n8n
+  template:
+    metadata:
+      labels:
+        app: n8n
+    spec:
+      containers:
+        - name: n8n
+          image: aibox-n8n:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5678
+              name: http
+          env:
+            - name: GENERIC_TIMEZONE
+              value: "Europe/Warsaw"   # Eldar's own timezone -- so Schedule Trigger cron times match his local clock, not UTC
+            - name: TZ
+              value: "Europe/Warsaw"
+            # QDRANT_URL/LITELLM_URL: read by scripts/vault_sync.py (and,
+            # once wired up, gmail_sync.py/telegram_sync.py) via
+            # os.environ.get(..., "http://localhost:<nodeport>") -- that
+            # localhost default only works run directly on the aibox host,
+            # not from inside this pod's own network namespace, so both
+            # MUST be overridden here to the real in-cluster Service DNS.
+            # NOTE the exact shape expected: vault_sync.py/gmail_sync.py/
+            # telegram_sync.py all build their own "/v1/..." suffix
+            # (f"{LITELLM_URL}/v1/embeddings" etc), so LITELLM_URL here
+            # must NOT include a trailing /v1 -- unlike vault-mcp/server.py's
+            # own LITELLM_URL env var, which DOES bake /v1 in because that
+            # file's code doesn't add it itself. Same variable name, two
+            # different expected shapes depending which codebase reads it --
+            # worth re-checking the consuming script before copy-pasting
+            # this pattern elsewhere.
+            - name: QDRANT_URL
+              value: "http://qdrant.ai-memory.svc.cluster.local:6333"
+            - name: LITELLM_URL
+              value: "http://litellm.ai-models.svc.cluster.local:4000"
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master_key
+            # TELEGRAM_API_ID / TELEGRAM_API_HASH and the Gmail OAuth
+            # credential files are deliberately NOT wired up here yet --
+            # gmail_sync.py/telegram_sync.py aren't scheduled in any
+            # workflow yet (their own OAuth/API setup is still an open
+            # item, see /areas/ai-box-k3s.md). Add them to this env block
+            # (and a Secret/volume for the Gmail credential JSON files +
+            # Telegram session file) when that work happens -- no need to
+            # touch this file just to add the vault_sync.py schedule.
+          volumeMounts:
+            - name: vault-data
+              mountPath: /data/obsidian_vault
+            - name: n8n-data
+              mountPath: /home/node/.n8n
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1.5Gi"
+      volumes:
+        - name: vault-data
+          hostPath:
+            path: /data/obsidian_vault
+            type: Directory
+        - name: n8n-data
+          hostPath:
+            path: /data/n8n
+            type: DirectoryOrCreate
+  selector:
+    matchLabels:
+      app: n8n
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: n8n
+  namespace: ai-integration
+spec:
+  selector:
+    app: n8n
+  ports:
+    - port: 5678
+      targetPort: 5678
+      name: http
+---
+# Same additive-NodePort pattern as litellm-nodeport/llama-swap-nodeport/
+# qdrant-nodeport/comfyui-nodeport (k8s/p1/dashboards.yaml,
+# k8s/media-gen/comfyui-deployment.yaml) -- no ingress on this cluster yet,
+# so every web UI gets its own NodePort. :30678 chosen to echo n8n's own
+# default port 5678, doesn't collide with any NodePort already in use
+# (30400/30808/30633/30188/30860/30119).
+apiVersion: v1
+kind: Service
+metadata:
+  name: n8n-nodeport
+  namespace: ai-integration
+spec:
+  type: NodePort
+  selector:
+    app: n8n
+  ports:
+    - port: 5678
+      targetPort: 5678
+      nodePort: 30678
+      name: http

@@ -88,23 +88,25 @@ kubectl delete pod -n ai-agents -l app=hermes-agent
 `kubectl patch --type merge` only touches the keys you name -- the API
 server key and dashboard credentials already in the Secret are untouched.
 
-## litellm-secret (namespaces: ai-models, ai-gateway, ai-agents, ai-memory, ai-mcp)
+## litellm-secret (namespaces: ai-models, ai-gateway, ai-agents, ai-memory, ai-mcp, ai-integration)
 
 Backs LiteLLM's `general_settings.master_key` (`k8s/p1/litellm.yaml`) -- the
-one bearer key every internal caller (Open WebUI, Hermes, Honcho, and now
-media-gen-mcp's `_expand_character_references`, see
-`apps/media-gen-mcp/server.py`) needs to talk to LiteLLM instead of hitting
-llama-swap directly. Kubernetes Secrets don't cross namespaces, and each of
-those five callers lives in a different one, so the *same* value has to
-exist as a same-named Secret in all five -- there's no single shared object
-to point at. (media-gen-mcp's own Deployment/Service resources live in
-`k8s/media-gen/`, not one of the `k8s/p0`..`p3` ArgoCD-synced directories,
-but the `ai-mcp` namespace still needs its own copy of this Secret since
-that's where the pod actually runs.)
+one bearer key every internal caller (Open WebUI, Hermes, Honcho,
+media-gen-mcp's `_expand_character_references`, and now n8n's baked-in
+`vault_sync.py`/`gmail_sync.py`/`telegram_sync.py`, see
+`apps/media-gen-mcp/server.py` and `k8s/n8n/n8n-deployment.yaml`) needs to
+talk to LiteLLM instead of hitting llama-swap directly. Kubernetes Secrets
+don't cross namespaces, and each of those six callers lives in a different
+one, so the *same* value has to exist as a same-named Secret in all six --
+there's no single shared object to point at. (media-gen-mcp's own
+Deployment/Service resources live in `k8s/media-gen/`, and n8n's in
+`k8s/n8n/`, neither one of the `k8s/p0`..`p3` ArgoCD-synced directories,
+but `ai-mcp`/`ai-integration` still each need their own copy of this
+Secret since that's where the respective pod actually runs.)
 
 ```sh
 LITELLM_KEY=$(openssl rand -hex 32)
-for ns in ai-models ai-gateway ai-agents ai-memory ai-mcp; do
+for ns in ai-models ai-gateway ai-agents ai-memory ai-mcp ai-integration; do
   kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
   kubectl create secret generic litellm-secret \
     --namespace "$ns" \
@@ -113,7 +115,7 @@ done
 ```
 
 Rotating: re-run the loop above with a fresh `LITELLM_KEY` (same value goes
-into all five namespaces -- a partial rotation just means some callers get
+into all six namespaces -- a partial rotation just means some callers get
 rejected with a stale key), then restart everything that reads it:
 
 ```sh
@@ -122,6 +124,7 @@ kubectl delete pod -n ai-gateway -l app=open-webui
 kubectl delete pod -n ai-agents -l app=hermes-agent
 kubectl delete pod -n ai-memory -l app=honcho-api -l app=honcho-deriver
 kubectl delete pod -n ai-mcp -l app=media-gen-mcp
+kubectl delete pod -n ai-integration -l app=n8n
 ```
 
 ## openrouter-secret (namespace: ai-models)

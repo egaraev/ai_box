@@ -1,0 +1,20 @@
+# Deps for the 3 standalone ingestion scripts in this dir (gmail_sync.py,
+# telegram_sync.py, vault_sync.py). Didn't exist as a tracked file until
+# now -- deps were installed ad hoc into scripts/.venv on the host as each
+# script was ported. Written down here so the same set can be baked into
+# the custom N8N image (apps/n8n/Dockerfile) that runs these scripts on a
+# schedule, instead of re-guessing the list from each script's own inline
+# "pip install ..." comment.
+#
+# vault_sync.py:
+aiohttp>=3.9
+PyYAML>=6.0
+qdrant-client>=1.9
+# gmail_sync.py -- Gmail API + OAuth:
+google-auth>=2.29
+google-auth-oauthlib>=1.2
+google-api-python-client>=2.120
+# telegram_sync.py -- Telegram client:
+telethon>=1.34
+# shared by both gmail_sync.py and telegram_sync.py (LiteLLM tagging calls):
+requests>=2.31
