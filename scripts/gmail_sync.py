@@ -296,17 +296,55 @@ def extract_tags(text, folder):
     return [t.strip().lower().replace(" ", "-") for t in raw.split(",") if t.strip()][:5]
 
 
+# Asks the LLM for a short, human-readable title from real note content --
+# used only by clean_title's bare-topic-word fallback below, for the same
+# reason extract_tags asks the LLM for tags instead of using fixed words:
+# the content's own first line often isn't something a person would call
+# this note. Returns "" (never raises) on failure -- clean_title has its own
+# first-line fallback for that case.
+def generate_title(text, topic_word):
+    prompt = (
+        f"Write a short, specific title (3-8 words, plain text, no quotes, no "
+        f"markdown) for this {topic_word} note, based on its content:\n\n"
+        f"{text[:800]}\n\nTitle:"
+    )
+    raw = _llm_generate(prompt, num_predict=20)
+    return raw.strip().strip('"').strip("'")
+
+
 # Derives a clean human-readable title from the email.
 # - Strips the leading topic word + "-"/":"/etc (redundant -- the folder
 #   already says what this is)
-# - Falls back to the first meaningful line of the body when the subject is
-#   just the bare topic word on its own
-def clean_title(subject, body, topic_word):
+# - Falls back to an LLM-generated title from the body when the subject is
+#   just the bare topic word on its own (dry_run skips the real LLM call and
+#   falls back further, to the first meaningful line, same as before)
+def clean_title(subject, body, topic_word, dry_run=False):
     title = subject.strip()
 
     if re.fullmatch(rf"{topic_word}\s*[-–—:]?\s*", title, re.IGNORECASE):
-        first_line = body.strip().splitlines()[0][:80].strip() if body else ""
-        title = first_line or title
+        # Body is the only real content here (a bare-subject photo, e.g.).
+        # Strip bare Obsidian embed links (![[Attachments/...]]) first --
+        # that's markdown syntax, not content, and shouldn't feed the title
+        # prompt or become the first-line fallback either.
+        real_text = "\n".join(
+            line.strip() for line in body.strip().splitlines()
+            if line.strip() and not re.fullmatch(r"!?\[\[.*\]\]", line.strip())
+        )
+
+        title = ""
+        if real_text and not dry_run:
+            title = generate_title(real_text, topic_word)
+
+        if not title and real_text:
+            # LLM down/empty, or dry-run -- first real line beats nothing.
+            # Confirmed in practice this can be a bad title (a rotated
+            # prescription photo transcribed its top-corner tracking code
+            # "4N0AE107F5" before anything readable, and that became the
+            # note's whole title/filename) -- exactly what generate_title
+            # above exists to avoid when it's actually available.
+            title = real_text.splitlines()[0][:80]
+
+        title = title or subject.strip()
 
     title = re.sub(rf"^{topic_word}\s*[-–—:]\s*", "", title, flags=re.IGNORECASE).strip()
     title = re.sub(rf"^{topic_word}\s+", "", title, flags=re.IGNORECASE).strip()
@@ -629,7 +667,7 @@ def sync(vault_root, query, since="", dry_run=False):
         # using. Confirmed happening in practice on 2026-09-14: three
         # duplicate attachment files got created this way on a state-file-
         # loss rescan before this check existed.
-        title      = clean_title(subject, body, topic)
+        title      = clean_title(subject, body, topic, dry_run=dry_run)
         filename   = title_to_filename(title, date) + ".md"
         target_dir = vault_root / folder
         note_path  = target_dir / filename
@@ -652,7 +690,7 @@ def sync(vault_root, query, since="", dry_run=False):
             # fallback, since the body's first line didn't exist until OCR
             # just ran. Recompute and re-check now that it does, rather
             # than write a note titled after nothing.
-            title      = clean_title(subject, body, topic)
+            title      = clean_title(subject, body, topic, dry_run=dry_run)
             filename   = title_to_filename(title, date) + ".md"
             note_path  = target_dir / filename
             if note_path.exists():
