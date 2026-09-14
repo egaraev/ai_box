@@ -205,6 +205,31 @@ spec:
               mountPath: /data/obsidian_vault
             - name: n8n-data
               mountPath: /home/node/.n8n
+            # Confirmed live 2026-09-14, after N8N_RUNNERS_MODE=internal
+            # (above) still didn't fix it: n8n's Code node execution --
+            # internal or external mode, doesn't matter -- runs in a
+            # separate "task runner" process that only ever gets a small
+            # hardcoded set of n8n's own vars (N8N_RUNNERS_*, PATH,
+            # NODE_FUNCTION_ALLOW_BUILTIN, a couple others) passed to it.
+            # None of this pod's app env (QDRANT_URL, LITELLM_URL,
+            # LITELLM_MASTER_KEY, TELEGRAM_*, GMAIL_*) ever reaches a
+            # Code node or anything it execSyncs, full stop -- this isn't
+            # configurable via env vars in internal mode (external mode
+            # has an allowed-env option in its own launcher config file,
+            # but that file is documented as NOT read in internal mode).
+            # Rather than fight that, this mounts litellm-secret as a
+            # FILE instead of relying on the env var above -- file mounts
+            # are a completely separate k8s mechanism, invisible to n8n's
+            # env allowlisting, and the Code node's execSync already has
+            # full filesystem access (proven live running scripts from
+            # /opt/scripts). The three sync Code nodes read this file
+            # directly via shell command substitution and pass
+            # QDRANT_URL/LITELLM_URL/TELEGRAM_* inline in the exec
+            # command itself instead of expecting them from the
+            # environment -- see aibox-ingestion-pipeline.json.
+            - name: litellm-secret-vol
+              mountPath: /etc/secrets/litellm
+              readOnly: true
           resources:
             requests:
               cpu: "250m"
@@ -221,6 +246,9 @@ spec:
           hostPath:
             path: /data/n8n
             type: DirectoryOrCreate
+        - name: litellm-secret-vol
+          secret:
+            secretName: litellm-secret
   selector:
     matchLabels:
       app: n8n
