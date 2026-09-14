@@ -101,6 +101,27 @@ spec:
             # behavior, unlike the executeCommand mystery above.
             - name: NODE_FUNCTION_ALLOW_BUILTIN
               value: "child_process"
+            # Confirmed live 2026-09-14, right after the child_process fix
+            # above started working: the Code node's own script ran fine,
+            # but the python script it launched via execSync failed with
+            # "Set LITELLM_MASTER_KEY first" -- even though `kubectl exec
+            # ... -- env` on the real pod shows LITELLM_MASTER_KEY/
+            # QDRANT_URL/LITELLM_URL all present. Root cause: n8n's Code
+            # node sandbox doesn't expose the `process` global to user code
+            # at all (a bare `process.env.X` throws "process is not
+            # defined") -- this is n8n's own default security behavior,
+            # meant to stop a workflow from reading out secrets via
+            # process.env. That same sandboxing also strips the environment
+            # any child_process command spawns with, so even a script
+            # launched via execSync sees an empty env regardless of what
+            # the real container has. N8N_BLOCK_ENV_ACCESS_IN_NODE=false is
+            # n8n's own documented toggle for this exact restriction --
+            # without it, no Code node in this workflow (the two source
+            # syncs + the vault sync, all of which shell out to python
+            # scripts that read LITELLM/QDRANT config from env) can ever
+            # see those variables, no matter what the pod spec sets.
+            - name: N8N_BLOCK_ENV_ACCESS_IN_NODE
+              value: "false"
             # n8n's own default data folder is ~/.n8n (database.sqlite --
             # workflows, credentials, executions, the owner account itself).
             # Since this container runs as root (see Dockerfile), $HOME here
