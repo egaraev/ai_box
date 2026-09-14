@@ -1,4 +1,4 @@
-# gmail_sync.py -- Gmail -> Obsidian vault sync.
+# gmail_sync.py -- Gmail -> Obsidian vault sync, routed by topic.
 #
 # Ported from the old Windows-lab pipeline (ai_ml_cv_projects/ai-lab/step10_n8n/gmail_sync.py),
 # same treatment as vault_sync.py got: paths repointed to aibox, LiteLLM calls
@@ -9,11 +9,21 @@
 # the same way media-gen-mcp's captioning and vault-mcp's vision captioning
 # already do for their own internal LLM calls (see /areas/ai-box-k3s.md).
 #
-# Fetches emails whose subject starts with "AI", converts them to Markdown,
-# tags them via LiteLLM against a fixed KNOWN_TAGS vocabulary, and saves them
-# into /data/obsidian_vault/AI. Tracks synced message IDs in a local state
-# file so re-running only processes new mail. Standalone for now (same as
-# vault_sync.py) -- N8N wiring is a later step.
+# Generalized to multiple topics (2026-09-14, was AI-only before): Eldar
+# sends himself an email with the subject starting with a topic word --
+# "AI ...", "Health ...", "Legal ...", "Family ...", "Household ...", or
+# "Reference ..." -- and that word decides which vault folder the note lands
+# in. Matches vault-mcp's own ALLOWED_FOLDERS taxonomy (apps/vault-mcp/
+# server.py) so a note routed here lands exactly where Hermes would route the
+# same content itself -- one consistent folder set across both ingestion
+# paths. Tags are freeform (2-5 short LLM-picked tags, no fixed vocabulary)
+# instead of the old AI-only KNOWN_TAGS list -- a fixed vocabulary doesn't
+# scale to topics that didn't exist yet when it was written, and Hermes's own
+# ingest_note already tags freeform the same way.
+#
+# Tracks synced message IDs in a local state file so re-running only
+# processes new mail. Standalone for now (same as vault_sync.py) -- runs via
+# the N8N Code node, see aibox-ingestion-pipeline.json.
 #
 # Setup (one-time, in the scripts/.venv already used by vault_sync.py):
 #   pip install google-auth google-auth-oauthlib google-api-python-client
@@ -66,10 +76,28 @@ GMAIL_MCP_DIR   = Path(os.environ.get("GMAIL_MCP_DIR", str(Path.home() / ".gmail
 TOKEN_FILE      = GMAIL_MCP_DIR / "credentials.json"
 OAUTH_KEYS_FILE = GMAIL_MCP_DIR / "gcp-oauth.keys.json"
 
-DEFAULT_VAULT_AI = Path("/data/obsidian_vault/AI")
-DEFAULT_QUERY    = "from:me subject:(AI *)"
-DEFAULT_SINCE    = ""
-MAX_RESULTS      = 500
+# Base of the vault -- each topic below gets its own subfolder under this,
+# not one fixed destination like the old AI-only version had.
+DEFAULT_VAULT_ROOT = Path("/data/obsidian_vault")
+
+# Recognized subject-prefix topics -> destination vault folder. Matches
+# vault-mcp's ALLOWED_FOLDERS (apps/vault-mcp/server.py) minus Inbox (nothing
+# here should silently land in Inbox -- an email whose subject doesn't start
+# with one of these words just isn't a match, same as the old AI-only
+# behavior for anything not starting with "AI"). Order matters only in that
+# no word here is a prefix of another, so a plain startswith check is enough.
+TOPICS = {
+    "AI": "AI",
+    "HEALTH": "Health",
+    "LEGAL": "Legal",
+    "FAMILY": "Family",
+    "HOUSEHOLD": "Household",
+    "REFERENCE": "Reference",
+}
+
+DEFAULT_QUERY = "from:me subject:(" + " OR ".join(TOPICS) + ")"
+DEFAULT_SINCE = ""
+MAX_RESULTS   = 500
 
 # Same NodePort/env-var convention as scripts/vault_sync.py -- overridable
 # so this also works run in-cluster (N8N Execute Command), where localhost
@@ -79,14 +107,17 @@ LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY")
 # Fast local model, called directly -- see header comment on why this isn't "auto"
 TAG_MODEL = "hermes3-llama-3.1-8b"
 
-# ── known tags vocabulary (same as the old lab -- this sync is still AI-folder-scoped) ──
+# ── topic detection ──────────────────────────────────────────────────────────
 
-KNOWN_TAGS = [
-    "agents", "prompting", "rag", "fine-tuning", "local-llm", "model-release",
-    "mcp", "tools", "vibe-coding", "security", "embeddings", "benchmarks",
-    "automation", "claude", "openai", "coding-assistant", "multimodal",
-    "context-window", "vision", "voice", "open-source",
-]
+# Which topic word (if any) this subject starts with -- decides the
+# destination folder. Returns (topic_word, folder) or (None, None) if the
+# subject doesn't start with any recognized topic.
+def detect_topic(subject):
+    upper = subject.strip().upper()
+    for word, folder in TOPICS.items():
+        if upper.startswith(word):
+            return word, folder
+    return None, None
 
 # ── auth ─────────────────────────────────────────────────────────────────────
 
@@ -154,32 +185,36 @@ def _llm_generate(prompt, num_predict=80):
         return ""
 
 
-# Asks the LLM to pick 2-5 topic tags from KNOWN_TAGS.
-# Returns a list of validated lowercase tags; falls back to [] on error.
-def extract_tags(text):
+# Asks the LLM for 2-5 short topic tags -- freeform, no fixed vocabulary
+# (unlike the old AI-only KNOWN_TAGS list), so this works for any topic
+# without hand-curating a tag list per topic. folder tells the LLM what kind
+# of content this is (Health, Legal, ...) so the tags actually fit -- same
+# style Hermes's own ingest_note tool already uses for freeform tagging.
+def extract_tags(text, folder):
     prompt = (
-        "Pick 2-5 topic tags for this AI content from the list below.\n"
-        "Return ONLY a comma-separated list of tags -- no explanation, no quotes.\n\n"
-        f"Available tags: {', '.join(KNOWN_TAGS)}\n\n"
+        f"Pick 2-5 short topic tags for this {folder} note.\n"
+        "Return ONLY a comma-separated list of lowercase, hyphenated tags -- "
+        "no explanation, no quotes.\n\n"
         f"Content:\n{text[:800]}\n\nTags:"
     )
     raw = _llm_generate(prompt, num_predict=60)
-    tags = [t.strip().lower().replace(" ", "-") for t in raw.split(",") if t.strip()]
-    return [t for t in tags if t in KNOWN_TAGS][:5]
+    return [t.strip().lower().replace(" ", "-") for t in raw.split(",") if t.strip()][:5]
 
 
 # Derives a clean human-readable title from the email.
-# - Strips leading "AI" / "AI --" / "AI:" prefixes (redundant -- all notes are AI content)
-# - Falls back to the first meaningful line of the body when subject is bare "AI"
-def clean_title(subject, body):
+# - Strips the leading topic word + "-"/":"/etc (redundant -- the folder
+#   already says what this is)
+# - Falls back to the first meaningful line of the body when the subject is
+#   just the bare topic word on its own
+def clean_title(subject, body, topic_word):
     title = subject.strip()
 
-    if re.fullmatch(r"AI\s*[-–—:]?\s*", title, re.IGNORECASE):
+    if re.fullmatch(rf"{topic_word}\s*[-–—:]?\s*", title, re.IGNORECASE):
         first_line = body.strip().splitlines()[0][:80].strip() if body else ""
         title = first_line or title
 
-    title = re.sub(r"^AI\s*[-–—:]\s*", "", title, flags=re.IGNORECASE).strip()
-    title = re.sub(r"^AI\s+", "", title, flags=re.IGNORECASE).strip()
+    title = re.sub(rf"^{topic_word}\s*[-–—:]\s*", "", title, flags=re.IGNORECASE).strip()
+    title = re.sub(rf"^{topic_word}\s+", "", title, flags=re.IGNORECASE).strip()
 
     return title or subject.strip()
 
@@ -290,9 +325,10 @@ tags: [{tags_str}]
 
 # ── sync ─────────────────────────────────────────────────────────────────────
 
-# Fetches matching emails, creates a vault note for any new "AI"-subject
-# message, and records synced IDs. Returns the number of notes created.
-def sync(vault_ai, query, since="", dry_run=False):
+# Fetches matching emails, creates a vault note (in the folder its subject's
+# topic word maps to) for any new topic-prefixed message, and records synced
+# IDs. Returns the number of notes created.
+def sync(vault_root, query, since="", dry_run=False):
     service    = get_gmail_service()
     synced_ids = load_state()
 
@@ -332,7 +368,8 @@ def sync(vault_ai, query, since="", dry_run=False):
                    for h in msg.get("payload", {}).get("headers", [])}
         subject = decode_mime_header(headers.get("Subject", "(no subject)"))
 
-        if not subject.strip().upper().startswith("AI"):
+        topic, folder = detect_topic(subject)
+        if not topic:
             new_ids.add(msg_id)
             continue
 
@@ -345,24 +382,25 @@ def sync(vault_ai, query, since="", dry_run=False):
             new_ids.add(msg_id)
             continue
 
-        title     = clean_title(subject, body)
-        filename  = title_to_filename(title, date) + ".md"
-        note_path = vault_ai / filename
+        title      = clean_title(subject, body, topic)
+        filename   = title_to_filename(title, date) + ".md"
+        target_dir = vault_root / folder
+        note_path  = target_dir / filename
 
-        tags = [] if dry_run else extract_tags(title + "\n\n" + body[:800])
+        tags = [] if dry_run else extract_tags(title + "\n\n" + body[:800], folder)
 
         content = format_note(title, subject, sender, date, body, tags)
 
         if dry_run:
-            print(f"  (dry-run) would create: {filename}")
+            print(f"  (dry-run) would create: {folder}/{filename}")
             print(f"    tags: {tags}")
         else:
             if note_path.exists():
-                print(f"  ⚠ already exists (skipping): {filename}")
+                print(f"  ⚠ already exists (skipping): {folder}/{filename}")
             else:
-                vault_ai.mkdir(parents=True, exist_ok=True)
+                target_dir.mkdir(parents=True, exist_ok=True)
                 note_path.write_text(content, encoding="utf-8")
-                print(f"  ✓ created: {filename}  tags={tags}")
+                print(f"  ✓ created: {folder}/{filename}  tags={tags}")
                 created += 1
 
         new_ids.add(msg_id)
@@ -376,7 +414,7 @@ def sync(vault_ai, query, since="", dry_run=False):
 
 # Marks Gmail messages whose file already exists in the vault as synced --
 # use once after setup so the first real sync doesn't re-create existing notes
-def preseed(vault_ai, query):
+def preseed(vault_root, query):
     service    = get_gmail_service()
     synced_ids = load_state()
     new_ids    = set()
@@ -408,22 +446,23 @@ def preseed(vault_ai, query):
         subject = decode_mime_header(headers.get("Subject", ""))
         date    = headers.get("Date", "")
 
-        if not subject.strip().upper().startswith("AI"):
+        topic, folder = detect_topic(subject)
+        if not topic:
             new_ids.add(msg_id)
             continue
 
-        title    = clean_title(subject, "")
+        title    = clean_title(subject, "", topic)
         filename = title_to_filename(title, date) + ".md"
-        if (vault_ai / filename).exists():
-            print(f"  ✓ marking as synced: {filename}")
+        if (vault_root / folder / filename).exists():
+            print(f"  ✓ marking as synced: {folder}/{filename}")
             new_ids.add(msg_id)
             continue
 
         old_safe = re.sub(r"[^\w\s-]", "", subject).strip()
         old_safe = re.sub(r"[\s_]+", "-", old_safe)
         old_safe = re.sub(r"-{2,}", "-", old_safe)
-        for candidate in vault_ai.glob(old_safe[:40] + "*.md"):
-            print(f"  ✓ marking as synced (old-style): {candidate.name}")
+        for candidate in (vault_root / folder).glob(old_safe[:40] + "*.md"):
+            print(f"  ✓ marking as synced (old-style): {folder}/{candidate.name}")
             new_ids.add(msg_id)
             break
 
@@ -444,9 +483,9 @@ def main():
             "-o jsonpath='{.data.master_key}' | base64 -d)"
         )
 
-    p = argparse.ArgumentParser(description="Gmail -> Obsidian sync")
-    p.add_argument("--vault",   default=str(DEFAULT_VAULT_AI),
-                   help=f"Path to vault AI folder (default: {DEFAULT_VAULT_AI})")
+    p = argparse.ArgumentParser(description="Gmail -> Obsidian sync, routed by topic")
+    p.add_argument("--vault",   default=str(DEFAULT_VAULT_ROOT),
+                   help=f"Path to vault root (default: {DEFAULT_VAULT_ROOT})")
     p.add_argument("--query",   default=DEFAULT_QUERY,
                    help=f"Gmail search query (default: {DEFAULT_QUERY!r})")
     p.add_argument("--since",   default=DEFAULT_SINCE, metavar="YYYY-MM-DD",
@@ -457,11 +496,11 @@ def main():
                    help="Mark existing vault files as synced (run once after setup)")
     args = p.parse_args()
 
-    vault_ai = Path(args.vault)
+    vault_root = Path(args.vault)
     if args.preseed:
-        preseed(vault_ai, query=args.query)
+        preseed(vault_root, query=args.query)
     else:
-        sync(vault_ai, query=args.query, since=args.since, dry_run=args.dry_run)
+        sync(vault_root, query=args.query, since=args.since, dry_run=args.dry_run)
 
 
 # parses CLI flags and runs either --preseed or a live/dry-run Gmail-to-vault sync
