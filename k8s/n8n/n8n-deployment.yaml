@@ -129,6 +129,21 @@ spec:
               value: "false"
             - name: N8N_RUNNERS_MODE
               value: "internal"
+            # Confirmed live 2026-09-14, once the env fixes above got the
+            # real (non---dry-run) Obsidian -> Qdrant sync actually running:
+            # "Task execution aborted because runner became unresponsive".
+            # execSync is SYNCHRONOUS -- it blocks the whole runner
+            # process's event loop for as long as vault_sync.py takes, so
+            # the runner can't answer the broker's heartbeat ping during
+            # that whole window. Past ~30s of silence (the default
+            # heartbeat interval) the broker assumes the runner died and
+            # kills the task, even though the script itself was still
+            # running fine. This just widens that window -- 300s to match
+            # the 300000ms timeout already set in each Code node's own
+            # execSync call, so the two limits agree instead of the
+            # heartbeat cutting in first.
+            - name: N8N_RUNNERS_HEARTBEAT_INTERVAL
+              value: "300"
             # n8n's own default data folder is ~/.n8n (database.sqlite --
             # workflows, credentials, executions, the owner account itself).
             # Since this container runs as root (see Dockerfile), $HOME here
