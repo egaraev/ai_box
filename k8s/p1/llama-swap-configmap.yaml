@@ -456,6 +456,24 @@ data:
           - "CUDA_VISIBLE_DEVICES="
         ttl: 0
 
+
+      qwen3-1.7b-cpu-q4test:
+        cmd: |
+          llama-server
+          -m /models/qwen3-1.7B/Qwen3-1.7B-Q4_K_M.gguf
+          --port ${PORT}
+          --host 0.0.0.0
+          --jinja
+          -ngl 0
+          -t 4
+          --no-mmap
+          --parallel 1
+          -c 32768
+          --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0
+          --reasoning-budget 0
+        env:
+          - "CUDA_VISIBLE_DEVICES="
+
       # REMOVED 2026-09-07 (Eldar's call -- only keeping what's actually on
       # aibox): qwen3.8-27b-Atomic, qwen3.8-27b-MTP, agents-a1, ornith-35b.
       # None of these had a GGUF present on disk (aibox's /data/models only
