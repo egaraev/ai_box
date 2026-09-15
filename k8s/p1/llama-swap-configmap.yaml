@@ -409,6 +409,36 @@ data:
         # headroom for arch-router-1.5b (every chat message's hot path)
         # while costing this model little, since 16 threads were barely
         # helping it anyway. NOT YET CONFIRMED on aibox.
+        #
+        # --parallel 1 ADDED 2026-09-15: this model never set --parallel,
+        # unlike nomic-embed-text-v1.5 right above it -- so it was accepting
+        # llama-server's default of multiple concurrent slots on only 4
+        # total threads. Root-caused live via llama-swap's own dashboard
+        # (In-Flight Requests) while chasing the "Jarvis hangs" reports:
+        # after cutting honcho.yaml's DIALECTIC_MAX_INPUT_TOKENS 28000->1500
+        # (see that file's own comment -- real cause of the 30.0s Honcho
+        # timeouts, confirmed via bench_qwen17b_prefill_scaling.py), a
+        # SINGLE real Telegram question still produced 6-7 simultaneous
+        # in-flight requests to this model that grew rather than drained --
+        # confirmed via two dashboard snapshots 51.4s apart where every
+        # request was the exact same one just aging, zero completions.
+        # honcho-api's own PERFORMANCE telemetry explained what they were:
+        # two real dialectic_chat tool-loop calls (input_tokens=5163 each,
+        # one reusing 3924 cached tokens from the other) plus one
+        # minimal_deriver call, all genuinely concurrent -- not a retry
+        # storm. The smoking gun that this is concurrency, not raw size:
+        # the SECOND dialectic call reused most of its context from cache
+        # (cheaper to compute) yet took LONGER than the first (166.2s vs
+        # 119.7s) -- only explainable by the two calls (plus the deriver
+        # call) thrashing for the same 4 threads rather than each getting
+        # the model to itself. --parallel 1 forces true one-at-a-time
+        # processing, same fix nomic-embed-text-v1.5 already uses --
+        # concurrent Honcho jobs now queue cleanly at the HTTP layer
+        # instead of interleaving into a shared-thread collapse. NOT YET
+        # CONFIRMED on aibox -- after this deploys, re-run the same
+        # multi-turn Telegram test and watch llama-swap's dashboard: each
+        # request should complete in roughly its own benchmarked time
+        # (bench_qwen17b_prefill_scaling.py) rather than piling up.
         cmd: |
           llama-server
           -m /models/qwen3-1.7B/Qwen3-1.7B-Q8_0.gguf
@@ -418,6 +448,7 @@ data:
           -ngl 0
           -t 4
           --no-mmap
+          --parallel 1
           -c 32768
           --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0
           --reasoning-budget 0
