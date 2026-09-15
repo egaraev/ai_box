@@ -458,6 +458,18 @@ data:
 
 
       qwen3-1.7b-cpu-q4test:
+        # -t 4 -> 6 CHANGED 2026-09-15: Q4_K_M alone (at -t 4, matching the
+        # live qwen3-1.7b-cpu) only got 1.23x faster than Q8_0 (61.7s ->
+        # 50.0s at a real 3,281-token dialectic-sized prompt) -- still over
+        # Hermes's 30s ceiling. Stacking a modest thread bump on top: aibox
+        # has 16 logical cores, 14 already claimed by the 3 permanently-
+        # resident CPU models (arch-router-1.5b -t8, nomic-embed -t2, live
+        # qwen3-1.7b-cpu -t4) -- only 2 idle. Since this is a throwaway test
+        # entry (not ttl:0, doesn't stay resident), briefly using 6 here
+        # while benchmarking is fine; NOT safe to carry -t 6 into the
+        # production qwen3-1.7b-cpu entry permanently without re-checking
+        # the resident budget (that would push resident total to 16/16, no
+        # slack left for the GPU model's own CPU-side overhead).
         cmd: |
           llama-server
           -m /models/qwen3-1.7B/Qwen3-1.7B-Q4_K_M.gguf
@@ -465,7 +477,7 @@ data:
           --host 0.0.0.0
           --jinja
           -ngl 0
-          -t 4
+          -t 6
           --no-mmap
           --parallel 1
           -c 32768
