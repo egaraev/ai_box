@@ -30,9 +30,56 @@
 # (created directly on the cluster, same as postgres-secret -- see
 # k8s/secrets/README.md).
 #
-# DIALECTIC_MAX_INPUT_TOKENS/DERIVER_MAX_INPUT_TOKENS are reduced from
-# Honcho's defaults (100000/25000) to fit inside qwen3-1.7b-cpu's -c 32768
-# context, with headroom for the system prompt, tools, and output.
+# DIALECTIC_MAX_INPUT_TOKENS/DERIVER_MAX_INPUT_TOKENS were originally
+# reduced from Honcho's defaults (100000/25000) just to fit inside
+# qwen3-1.7b-cpu's -c 32768 context -- that was a CONTEXT-SIZE constraint
+# only, never a latency one, and it left DIALECTIC_MAX_INPUT_TOKENS at
+# 28000, which turned out to be the real cause of the "Jarvis just hangs"
+# reports (2026-09-15).
+#
+# DIALECTIC_MAX_INPUT_TOKENS 28000 -> 1500 CHANGED 2026-09-15: real
+# production logs showed Hermes's `plugins.memory.honcho.session` hitting
+# "Request timed out after 30.0s" repeatedly, every single time dialectic
+# fired, blocking the reply behind it -- that's the actual mechanism behind
+# needing 2-3 nudges before Jarvis answers. Root-caused via
+# bench_qwen17b_prefill_scaling.py (hits llama-swap's native /completion
+# endpoint directly, real llama.cpp timings, zero concurrency): prefill
+# speed on this model's current -t 4 degrades as context grows (94.66 t/s
+# at 1,281 tokens -> 89.60 t/s at 2,601 -> 74.47 t/s at 5,161), and the
+# 30s wall lands right around 2,600 tokens even with NOTHING else
+# contending for the model -- and it keeps getting worse, not linearly:
+# 59.24 t/s / 174.2s at 10,321 tokens. A separate test at ~25k tokens
+# (matching the old 28000 setting) didn't even return in 300s. So the 30s timeouts
+# were never really about thread contention with arch-router/nomic-embed
+# (both independently load-tested clean, see chat history) -- they were
+# guaranteed by the token budget being ~10x too large for what this CPU
+# model can process in time, full stop.
+#
+# 1500 chosen with real margin, not just under the wall: interpolating the
+# benchmark curve, 1500 tokens should land around ~15s prefill, leaving
+# headroom below the 30s ceiling for real-world contention and for the
+# system-prompt/tool-schema overhead Honcho adds on top of this budget
+# (see original comment above -- this setting doesn't include that).
+# Dialectic is a retrieval AGENT (search_memory/search_messages/
+# get_observation_context/grep_messages/temporal search), not a
+# raw-history dump, so a smaller budget means it retrieves less per
+# answer, not that it breaks -- confirmed against Honcho's own docs
+# (https://honcho.dev/docs/v3/contributing/configuration), default is
+# 100000, aibox was already running well below that. NOT YET CONFIRMED
+# for actual answer quality -- after this deploys, ask Jarvis a couple of
+# real memory-recall questions (not just watch for the timeout going away)
+# to check the retrieval agent still gives useful answers at this budget,
+# not just fast ones. If answers come back noticeably thinner, raise this
+# gradually rather than jumping back toward 28000 -- and consider capping
+# DIALECTIC_LEVELS__*__MAX_TOOL_ITERATIONS too, since dialectic's real
+# latency is however many sequential tool-call round trips it makes, each
+# one a separate hit on this same model.
+#
+# DERIVER_MAX_INPUT_TOKENS is still 20000 -- same model, almost certainly
+# hits the identical wall, just less visibly since it runs in the
+# background rather than blocking a live reply. Left alone for now
+# (Eldar's call, 2026-09-15) -- revisit if deriver-related slowness shows
+# up the same way dialectic's did.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -75,7 +122,7 @@ data:
   SUMMARY_MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
   SUMMARY_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
 
-  DIALECTIC_MAX_INPUT_TOKENS: "28000"
+  DIALECTIC_MAX_INPUT_TOKENS: "1500"
   DIALECTIC_LEVELS__minimal__MODEL_CONFIG__TRANSPORT: "openai"
   DIALECTIC_LEVELS__minimal__MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
   DIALECTIC_LEVELS__minimal__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
