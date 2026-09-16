@@ -454,10 +454,12 @@ data:
         # while costing this model little, since 16 threads were barely
         # helping it anyway. NOT YET CONFIRMED on aibox.
         #
-        # --parallel 1 ADDED 2026-09-15: this model never set --parallel,
+        # --parallel 1 ADDED 2026-09-15, REMOVED 2026-09-16 -- CPU-only fix,
+        # no longer needed once this model moved to its own GPU (see "MOVED
+        # TO GPU" below). Original reason: this model never set --parallel,
         # unlike nomic-embed-text-v1.5 right above it -- so it was accepting
         # llama-server's default of multiple concurrent slots on only 4
-        # total threads. Root-caused live via llama-swap's own dashboard
+        # total CPU threads. Root-caused live via llama-swap's own dashboard
         # (In-Flight Requests) while chasing the "Jarvis hangs" reports:
         # after cutting honcho.yaml's DIALECTIC_MAX_INPUT_TOKENS 28000->1500
         # (see that file's own comment -- real cause of the 30.0s Honcho
@@ -474,32 +476,57 @@ data:
         # the SECOND dialectic call reused most of its context from cache
         # (cheaper to compute) yet took LONGER than the first (166.2s vs
         # 119.7s) -- only explainable by the two calls (plus the deriver
-        # call) thrashing for the same 4 threads rather than each getting
-        # the model to itself. --parallel 1 forces true one-at-a-time
-        # processing, same fix nomic-embed-text-v1.5 already uses --
-        # concurrent Honcho jobs now queue cleanly at the HTTP layer
-        # instead of interleaving into a shared-thread collapse. NOT YET
-        # CONFIRMED on aibox -- after this deploys, re-run the same
-        # multi-turn Telegram test and watch llama-swap's dashboard: each
-        # request should complete in roughly its own benchmarked time
-        # (bench_qwen17b_prefill_scaling.py) rather than piling up.
+        # call) thrashing for the same 4 CPU threads rather than each
+        # getting the model to itself. --parallel 1 forced true
+        # one-at-a-time processing as a stopgap while still on CPU.
+        # REMOVED 2026-09-16 (Eldar's call, "return to normal
+        # hermes/honcho settings... no need to cut his context/batches"):
+        # now that this model runs on its own dedicated GPU with nothing
+        # else contending for it, the exact scenario this existed to
+        # prevent (multiple real concurrent Honcho calls thrashing a
+        # handful of shared CPU threads) no longer applies -- a GPU has
+        # real compute and memory bandwidth to spare for a 1.7B model's
+        # multiple slots, unlike 4 CPU threads did. Back to accepting
+        # llama-server's own default concurrent-slot behavior, same as
+        # before 2026-09-15. NOT YET RE-CONFIRMED on aibox -- if a real
+        # multi-turn Telegram test shows renewed contention/slowness on
+        # GPU (unlikely given the model's tiny VRAM footprint, ~5.5GB used
+        # of the 3060's 12GB), reintroduce a --parallel cap sized to
+        # expected concurrent Honcho calls (dialectic + deriver +
+        # minimal_deriver, so 3-4) rather than forcing back to 1.
+        #
+        # -t EXPLICITLY SET BACK 2026-09-16, this time to 2 (not left
+        # dropped): the "MOVED TO GPU" note below originally dropped -t
+        # entirely as a CPU-tuning flag no longer needed once -ngl 99
+        # offloaded the real compute -- true for the bulk of the work, but
+        # that left this model on llama-server's own default thread count
+        # instead of a known value, right as arch-router-1.5b's own -t was
+        # bumped 8->12 on the assumption that this model's CPU footprint
+        # would be small (see arch-router-1.5b's own comment on that
+        # change). Rather than leave that assumption unverified, pinned
+        # explicitly to -t 2 -- same small value as nomic-embed-text-v1.5,
+        # whose CPU-side role (prompt/sampling overhead on an otherwise
+        # GPU-resident model) this now genuinely matches. Makes the
+        # arch-router headroom calculation a known quantity instead of a
+        # guess. NOT YET CONFIRMED on aibox.
         # MOVED TO GPU 2026-09-16 (Eldar's call): CPU-side tuning (this
-        # model's own -t 16->4 history above, --parallel 1, Q4 quant tested
-        # separately in qwen3-1.7b-cpu-q4test) got dialectic calls down to
-        # ~49-50s best case, still over Hermes's hardcoded 30s client-side
-        # timeout -- see [[aibox-honcho-dialectic-timeout]]. Dedicated
-        # second GPU (RTX 3060, GPU 0 confirmed via `nvidia-smi -L`) added
-        # instead of continuing to chase CPU decode speed. -ngl 0 -> 99,
-        # -t 4/--no-mmap dropped (CPU-tuning flags, meaningless once weights
-        # are on GPU), --flash-attn on added (matches every other GPU model
-        # in this file). Deliberately the ONLY model on GPU 0 -- every other
-        # GPU model is pinned to GPU 1 (the 5070 Ti) instead, see their own
-        # comments. Full reasoning/apply history: gpu-migration-2026-09-15/
-        # README.md in this repo (drafted before this went live -- note the
-        # draft's entry name qwen3-1.7b-gpu was originally meant for a
-        # separate NEW entry alongside the CPU one; what actually shipped
-        # was converting the existing entry in place instead, then renaming
-        # it, landing on the same final name either way).
+        # model's own -t 16->4 history above, --parallel 1 above, Q4 quant
+        # tested separately in qwen3-1.7b-cpu-q4test) got dialectic calls
+        # down to ~49-50s best case, still over Hermes's hardcoded 30s
+        # client-side timeout -- see [[aibox-honcho-dialectic-timeout]].
+        # Dedicated second GPU (RTX 3060, GPU 0 confirmed via `nvidia-smi
+        # -L`) added instead of continuing to chase CPU decode speed.
+        # -ngl 0 -> 99, -t 4/--no-mmap dropped (CPU-tuning flags,
+        # meaningless once weights are on GPU), --flash-attn on added
+        # (matches every other GPU model in this file). Deliberately the
+        # ONLY model on GPU 0 -- every other GPU model is pinned to GPU 1
+        # (the 5070 Ti) instead, see their own comments. Full
+        # reasoning/apply history: gpu-migration-2026-09-15/README.md in
+        # this repo (drafted before this went live -- note the draft's
+        # entry name qwen3-1.7b-gpu was originally meant for a separate NEW
+        # entry alongside the CPU one; what actually shipped was converting
+        # the existing entry in place instead, then renaming it, landing on
+        # the same final name either way).
         #
         # RENAMED 2026-09-16 (separate cleanup pass, Eldar's call): kept as
         # "qwen3-1.7b-cpu" at first to avoid a coordinated rename across
@@ -525,7 +552,7 @@ data:
           --jinja
           -ngl 99
           --flash-attn on
-          --parallel 1
+          -t 2
           -c 32768
           --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0
           --reasoning-budget 0
@@ -846,6 +873,28 @@ data:
         # startup-time CUDA contention issue, not a real aggregate
         # shortage). This forces genuinely CPU-only execution, same fix as
         # nomic-embed-text-v1.5 and qwen3-1.7b-cpu.
+        #
+        # -t 8 -> 12 CHANGED 2026-09-16 (Eldar's call, after the second-GPU
+        # migration freed real CPU headroom): this model is on the hot path
+        # for literally every chat message (arch-router classifies every
+        # "auto" request before routing), and was still capped at the same
+        # -t 8 set back on 2026-09-07 purely to survive 48-thread
+        # oversubscription from qwen3-1.7b-cpu's old -t 16 -- that model is
+        # gone from the CPU picture entirely now (moved to its own GPU, see
+        # qwen3-1.7b-gpu's own comment below, its CPU footprint pinned to a
+        # known small -t 2 the same day this changed rather than left on an
+        # unverified default). With that reservation freed and every GPU
+        # chat model's CPU threads mostly idle (fully -ngl 99 offloaded,
+        # their -t 8 covers prompt/sampling overhead, not real compute),
+        # arch-router -- a genuinely CPU-bound classifier -- gets a real
+        # bump instead of the previous survive-only value. 12 leaves
+        # explicit margin on aibox's 16 logical cores for nomic-embed's -t 2
+        # and whatever slice of a GPU model's -t 8 is actually active at
+        # once, rather than claiming all 16. NOT YET CONFIRMED on aibox --
+        # after this deploys, re-run the same kind of multi-turn concurrent
+        # test that originally caught the httpx.ReadTimeout regression (see
+        # qwen3.8-27b-Expert's own -t history above) and confirm arch-router
+        # classification calls come back faster with no renewed timeouts.
         cmd: |
           llama-server
           -m /models/arch-router-1.5B/Arch-Router-1.5B-Q4_K_M.gguf
@@ -853,7 +902,7 @@ data:
           --host 0.0.0.0
           --jinja
           -ngl 0
-          -t 8
+          -t 12
           --no-mmap
           -c 24576
           --temp 0
