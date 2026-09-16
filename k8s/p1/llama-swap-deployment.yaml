@@ -28,6 +28,25 @@
 # k8s device-plugin accounting. Fine on this single-node cluster -- no
 # second node this pod could be scheduled away from. Full reasoning/apply
 # history: gpu-migration-2026-09-15/README.md in this repo.
+#
+# CUDA_DEVICE_ORDER=PCI_BUS_ID ADDED 2026-09-16, found via a real bug the
+# first live test caught: qwen3-1.7b-cpu (pinned CUDA_VISIBLE_DEVICES=0 in
+# the ConfigMap, intended for the 3060) loaded onto the 5070 Ti instead --
+# confirmed via `nvidia-smi` showing 5664MiB held by its llama-server PID on
+# GPU 1 (the 5070 Ti) and 0 real usage on GPU 0 (the 3060), right after a
+# real completion call to it. Root cause: `nvidia-smi`/NVIDIA_VISIBLE_DEVICES
+# order GPUs by PCI bus id (0=3060, 1=5070 Ti, confirmed via `nvidia-smi -L`
+# after the 3060 was installed), but the CUDA RUNTIME's own device
+# numbering (what CUDA_VISIBLE_DEVICES=0/1 actually indexes into, once
+# NVIDIA_VISIBLE_DEVICES=all has exposed both devices into this container)
+# defaults to CUDA_DEVICE_ORDER=FASTEST_FIRST, not PCI order -- so CUDA
+# ranked the faster 5070 Ti as its own device 0 and the 3060 as its device
+# 1, exactly reversing the ConfigMap's pins. Setting CUDA_DEVICE_ORDER to
+# PCI_BUS_ID forces the CUDA runtime to number devices the same way
+# nvidia-smi/NVIDIA_VISIBLE_DEVICES already do, so CUDA_VISIBLE_DEVICES=0/1
+# in the ConfigMap now actually mean what they say. Set once here at the pod
+# level (all child llama-server subprocesses inherit it) rather than
+# per-model in the ConfigMap.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,6 +76,8 @@ spec:
           env:
             - name: NVIDIA_VISIBLE_DEVICES
               value: "all"
+            - name: CUDA_DEVICE_ORDER
+              value: "PCI_BUS_ID"
           volumeMounts:
             - name: config
               mountPath: /etc/llama-swap/config/config.yaml
