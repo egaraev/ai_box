@@ -1090,13 +1090,38 @@ data:
                 # after the actual question -- the classifier's most recent
                 # impression of the conversation was a blank line, not the
                 # real request. Also drops empty/whitespace-only content.
-                convo = [
-                    {"role": m.get("role"), "content": m.get("content")}
-                    for m in messages
-                    if m.get("role") not in ("system", "tool")
-                    and isinstance(m.get("content"), str)
-                    and m.get("content").strip()
-                ][-6:]
+                # FOURTH BUG FIXED 2026-09-16 (Eldar's question: "will it
+                # work the same way for other models like reasoning,
+                # medical?"): the _strip_memory_context fix on
+                # _wants_vision_tool/_wants_deep_reasoning/_wants_cloud_alias
+                # (see MEMORY_CONTEXT_MARKER's own comment above) only
+                # covers the deterministic keyword shortcuts -- "medical"
+                # has no keyword shortcut at all, and "reasoning" only has
+                # one for explicit trigger phrases, so any request that
+                # falls through to arch-router's OWN classifier call (which
+                # is most of them) was still handing this same huge
+                # Honcho-injected <memory-context> blob to a 1.5B model with
+                # a much smaller context window than the GPU chat models,
+                # unstripped, on every single "auto" call that reaches this
+                # point -- not just a misrouting risk (old recalled topics
+                # bleeding into what should be a fresh classification) but a
+                # real waste of arch-router's limited -c 24576 context and
+                # the exact CPU time the -t 8->12 bump above was meant to
+                # free up. Stripped here too, per-message, so arch-router
+                # never sees recalled-memory text for ANY route it decides,
+                # not just the ones with a keyword shortcut.
+                convo = []
+                for m in messages:
+                    if m.get("role") in ("system", "tool"):
+                        continue
+                    content = m.get("content")
+                    if not isinstance(content, str):
+                        continue
+                    content = _strip_memory_context(content).strip()
+                    if not content:
+                        continue
+                    convo.append({"role": m.get("role"), "content": content})
+                convo = convo[-6:]
                 logger.info("arch-router convo (post tool-filter): %r", convo)
                 prompt = SYSTEM_PROMPT.format(
                     routes=json.dumps(ROUTES), conversation=json.dumps(convo)
