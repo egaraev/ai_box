@@ -662,6 +662,46 @@ data:
     # 2026-09-09 fix above (conversation-history-wide match instead of a
     # per-request check) -- fixed the same way: only look at the single
     # most recent user-role message, same as _wants_deep_reasoning does.
+    # MEMORY_CONTEXT_MARKER / _strip_memory_context ADDED 2026-09-16: real
+    # root cause of the vision-misrouting bug below, found via the new
+    # logging on _wants_vision_tool -- Eldar's actual message ("Whaaaazzzu
+    # uuuppp") is genuinely the latest role=user content, but Hermes's own
+    # Honcho memory-prefetch plugin appends a huge recalled-memory block
+    # directly onto that SAME string, wrapped in "<memory-context>...",
+    # explicitly labeled "[System note: ... NOT new user input ... this is
+    # the agent's persistent memory]" -- confirmed live via the new log
+    # line, a 1433-char message where everything past the first two words
+    # was a 14,121-char (truncated in the log) memory dump. Somewhere in
+    # THAT recalled text was a reference to /opt/data/cache/images/ (almost
+    # certainly an old real image exchange Honcho recalled and cited by
+    # path), which is what actually matched -- not anything Eldar typed.
+    # Hermes stuffs this into the user-role content string itself rather
+    # than a separate message, so nothing in the "only look at the latest
+    # user message" fix (see _has_image's own comment below) protects
+    # against it -- the latest message IS the right one, but its content
+    # is only partly Eldar's own text.
+    #
+    # This isn't unique to the vision check: _wants_deep_reasoning and
+    # _wants_cloud_alias below do the identical whole-string substring
+    # scan, so a recalled memory mentioning e.g. "step by step" or "use
+    # opus" could just as easily force deep-reasoning or trigger a real
+    # paid cloud API call the same way. _wants_casual is NOT affected --
+    # it requires the ENTIRE (stripped) message to exactly equal a short
+    # phrase, and a 14k-char memory dump can never equal one. _has_image
+    # isn't affected either -- it only matches list-shaped multimodal
+    # content, a different structure from this text-stuffing bug. So this
+    # strip is applied to all three substring-scanning functions
+    # (_wants_vision_tool, _wants_deep_reasoning, _wants_cloud_alias) and
+    # deliberately left out of _has_image/_wants_casual, which don't need
+    # it.
+    MEMORY_CONTEXT_MARKER = "<memory-context>"
+
+
+    def _strip_memory_context(text):
+        idx = text.find(MEMORY_CONTEXT_MARKER)
+        return text if idx == -1 else text[:idx]
+
+
     def _has_image(messages):
         for m in reversed(messages):
             if m.get("role") != "user":
@@ -704,11 +744,13 @@ data:
                 continue
             content = m.get("content")
             if isinstance(content, str):
+                content = _strip_memory_context(content)
                 for marker in HERMES_IMAGE_MARKERS:
                     if marker in content:
                         logger.info(
                             "hermes-image-marker %r matched in latest "
-                            "role=user message (len=%d): %r",
+                            "role=user message, after memory-context strip "
+                            "(len=%d): %r",
                             marker, len(content), content[:300],
                         )
                         return True
@@ -779,6 +821,7 @@ data:
                 continue
             content = m.get("content")
             if isinstance(content, str):
+                content = _strip_memory_context(content)
                 lowered = content.lower()
                 for t in DEEP_REASONING_TRIGGERS:
                     if t in lowered:
@@ -918,6 +961,7 @@ data:
                 continue
             content = m.get("content")
             if isinstance(content, str):
+                content = _strip_memory_context(content)
                 lowered = content.lower()
                 for model_name, triggers in CLOUD_ALIAS_TRIGGERS.items():
                     for t in triggers:
