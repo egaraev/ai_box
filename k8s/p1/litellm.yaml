@@ -651,13 +651,28 @@ data:
     nothing fits."""
 
 
+    # BUG FOUND + FIXED 2026-09-16 (Eldar's report: "once any image appeared
+    # in the chat, hermes constantly use vision model for even answering me
+    # whazzup question"): this originally scanned EVERY message in the
+    # whole conversation for an image_url part, not just the latest turn --
+    # so once any image was ever sent or generated earlier in a
+    # conversation, every later message (even a plain-text "whazzup") kept
+    # matching and got force-routed to the vision model for the rest of
+    # that conversation. Exact same bug shape as DEEP_REASONING_TRIGGERS'
+    # 2026-09-09 fix above (conversation-history-wide match instead of a
+    # per-request check) -- fixed the same way: only look at the single
+    # most recent user-role message, same as _wants_deep_reasoning does.
     def _has_image(messages):
-        for m in messages:
+        for m in reversed(messages):
+            if m.get("role") != "user":
+                continue
             content = m.get("content")
             if isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "image_url":
                         return True
+            # only the latest user turn counts -- stop here either way
+            return False
         return False
 
 
