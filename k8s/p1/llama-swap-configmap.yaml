@@ -767,6 +767,41 @@ data:
       # log for any n_ctx_train/"capping" warning the way hermes3's own
       # comment flags, and do a real multi-turn medical-question test
       # through Hermes (not just a direct curl) before trusting it's fixed.
+      #
+      # --chat-template-file ADDED 2026-09-16, real bug hit live (confirmed
+      # via litellm logs, not guessed): a genuine medical question through
+      # Hermes 400'd instantly (0 prompt tokens, 0.01s -- fails at template
+      # render time, before any generation starts) with "litellm.BadRequest
+      # Error ... Jinja Exception: This model only supports single
+      # tool-calls at once!". Root cause confirmed by extracting both
+      # models' embedded GGUF chat templates directly (gguf-py,
+      # tokenizer.chat_template field): this model's own template is the
+      # full 4614-char vLLM-style Llama-3.1 tool-calling template, which
+      # hard-rejects any assistant message with more than one tool_calls
+      # entry -- and since the FULL untouched conversation history is
+      # forwarded to whichever model the router picks, any earlier turn in
+      # the conversation where Hermes made 2+ simultaneous tool calls (a
+      # normal agent pattern) poisons every later medical-route request in
+      # that same conversation, regardless of what's actually being asked.
+      # No llama-server flag fixes this at generation time (unlike
+      # medgemma's stop-list fix) since it fails before generation begins.
+      # Real fix: point at hermes3-llama-3.1-8b's own embedded template
+      # instead (extracted the same way, saved to
+      # /data/models/hermes3-llama-3.1-8B/hermes3-tool-template.jinja) --
+      # proven correct on this exact traffic shape since hermes3 already
+      # handles it fine on the casual/reasoning routes. That template is a
+      # minimal ChatML-style role+content renderer with NO structured
+      # tool_calls/tool_call_id handling at all, which is exactly why it
+      # never hits the restriction -- Hermes's own <tool_call>{json}</
+      # tool_call> convention already embeds call info as literal text
+      # inside "content", so nothing is lost by not rendering a separate
+      # tool_calls field. --chat-template-file (not --chat-template <preset
+      # name>) is a real Jinja source file, so this doesn't hit the
+      # "--jinja engine lacks a source for some legacy preset names" trap
+      # medgemma's --chat-template gemma attempt hit. NOT YET CONFIRMED on
+      # aibox -- verify with a real Hermes medical question afterward, not
+      # just a direct curl (the direct curl already worked before this
+      # change since it had no conversation history to trigger the bug).
       llama3.1-aloe-beta-8b:
         cmd: |
           llama-server
@@ -779,6 +814,7 @@ data:
           --parallel 1
           --flash-attn on
           --jinja
+          --chat-template-file /models/hermes3-llama-3.1-8B/hermes3-tool-template.jinja
           -ctk q8_0
           -ctv q8_0
           -c 65536
