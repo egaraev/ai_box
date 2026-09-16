@@ -679,6 +679,25 @@ data:
     HERMES_IMAGE_MARKERS = ("vision_analyze", "/opt/data/cache/images/")
 
 
+    # LOGGING ADDED 2026-09-16 (Eldar's report: routing kept landing on
+    # vision for plain follow-up messages, no image anywhere, starting
+    # right after a reply that happened to include an emoji): this
+    # function already only looks at the single most recent role="user"
+    # message (same latest-turn-only pattern as _has_image/
+    # _wants_deep_reasoning), so if it's still misfiring, the most likely
+    # explanation isn't a scanning bug on our side -- it's that Hermes's
+    # own agent loop appended a TOOL RESULT as a role="user" message
+    # (common in ReAct-style agents that don't use a native tool/function
+    # role) placed after the real human question in that same request, so
+    # by the time this hook runs for the final reply, the "latest
+    # role=user message" is that tool artifact, not what Eldar actually
+    # typed. Can't inspect/patch Hermes's own vendored source to confirm
+    # this directly (see hermes-agent.yaml's own comment on that
+    # limitation), so instead of guessing further, logging exactly what
+    # matched (which marker, and a snippet of the message it matched
+    # in) -- next occurrence tells us definitively whether this is really
+    # a stale tool artifact and what it actually contains, same diagnostic
+    # approach DEEP_REASONING_TRIGGERS already uses above.
     def _wants_vision_tool(messages):
         for m in reversed(messages):
             if m.get("role") != "user":
@@ -687,6 +706,11 @@ data:
             if isinstance(content, str):
                 for marker in HERMES_IMAGE_MARKERS:
                     if marker in content:
+                        logger.info(
+                            "hermes-image-marker %r matched in latest "
+                            "role=user message (len=%d): %r",
+                            marker, len(content), content[:300],
+                        )
                         return True
             return False
         return False
