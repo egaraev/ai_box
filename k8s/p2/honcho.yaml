@@ -18,11 +18,12 @@
 # (deriver), dialectic chat, summarization, and dream consolidation, PLUS a
 # separate embeddings endpoint (EMBED_MESSAGES=true by default). All of it is
 # routed through LiteLLM (k8s/p1/litellm.yaml) rather than straight to
-# llama-swap, via per-feature OVERRIDES__BASE_URL -- same two CPU-only
-# llama-swap roster entries as before, LiteLLM just now sits in between:
-#   - qwen3-1.7b-cpu          -- deriver/dialectic/summary/dream (tool-calling
-#     capable, dedicated to Honcho so background memory work never contends
-#     for GPU with an active Open WebUI chat session)
+# llama-swap, via per-feature OVERRIDES__BASE_URL -- same two llama-swap
+# roster entries as before, LiteLLM just now sits in between:
+#   - qwen3-1.7b-gpu          -- deriver/dialectic/summary/dream (tool-calling
+#     capable, dedicated to Honcho on its own GPU -- see
+#     k8s/p1/llama-swap-configmap.yaml's own comment; RENAMED 2026-09-16 from
+#     qwen3-1.7b-cpu after the second-GPU migration moved it off CPU)
 #   - nomic-embed-text-v1.5   -- embeddings
 # LLM_OPENAI_API_KEY is no longer a "none" placeholder -- LiteLLM enforces a
 # real master_key (see litellm.yaml's top comment for why), so it's now an
@@ -32,7 +33,8 @@
 #
 # DIALECTIC_MAX_INPUT_TOKENS/DERIVER_MAX_INPUT_TOKENS were originally
 # reduced from Honcho's defaults (100000/25000) just to fit inside
-# qwen3-1.7b-cpu's -c 32768 context -- that was a CONTEXT-SIZE constraint
+# qwen3-1.7b-gpu's -c 32768 context (named qwen3-1.7b-cpu at the time) --
+# that was a CONTEXT-SIZE constraint
 # only, never a latency one, and it left DIALECTIC_MAX_INPUT_TOKENS at
 # 28000, which turned out to be the real cause of the "Jarvis just hangs"
 # reports (2026-09-15).
@@ -115,35 +117,35 @@ data:
   DERIVER_FLUSH_ENABLED: "true"
   DERIVER_MAX_INPUT_TOKENS: "20000"
   DERIVER_MODEL_CONFIG__TRANSPORT: "openai"
-  DERIVER_MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
+  DERIVER_MODEL_CONFIG__MODEL: "qwen3-1.7b-gpu"
   DERIVER_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
 
   SUMMARY_MODEL_CONFIG__TRANSPORT: "openai"
-  SUMMARY_MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
+  SUMMARY_MODEL_CONFIG__MODEL: "qwen3-1.7b-gpu"
   SUMMARY_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
 
   DIALECTIC_MAX_INPUT_TOKENS: "1500"
   DIALECTIC_LEVELS__minimal__MODEL_CONFIG__TRANSPORT: "openai"
-  DIALECTIC_LEVELS__minimal__MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
+  DIALECTIC_LEVELS__minimal__MODEL_CONFIG__MODEL: "qwen3-1.7b-gpu"
   DIALECTIC_LEVELS__minimal__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
   DIALECTIC_LEVELS__low__MODEL_CONFIG__TRANSPORT: "openai"
-  DIALECTIC_LEVELS__low__MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
+  DIALECTIC_LEVELS__low__MODEL_CONFIG__MODEL: "qwen3-1.7b-gpu"
   DIALECTIC_LEVELS__low__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
   DIALECTIC_LEVELS__medium__MODEL_CONFIG__TRANSPORT: "openai"
-  DIALECTIC_LEVELS__medium__MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
+  DIALECTIC_LEVELS__medium__MODEL_CONFIG__MODEL: "qwen3-1.7b-gpu"
   DIALECTIC_LEVELS__medium__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
   DIALECTIC_LEVELS__high__MODEL_CONFIG__TRANSPORT: "openai"
-  DIALECTIC_LEVELS__high__MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
+  DIALECTIC_LEVELS__high__MODEL_CONFIG__MODEL: "qwen3-1.7b-gpu"
   DIALECTIC_LEVELS__high__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
   DIALECTIC_LEVELS__max__MODEL_CONFIG__TRANSPORT: "openai"
-  DIALECTIC_LEVELS__max__MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
+  DIALECTIC_LEVELS__max__MODEL_CONFIG__MODEL: "qwen3-1.7b-gpu"
   DIALECTIC_LEVELS__max__MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
 
   DREAM_DEDUCTION_MODEL_CONFIG__TRANSPORT: "openai"
-  DREAM_DEDUCTION_MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
+  DREAM_DEDUCTION_MODEL_CONFIG__MODEL: "qwen3-1.7b-gpu"
   DREAM_DEDUCTION_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
   DREAM_INDUCTION_MODEL_CONFIG__TRANSPORT: "openai"
-  DREAM_INDUCTION_MODEL_CONFIG__MODEL: "qwen3-1.7b-cpu"
+  DREAM_INDUCTION_MODEL_CONFIG__MODEL: "qwen3-1.7b-gpu"
   DREAM_INDUCTION_MODEL_CONFIG__OVERRIDES__BASE_URL: "http://litellm.ai-models.svc.cluster.local:4000/v1"
 ---
 apiVersion: apps/v1

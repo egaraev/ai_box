@@ -267,9 +267,15 @@ data:
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
           stream_timeout: 60
-      - model_name: qwen3-1.7b-cpu
+      - model_name: qwen3-1.7b-gpu
+        # RENAMED from qwen3-1.7b-cpu 2026-09-16 (cleanup after the second-GPU
+        # migration -- see k8s/p1/llama-swap-configmap.yaml's own comment):
+        # this model moved off CPU onto its own dedicated RTX 3060, so the
+        # "-cpu" name was actively confusing (and made it invisible under
+        # its expected name in llama-swap's own model list UI). Must match
+        # the model key in llama-swap-configmap.yaml exactly.
         litellm_params:
-          model: openai/qwen3-1.7b-cpu
+          model: openai/qwen3-1.7b-gpu
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
       - model_name: nomic-embed-text-v1.5
@@ -291,8 +297,12 @@ data:
         # lineage match for that convention. See
         # k8s/p1/llama-swap-configmap.yaml's hermes3-llama-3.1-8b entry
         # for the actual server command and the real download URL.
-        # llama-3.1-8b's model entry there is kept (unwired, not deleted)
-        # in case it's wanted again later -- same treatment as qwen3-8b.
+        # llama-3.1-8b's and qwen3-8b's model entries were kept unwired for a
+        # while in case either was wanted again -- REMOVED 2026-09-16
+        # (Eldar's cleanup call, neither ever got used again). Restorable
+        # from git history (see k8s/p1/llama-swap-configmap.yaml) if either
+        # is actually wanted later; the GGUF files themselves are untouched
+        # on disk.
         litellm_params:
           model: openai/hermes3-llama-3.1-8b
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1

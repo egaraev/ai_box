@@ -158,8 +158,9 @@ data:
           --reasoning-budget 4096
           --reasoning-effort medium
         # CUDA_VISIBLE_DEVICES ADDED 2026-09-16: second GPU (RTX 3060) now on
-        # the node, dedicated to qwen3-1.7b-cpu only (see that model's own
-        # comment) -- every other GPU model, this one included, is pinned to
+        # the node, dedicated to qwen3-1.7b-gpu only (named qwen3-1.7b-cpu
+        # until a later rename -- see that model's own comment) -- every
+        # other GPU model, this one included, is pinned to
         # the 5070 Ti so nothing silently lands on the small card once
         # llama-swap-deployment.yaml exposes both devices via
         # NVIDIA_VISIBLE_DEVICES=all instead of the old single-GPU resource
@@ -406,7 +407,14 @@ data:
           - "CUDA_VISIBLE_DEVICES="
         ttl: 0
 
-      qwen3-1.7b-cpu:
+      qwen3-1.7b-gpu:
+        # RENAMED 2026-09-16 from qwen3-1.7b-cpu (cleanup pass, see this
+        # entry's own "MOVED TO GPU" comment below) -- also renamed in
+        # k8s/p1/litellm.yaml's model_list entry and all 9 of
+        # k8s/p2/honcho.yaml's MODEL_CONFIG__MODEL pointers, which must match
+        # this key exactly. The var alias in this file's own matrix section
+        # below (q17) stays the same, only its value changed.
+        #
         # Dedicated tiny CPU model for all of Honcho's non-embedding LLM
         # calls (deriver extraction, dialectic, summary, dream) -- see
         # k8s/p2/honcho.yaml's per-feature MODEL_CONFIG overrides, all
@@ -486,11 +494,20 @@ data:
         # are on GPU), --flash-attn on added (matches every other GPU model
         # in this file). Deliberately the ONLY model on GPU 0 -- every other
         # GPU model is pinned to GPU 1 (the 5070 Ti) instead, see their own
-        # comments. Model name kept as "qwen3-1.7b-cpu" despite no longer
-        # being CPU-only, to avoid a coordinated rename across honcho.yaml's
-        # 9 MODEL_CONFIG pointers and litellm.yaml -- rename later if
-        # wanted, not needed for this to work. Full reasoning/apply history:
-        # gpu-migration-2026-09-15/README.md in this repo.
+        # comments. Full reasoning/apply history: gpu-migration-2026-09-15/
+        # README.md in this repo (drafted before this went live -- note the
+        # draft's entry name qwen3-1.7b-gpu was originally meant for a
+        # separate NEW entry alongside the CPU one; what actually shipped
+        # was converting the existing entry in place instead, then renaming
+        # it, landing on the same final name either way).
+        #
+        # RENAMED 2026-09-16 (separate cleanup pass, Eldar's call): kept as
+        # "qwen3-1.7b-cpu" at first to avoid a coordinated rename across
+        # honcho.yaml's 9 MODEL_CONFIG pointers and litellm.yaml's model_list
+        # entry -- reconsidered once the stale "-cpu" name actively confused
+        # (model didn't show up where expected under its new GPU identity in
+        # llama-swap's own model list UI). Now renamed everywhere at once;
+        # see honcho.yaml and litellm.yaml's own comments on this.
         #
         # PINNED BY UUID, NOT INDEX -- CHANGED 2026-09-16 after a real live
         # bug: pinning by index (CUDA_VISIBLE_DEVICES=0, matching nvidia-smi
@@ -517,33 +534,18 @@ data:
         ttl: 0
 
 
-      qwen3-1.7b-cpu-q4test:
-        # -t 4 -> 6 CHANGED 2026-09-15, then REVERTED 6->4 SAME DAY: tried
-        # stacking a thread bump (4->6, aibox's 2 idle cores at the time) on
-        # top of Q4_K_M after quant alone only got 1.23x faster than Q8_0
-        # (61.7s -> 50.0s at a real 3,281-token dialectic-sized prompt).
-        # Result: 50.0s -> 49.1s, decode barely moved (15.77 -> 16.25 t/s)
-        # -- confirms llama.cpp's decode phase (one token at a time) is
-        # memory-latency bound, not thread-parallelism bound, same
-        # conclusion the live qwen3-1.7b-cpu's own -t 16->4 history already
-        # reached. Reverted back to -t 4 (Eldar's call -- no benefit to
-        # keeping the extra threads on this test entry). Quantization
-        # remains the only lever of the two that actually helped, modestly.
-        cmd: |
-          llama-server
-          -m /models/qwen3-1.7B/Qwen3-1.7B-Q4_K_M.gguf
-          --port ${PORT}
-          --host 0.0.0.0
-          --jinja
-          -ngl 0
-          -t 4
-          --no-mmap
-          --parallel 1
-          -c 32768
-          --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0
-          --reasoning-budget 0
-        env:
-          - "CUDA_VISIBLE_DEVICES="
+      # REMOVED 2026-09-16 (Eldar's cleanup call): qwen3-1.7b-cpu-q4test, a
+      # temporary Q4_K_M quant test entry Eldar added directly on 2026-09-15
+      # to compare against the live model's Q8_0 (see
+      # bench_qwen17b_quant_compare.py) while chasing Honcho's dialectic
+      # 30s-timeout problem via CPU-side tuning -- quant alone got ~1.23x
+      # faster (61.7s -> 50.0s at a real dialectic-sized prompt) but still
+      # nowhere near fast enough on CPU. Moot now that qwen3-1.7b-gpu (see
+      # above, was qwen3-1.7b-cpu) runs on its own dedicated GPU instead --
+      # GPU decode speed made the whole CPU-quant question irrelevant.
+      # Restorable from git history if CPU-side quant testing is ever needed
+      # again; the Q4_K_M GGUF itself is untouched on disk at
+      # /data/models/qwen3-1.7B/Qwen3-1.7B-Q4_K_M.gguf.
 
       # REMOVED 2026-09-07 (Eldar's call -- only keeping what's actually on
       # aibox): qwen3.8-27b-Atomic, qwen3.8-27b-MTP, agents-a1, ornith-35b.
@@ -620,134 +622,21 @@ data:
       # present on disk for either -- config-only placeholders. Restorable
       # from git history if either model is actually downloaded later.
 
-      # ── ACTIVATED 2026-09-07: wired into LiteLLM's semantic router as the
-      # "fast" route (see k8s/p1/litellm.yaml's custom_router_hook.py) --
-      # quick/simple questions that don't need the 27B model's full weight.
-      # STATUS: config only until the GGUF is actually on aibox. Real file,
-      # confirmed on Hugging Face at unsloth/Qwen3-8B-GGUF:
-      #   mkdir -p /data/models/qwen3-8B
-      #   cd /data/models/qwen3-8B
-      #   wget https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf
-      # -c 32768 -> 65536 CHANGED 2026-09-07: preemptive fix, same class of
-      # bug just confirmed live on medgemma-1.5-4b (see its own comment
-      # below for the full "ContextWindowExceededError, 44516 tokens"
-      # diagnosis) -- the router hook forwards Hermes's full, untouched
-      # request (system prompt/tool harness + conversation history) to
-      # whichever model gets picked, and Hermes's documented minimum is
-      # 64K. This route just hasn't been hit by a long enough conversation
-      # yet; matched to 65536 like every other active router destination
-      # before it actually breaks mid-conversation. -ctk/-ctv q8_0 already
-      # in place, so the larger context should be cheap. NOT YET CONFIRMED
-      # on aibox (no live failure here yet to retest against).
-      #
-      # THAT BUMP WAS A NO-OP -- found live 2026-09-08 via a real
-      # ContextWindowExceededError over Telegram, chased down via
-      # llama-swap's /logs/stream/upstream endpoint: this specific GGUF
-      # (unsloth/Qwen3-8B-Q4_K_M) has a real trained context of only
-      # 40960 tokens, and llama-server silently caps -c 65536 back down
-      # to that rather than honoring it ("the slot context (65536)
-      # exceeds the training context of the model (40960) - capping").
-      # A YaRN rope-scaling fix (--rope-scaling yarn --rope-scale 1.6
-      # --yarn-orig-ctx 40960) was tried and confirmed to be real,
-      # correct llama.cpp syntax, but REVERTED 2026-09-08 (Eldar's call)
-      # in favor of retiring this route to a model with genuine native
-      # long context instead.
-      #
-      # SWAPPED OUT 2026-09-08: llama-3.1-8b (below) now serves the
-      # "casual" route in litellm.yaml instead -- see that model's own
-      # comment for why. This entry is kept defined but UNWIRED (no
-      # route in litellm.yaml points at it anymore) rather than deleted,
-      # in case it's wanted again later; still silently capped at 40960
-      # if anything does call it directly by name. Ask before removing
-      # outright.
-      qwen3-8b:
-        cmd: |
-          llama-server
-          -m /models/qwen3-8B/Qwen3-8B-Q4_K_M.gguf
-          --port ${PORT}
-          --host 0.0.0.0
-          --n-gpu-layers 99
-          -t 8
-          --no-mmap
-          --flash-attn on
-          --jinja
-          -ctk q8_0
-          -ctv q8_0
-          -c 65536
-          --reasoning-budget 1024
-        # CUDA_VISIBLE_DEVICES ADDED 2026-09-16, pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
-        # see qwen3.8-27b-Expert's own comment above for the full reasoning.
-        # Unwired (see this model's own comment above) but pinned anyway so
-        # it doesn't silently land on the 3060 if ever called directly.
-        env:
-          - "CUDA_VISIBLE_DEVICES=GPU-832b5f69-26d2-3908-7838-831fc0b98a17"    # 5070 Ti
-        ttl: 300
-
-      # ── ADDED 2026-09-08: replaces qwen3-8b as the "casual" route
-      # destination (see litellm.yaml's llama-3.1-8b model_list entry
-      # and ROUTE_TO_MODEL comment for the full reasoning). Real GGUF
-      # confirmed present on aibox via device bridge (4,920,739,200
-      # bytes, matches unsloth's published Q4_K_M size):
-      #   mkdir -p /data/models/llama-3.1-8B
-      #   cd /data/models/llama-3.1-8B
-      #   wget https://huggingface.co/unsloth/Llama-3.1-8B-Instruct-GGUF/resolve/main/Llama-3.1-8B-Instruct-Q4_K_M.gguf
-      # -c 65536: matches every other active router destination's
-      # Hermes-64K-floor target. Genuinely safe here -- Llama-3.1-8B-
-      # Instruct's real native context is 131072 (Meta's own official
-      # rope_scaling baked into the release, confirmed via its actual
-      # config.json: max_position_embeddings 131072), so 65536 is well
-      # inside the trained range with no capping risk, unlike qwen3-8b's
-      # 40960 native ceiling. No --reasoning-budget: unlike Qwen3, Llama
-      # 3.1 isn't a hybrid-thinking model, so that flag doesn't apply
-      # here. --parallel 1 added (unlike qwen3-8b, which never had it):
-      # llama-server defaults to n_slots=4 otherwise, which was already
-      # identified as a real CPU-thread-oversubscription risk for
-      # qwen3.8-27b-Expert/Expert-Vision above -- added here from the
-      # start rather than waiting to hit the same bug again. Text-only
-      # model, no --mmproj (vision stays covered by
-      # qwen3.8-27b-Expert-Vision). NOT YET CONFIRMED on aibox -- after
-      # deploying, verify via `kubectl exec ... ps aux | grep llama-3.1`
-      # that the live process actually shows these flags (see the
-      # aibox-config-restart-verify skill), and a real casual-route
-      # Telegram message to confirm tool calling still works end-to-end.
-      # SWAPPED OUT 2026-09-09: hermes3-llama-3.1-8b (below) now serves the
-      # "casual" route instead. Root cause (found live via kubectl logs on
-      # both media-gen-mcp -- unrelated bug found the same week -- and
-      # litellm/hermes-agent): every casual-route message that made Hermes
-      # reach for its `clarify` tool came back malformed (`questions` sent
-      # as a JSON-string instead of a real array), which llama-swap/litellm
-      # then failed to parse ("OpenAIException - The model produced output
-      # that does not match the expected peg-native format"), burning a
-      # ~10-20s retry-and-recover cycle on plain chit-chat like "hey bro".
-      # Diagnosis: vanilla Meta Llama-3.1-8B-Instruct's native tool-calling
-      # syntax is its own python_tag/ipython builtin-tool format, not the
-      # <tool_call>{json}</tool_call> XML+JSON convention Hermes Agent (and
-      # the "peg-native" grammar llama-swap builds from its tool schemas)
-      # expects -- so it was fighting an unfamiliar format on every call,
-      # not just complex ones. This entry is kept (unwired, not deleted) in
-      # case it's wanted again later -- same treatment as qwen3-8b above.
-      llama-3.1-8b:
-        cmd: |
-          llama-server
-          -m /models/llama-3.1-8B/Llama-3.1-8B-Instruct-Q4_K_M.gguf
-          --port ${PORT}
-          --host 0.0.0.0
-          --n-gpu-layers 99
-          -t 8
-          --no-mmap
-          --parallel 1
-          --flash-attn on
-          --jinja
-          -ctk q8_0
-          -ctv q8_0
-          -c 65536
-        # CUDA_VISIBLE_DEVICES ADDED 2026-09-16, pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
-        # see qwen3.8-27b-Expert's own comment above for the full reasoning.
-        # Unwired (see this model's own comment above) but pinned anyway so
-        # it doesn't silently land on the 3060 if ever called directly.
-        env:
-          - "CUDA_VISIBLE_DEVICES=GPU-832b5f69-26d2-3908-7838-831fc0b98a17"    # 5070 Ti
-        ttl: 300
+      # REMOVED 2026-09-16 (Eldar's cleanup call -- "trash models", both long
+      # unwired): qwen3-8b and llama-3.1-8b. Both were superseded on the
+      # "casual"/"fast" routes months ago (qwen3-8b -> llama-3.1-8b ->
+      # hermes3-llama-3.1-8b, see litellm.yaml's ROUTE_TO_MODEL history) and
+      # kept around afterward only "in case wanted again" -- never was.
+      # Brief history for context: qwen3-8b's route died when its GGUF
+      # turned out silently capped at 40960 native context, not the
+      # advertised 65536 (llama-server logged "capping" rather than
+      # erroring -- caught live via a real ContextWindowExceededError).
+      # llama-3.1-8b replaced it, then itself got swapped for
+      # hermes3-llama-3.1-8b (below) when its tool-calling format kept
+      # mangling Hermes's `clarify` tool calls on casual chat. Both GGUFs
+      # remain untouched on disk (/data/models/qwen3-8B/,
+      # /data/models/llama-3.1-8B/) and both entries are restorable from git
+      # history if either is ever wanted again.
 
       # ── ADDED 2026-09-09: replaces llama-3.1-8b as the "casual" route
       # destination (see litellm.yaml's hermes3-llama-3.1-8b model_list
@@ -985,15 +874,13 @@ data:
       # no router role.
       vars:
         qpg:  qwopus-general
-        q8:   qwen3-8b
-        l31:  llama-3.1-8b
         h31:  hermes3-llama-3.1-8b
         med:  medgemma-1.5-4b
         arch: arch-router-1.5b
         qwe:  qwen3.8-27b-Expert
         qwv:  qwen3.8-27b-Expert-Vision
         emb:  nomic-embed-text-v1.5
-        q17:  qwen3-1.7b-cpu
+        q17:  qwen3-1.7b-gpu
 
       sets:
 
@@ -1015,22 +902,18 @@ data:
         # dropped only because that model itself was retired, not because
         # the pattern was wrong -- see the no-rewrite-principle note at the
         # top of this file). Restored that pattern here, and extended it to
-        # nomic-embed-text-v1.5 and qwen3-1.7b-cpu too: both have the exact
-        # same ttl:0-is-enough assumption and no matrix var at all, meaning
-        # Honcho's background deriver/embedding calls have almost certainly
-        # been hitting this same silent eviction on every GPU model swap,
-        # just unnoticed since Honcho retries quietly in the background
-        # rather than surfacing an error to a human.
-        # l31 (llama-3.1-8b) ADDED 2026-09-08 to the OR-group when it
-        # replaced qwen3-8b as the "casual" route destination -- same
-        # reasoning as every other GPU route here: without it, arch/emb/
-        # q17 would get silently evicted whenever this model is the one
-        # actually loaded. q8 (qwen3-8b) itself is left in place even
-        # though no route points at it anymore (see its own comment
-        # above) -- harmless if unused, and avoids the same silent-
-        # eviction bug resurfacing if it's ever called directly again.
-        # h31 (hermes3-llama-3.1-8b) SWAPPED IN 2026-09-09 for l31, same
-        # OR-group slot -- l31 itself stays listed here too (like q8) so
-        # arch/emb/q17 don't get evicted if it's ever called directly
-        # again despite no route pointing at it.
-        resident_router: "(qpg | q8 | l31 | h31 | med | qwe | qwv) & arch & emb & q17"
+        # nomic-embed-text-v1.5 and qwen3-1.7b-cpu (now qwen3-1.7b-gpu) too:
+        # both have the exact same ttl:0-is-enough assumption and no matrix
+        # var at all, meaning Honcho's background deriver/embedding calls
+        # have almost certainly been hitting this same silent eviction on
+        # every GPU model swap, just unnoticed since Honcho retries quietly
+        # in the background rather than surfacing an error to a human.
+        # h31 (hermes3-llama-3.1-8b) is the "casual"/"other" route
+        # destination (see litellm.yaml) -- without it in this OR-group,
+        # arch/emb/q17 would get silently evicted whenever it's the model
+        # actually loaded.
+        #
+        # q8 (qwen3-8b) and l31 (llama-3.1-8b) REMOVED 2026-09-16 along with
+        # their model entries above (Eldar's cleanup call, both long unwired
+        # -- see the REMOVED comment where their entries used to be).
+        resident_router: "(qpg | h31 | med | qwe | qwv) & arch & emb & q17"
