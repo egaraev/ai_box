@@ -308,32 +308,23 @@ data:
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
           stream_timeout: 60
-      - model_name: medgemma-1.5-4b
+      - model_name: llama3.1-aloe-beta-8b
+        # REPLACES medgemma-1.5-4b as the "medical" route backend, 2026-09-16
+        # (Eldar's call). See the long comment above llama3.1-aloe-beta-8b
+        # in llama-swap-configmap.yaml for the full root-cause history
+        # (medgemma never reliably stopped/answered) and why this specific
+        # model was picked (real medical fine-tune of Llama-3.1-8B, same
+        # base/template family as hermes3-llama-3.1-8b; a vision-symbiosis
+        # split using LLaVA-Med 1.5 was investigated and ruled out
+        # separately -- no working vision-capable GGUF exists for it, and
+        # its license also restricts deployed use beyond research). No
+        # "stop" override needed here -- same base chat template as
+        # hermes3-llama-3.1-8b, which has never needed one.
         litellm_params:
-          model: openai/medgemma-1.5-4b
+          model: openai/llama3.1-aloe-beta-8b
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
           stream_timeout: 60
-          # ADDED 2026-09-07: this specific unsloth medgemma-1.5-4b GGUF
-          # never stops generating on its own -- it keeps emitting literal
-          # "<|im_end|>"/"<|im_start|>" as plain text and re-runs the whole
-          # exchange, and two different --chat-template choices on the
-          # llama-swap side (chatml, then gemma) both failed to fix it (see
-          # the long comment above medgemma-1.5-4b in
-          # llama-swap-configmap.yaml for the full history -- gemma actually
-          # made it worse, producing incoherent output, since --jinja
-          # doesn't have a jinja source for every legacy template name).
-          # Suspected root cause: this quant's GGUF metadata may simply be
-          # missing correct EOS/EOG token wiring, which no --chat-template
-          # choice can fix since that flag only controls prompt formatting,
-          # not the server's stop condition. This "stop" list is forced into
-          # every request to this model regardless of what the caller
-          # (Hermes) sends, and is matched as literal text against the
-          # generated stream by llama-server's OpenAI-compatible endpoint --
-          # token-agnostic, so it works even if "<|im_end|>" was never a
-          # real special token in this quant's vocab. NOT YET CONFIRMED on
-          # aibox.
-          stop: ["<|im_end|>", "<|im_start|>"]
 
       # "auto" -- semantic routing entry point. litellm_params below is only
       # the FALLBACK target if custom_router_hook.py doesn't run or errors
@@ -417,7 +408,7 @@ data:
       #   - qwen3.8-27b-Expert: ["openrouter-fallback"]
       #   - qwen3.8-27b-Expert-Vision: ["openrouter-fallback"]
       #   - hermes3-llama-3.1-8b: ["openrouter-fallback"]
-      #   - medgemma-1.5-4b: ["openrouter-fallback"]
+      #   - llama3.1-aloe-beta-8b: ["openrouter-fallback"]
 
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
@@ -610,7 +601,7 @@ data:
         # itself removed 2026-09-13 once confirmed genuinely unused. See the
         # top-of-file ROUTES comment for the full history.
         "vision": "qwen3.8-27b-Expert-Vision",
-        "medical": "medgemma-1.5-4b",
+        "medical": "llama3.1-aloe-beta-8b",  # CHANGED 2026-09-16: medgemma-1.5-4b retired (broken), see llama-swap-configmap.yaml for full history
         # "casual" CHANGED 2026-09-09: llama-3.1-8b -> hermes3-llama-3.1-8b
         # (see the litellm_params comment on the hermes3-llama-3.1-8b
         # model_list entry above for why). Previously changed 2026-09-08:

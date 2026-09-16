@@ -713,107 +713,78 @@ data:
           - "CUDA_VISIBLE_DEVICES=GPU-832b5f69-26d2-3908-7838-831fc0b98a17"    # 5070 Ti
         ttl: 300
 
-      # ── ACTIVATED 2026-09-07: wired into LiteLLM's semantic router as the
-      # "medical" route (see k8s/p1/litellm.yaml's custom_router_hook.py).
-      # Files confirmed present on aibox 2026-09-07 via `kubectl exec ... ls
-      # /models/medgemma-1.5-4B/`. PATH FIXED same day: the -m filename was
-      # -Q5_K_M.gguf (matching the casing implied by the HF filename), but
-      # the file actually downloaded to aibox as -q5_k_m.gguf (lowercase) --
-      # Linux paths are case-sensitive, so llama-server couldn't find it and
-      # exited immediately with no useful error, which llama-swap could only
-      # report as the generic "upstream command exited prematurely" (root
-      # cause found via `kubectl logs -l app=llama-swap` + a real `ls` on
-      # the mounted /models path, not guessing from the wrapper error alone).
-      # mmproj-F16.gguf's casing already matched, no change needed there.
-      #   mkdir -p /data/models/medgemma-1.5-4B
-      #   cd /data/models/medgemma-1.5-4B
-      #   wget https://huggingface.co/unsloth/medgemma-1.5-4b-it-GGUF/resolve/main/medgemma-1.5-4b-it-Q5_K_M.gguf -O medgemma-1.5-4b-it-q5_k_m.gguf
-      #   wget https://huggingface.co/unsloth/medgemma-1.5-4b-it-GGUF/resolve/main/mmproj-F16.gguf
-      # --no-jinja -> --jinja FIXED 2026-09-07: llama-server hard-requires
-      # --jinja whenever a request includes a "tools" param, and Hermes (the
-      # only real caller of the medical route) always sends tool/function
-      # definitions -- it's an agent, not a plain chat client. --no-jinja
-      # was carried over without checking that against how this model would
-      # actually be called; every other GPU model in this roster already
-      # runs --jinja for the same reason.
+      # ── REPLACED 2026-09-16 (Eldar's call): medgemma-1.5-4b retired from
+      # the "medical" route. Real production testing exposed it as
+      # fundamentally broken, not just template-fiddly -- even with the
+      # stop-list mitigation below (LiteLLM path) it returned empty/useless
+      # content, and without it (direct llama-swap access) it looped
+      # generating literal ChatML tokens until hitting the hard 65536-token
+      # context ceiling (completion_tokens=65491 on a 45-token prompt).
+      # MedGemma 1.5's own model card admits it "has not been evaluated or
+      # optimized for multi-turn applications" -- exactly how Hermes calls
+      # it. Investigated a same-route image+text "symbiosis" split next
+      # (Eldar's proposal): LLaVA-Med 1.5 for the vision half was ruled out
+      # on two independent grounds -- (1) its license states "any deployed
+      # use case...commercial or otherwise...is out of scope", research-
+      # reproduction only; (2) harder blocker, the only GGUF that exists
+      # (mradermacher/llava-med-v1.5-mistral-7b-i1-GGUF) ships ZERO
+      # mmproj/vision-projector file -- confirmed via the repo's own file
+      # listing: 26 LLM-only quants + imatrix.dat, nothing else. It's a
+      # text-only Mistral-7B as distributed; the vision training is
+      # unreachable through llama.cpp. Root cause: LLaVA-Med uses the old
+      # custom LlavaMistralForCausalLM class, not the standardized HF
+      # format llama.cpp's converter learned to handle automatically in
+      # 2025 -- a from-scratch conversion attempt is a documented dead end
+      # (ggml-org/llama.cpp#5831, opened 2024, never resolved: workarounds
+      # got the converter to run but produced garbage placeholder-character
+      # output). Eldar's decision: drop the vision-split idea entirely --
+      # medical images keep going through the existing "vision" route
+      # (qwen3.8-27b-Expert-Vision, unchanged, see ROUTE_TO_MODEL in
+      # litellm.yaml) exactly as before. This entry only replaces the
+      # TEXT-medical backend.
       #
-      # --chat-template chatml ADDED 2026-09-07 (second bug, found right
-      # after the --jinja fix): with --jinja alone (using this quant's own
-      # embedded GGUF chat-template metadata), the model never actually
-      # stopped generating -- it kept emitting literal "<|im_end|>"/
-      # "<|im_start|>" as plain text and looping the same answer over and
-      # over instead of the server recognizing end-of-turn.
-      #
-      # ATTEMPT 1 (--chat-template chatml) DID NOT WORK -- live-retested,
-      # still looped, same literal "<|im_end|>"/"<|im_start|>user" text.
-      #
-      # ATTEMPT 2 (--chat-template gemma, reasoning: MedGemma is a Gemma-3
-      # checkpoint, so its real trained stop tokens should be
-      # <start_of_turn>/<end_of_turn>, not ChatML's) WAS WORSE, NOT BETTER --
-      # live-retested, produced completely incoherent output (a hallucinated
-      # HuggingFace README for an unrelated "gemma-7b-it Italian" model, no
-      # relation to the actual question asked). Root cause: llama-server's
-      # --jinja engine does not have a jinja source for every legacy
-      # --chat-template preset name -- "gemma" is a legacy/non-jinja-only
-      # preset, so combining --jinja with --chat-template gemma produced a
-      # broken/near-empty prompt instead of the intended Gemma turn format,
-      # and the model free-completed on garbage context. REVERTED to chatml.
-      #
-      # REAL FIX (2026-09-07, after two failed template guesses): stop
-      # guessing at chat-template names and instead force an explicit,
-      # token-agnostic stop condition. llama-server's OpenAI-compatible API
-      # honors a "stop" list from the REQUEST body as literal substring
-      # matches against the generated text stream -- this works regardless
-      # of whether "<|im_end|>" is wired as a real special/EOS token in this
-      # quant's vocab (which is the actual suspected root cause: this
-      # specific unsloth GGUF conversion may simply be missing correct EOS
-      # metadata, which no --chat-template choice can fix, since chat-
-      # template only controls how the PROMPT is built, not how llama.cpp
-      # decides to stop generating). The fix is on the LiteLLM side, not
-      # here: litellm.yaml's medgemma-1.5-4b model_list entry now sets
-      # litellm_params.stop: ["<|im_end|>", "<|im_start|>"], forced into
-      # every request regardless of what Hermes itself sends. --chat-
-      # template stays at chatml here since it produced coherent (if non-
-      # terminating) output -- the stop list is what should now actually
-      # end the turn. NOT YET CONFIRMED on aibox. If this still doesn't
-      # stop it, the next real diagnostic (not another guess) is:
-      # `kubectl logs -l app=llama-swap -n ai-models | grep -A2 -i "eos
-      # token\|chat template"` right after medgemma loads, to see what
-      # EOS/EOG token(s) llama-server actually resolved from this GGUF's
-      # metadata -- if none, the quant itself needs re-converting upstream.
-      #
-      # -c 32768 -> 65536 (+ -ctk/-ctv q4_0) CHANGED 2026-09-07: real error
-      # hit live -- "ContextWindowExceededError ... request (44516 tokens)
-      # exceeds the available context size (32768 tokens)". The router hook
-      # only trims/caps the message list it sends to arch-router-1.5b for
-      # its OWN classification call -- the actual full, untouched request
-      # (Hermes's complete system prompt/tool harness + conversation
-      # history) still gets forwarded as-is to whichever model gets
-      # chosen. qwen3.8-27b-Expert/Expert-Vision were already sized to
-      # 65536 specifically because that's Hermes's documented 64K minimum
-      # context requirement -- medgemma-1.5-4b (and qwen3-8b, the casual
-      # route, same latent bug) were left at 32768 and just hadn't been hit
-      # by a long enough conversation yet. Matched to 65536 with quantized
-      # KV cache (this is a small 4B model, plenty of VRAM headroom vs the
-      # razor-thin 27B, but quantizing anyway since it costs nothing and
-      # every other GPU model in the roster already does the same). NOT
-      # YET CONFIRMED on aibox.
-      medgemma-1.5-4b:
+      # Llama3.1-Aloe-Beta-8B (HPAI-BSC) chosen as the replacement: a real
+      # medical/healthcare fine-tune of Llama-3.1-8B-Instruct, same base
+      # architecture and chat template as hermes3-llama-3.1-8b (already
+      # proven stable on this hardware) -- this entry deliberately mirrors
+      # that one's flags rather than inventing new ones. License note:
+      # Aloe's own modifications are CC-BY-NC-4.0 (non-commercial, research
+      # use) on top of Meta's Llama 3.1 license -- fine for personal/home
+      # use, would need checking again before ever using this for paid
+      # consulting work.
+      #   mkdir -p /data/models/Llama3.1-Aloe-Beta-8B
+      #   cd /data/models/Llama3.1-Aloe-Beta-8B
+      #   wget https://huggingface.co/mradermacher/Llama3.1-Aloe-Beta-8B-i1-GGUF/resolve/main/Llama3.1-Aloe-Beta-8B.i1-Q4_K_M.gguf
+      # Q4_K_M (5.0GB, mradermacher's own "fast, recommended" pick) -- same
+      # quant level as hermes3-llama-3.1-8b, deliberately, to keep the
+      # resident-model VRAM footprint on this GPU close to what medgemma's
+      # slot already used. -ctk/-ctv q8_0 and -c 65536 copied directly from
+      # hermes3-llama-3.1-8b's own (already-working) entry rather than
+      # medgemma's q4_0 choice, since q4_0 was specifically justified there
+      # by medgemma being a small 4B model with VRAM to spare -- that
+      # reasoning doesn't carry over to this 8B replacement. NOT YET
+      # CONFIRMED on aibox -- after deploying, watch this model's startup
+      # log for any n_ctx_train/"capping" warning the way hermes3's own
+      # comment flags, and do a real multi-turn medical-question test
+      # through Hermes (not just a direct curl) before trusting it's fixed.
+      llama3.1-aloe-beta-8b:
         cmd: |
           llama-server
-          -m /models/medgemma-1.5-4B/medgemma-1.5-4b-it-q5_k_m.gguf
-          --mmproj /models/medgemma-1.5-4B/mmproj-F16.gguf
+          -m /models/Llama3.1-Aloe-Beta-8B/Llama3.1-Aloe-Beta-8B.i1-Q4_K_M.gguf
           --port ${PORT}
           --host 0.0.0.0
           --n-gpu-layers 99
           -t 8
           --no-mmap
+          --parallel 1
           --flash-attn on
           --jinja
-          --chat-template chatml
-          -c 65536 -ctk q4_0 -ctv q4_0
-        # CUDA_VISIBLE_DEVICES ADDED 2026-09-16, pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
-        # see qwen3.8-27b-Expert's own comment above for the full reasoning.
+          -ctk q8_0
+          -ctv q8_0
+          -c 65536
+        # CUDA_VISIBLE_DEVICES pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
+        # same GPU medgemma-1.5-4b was already using, kept as-is since this
+        # is a like-for-like backend swap on the same "medical" route.
         env:
           - "CUDA_VISIBLE_DEVICES=GPU-832b5f69-26d2-3908-7838-831fc0b98a17"    # 5070 Ti
         ttl: 300
