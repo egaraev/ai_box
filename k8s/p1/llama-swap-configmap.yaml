@@ -157,17 +157,36 @@ data:
           --presence-penalty 1.5 --repeat-penalty 1.0
           --reasoning-budget 4096
           --reasoning-effort medium
-        # CUDA_VISIBLE_DEVICES=1 ADDED 2026-09-16: second GPU (RTX 3060) now
-        # on the node, dedicated to qwen3-1.7b-cpu only (see that model's own
+        # CUDA_VISIBLE_DEVICES ADDED 2026-09-16: second GPU (RTX 3060) now on
+        # the node, dedicated to qwen3-1.7b-cpu only (see that model's own
         # comment) -- every other GPU model, this one included, is pinned to
-        # GPU 1 (the 5070 Ti, confirmed via `nvidia-smi -L` after the 3060
-        # was installed) so nothing silently lands on the small card once
+        # the 5070 Ti so nothing silently lands on the small card once
         # llama-swap-deployment.yaml exposes both devices via
         # NVIDIA_VISIBLE_DEVICES=all instead of the old single-GPU resource
         # request. See gpu-migration-2026-09-15/README.md for the full
         # reasoning behind dropping the device-plugin resource request.
+        #
+        # PINNED BY UUID, NOT INDEX -- CHANGED same day after a real bug:
+        # index-based pins (CUDA_VISIBLE_DEVICES=0/1, matching nvidia-smi -L's
+        # PCI-bus-order listing) got silently REVERSED live -- qwen3-1.7b-cpu
+        # (pinned =0, meant for the 3060) loaded onto the 5070 Ti instead, and
+        # hermes3-llama-3.1-8b (pinned =1) loaded onto the 3060. Root cause:
+        # nvidia-smi/NVIDIA_VISIBLE_DEVICES order GPUs by PCI bus id, but the
+        # CUDA RUNTIME's own device numbering (what CUDA_VISIBLE_DEVICES=0/1
+        # actually indexes into) defaults to CUDA_DEVICE_ORDER=FASTEST_FIRST,
+        # not PCI order -- so CUDA ranked the faster 5070 Ti as its own
+        # device 0, exactly reversing the intended pins. A CUDA_DEVICE_ORDER=
+        # PCI_BUS_ID pod-level env var was tried first (still in
+        # llama-swap-deployment.yaml's history) but adds a second moving part
+        # to get right and re-verify. Pinning by UUID instead sidesteps the
+        # whole index/enumeration-order question entirely -- a UUID always
+        # names one specific physical card regardless of enumeration order,
+        # so there's nothing left to get backwards. UUIDs confirmed via
+        # `nvidia-smi -L` after the 3060 was installed:
+        #   GPU-832b5f69-26d2-3908-7838-831fc0b98a17 = RTX 5070 Ti
+        #   GPU-e52569a1-1ceb-1492-9abe-cd07922b1cf8 = RTX 3060
         env:
-          - "CUDA_VISIBLE_DEVICES=1"
+          - "CUDA_VISIBLE_DEVICES=GPU-832b5f69-26d2-3908-7838-831fc0b98a17"    # 5070 Ti
         ttl: 300
 
       qwen3.8-27b-Expert-Vision:
@@ -275,12 +294,12 @@ data:
           --presence-penalty 1.5 --repeat-penalty 1.0
           --reasoning-budget 4096
           --reasoning-effort high
-        # CUDA_VISIBLE_DEVICES=1 ADDED 2026-09-16: pinned to the 5070 Ti --
+        # CUDA_VISIBLE_DEVICES ADDED 2026-09-16, pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
         # see qwen3.8-27b-Expert's own comment above for the full reasoning
         # (second GPU now on the node, everything except qwen3-1.7b-cpu
         # stays on GPU 1).
         env:
-          - "CUDA_VISIBLE_DEVICES=1"
+          - "CUDA_VISIBLE_DEVICES=GPU-832b5f69-26d2-3908-7838-831fc0b98a17"    # 5070 Ti
         ttl: 300
 
       # ── NEW (P2, 2026-09-06): CPU-only models supporting the Honcho memory
@@ -472,6 +491,15 @@ data:
         # 9 MODEL_CONFIG pointers and litellm.yaml -- rename later if
         # wanted, not needed for this to work. Full reasoning/apply history:
         # gpu-migration-2026-09-15/README.md in this repo.
+        #
+        # PINNED BY UUID, NOT INDEX -- CHANGED 2026-09-16 after a real live
+        # bug: pinning by index (CUDA_VISIBLE_DEVICES=0, matching nvidia-smi
+        # -L's PCI-bus-order listing) got silently REVERSED -- this model
+        # loaded onto the 5070 Ti instead of the 3060, because the CUDA
+        # runtime's own device numbering defaults to fastest-first, not PCI
+        # order (see qwen3.8-27b-Expert's own comment above for the full
+        # root cause). UUID pinning sidesteps the whole enumeration-order
+        # question -- a UUID always names one specific physical card.
         cmd: |
           llama-server
           -m /models/qwen3-1.7B/Qwen3-1.7B-Q8_0.gguf
@@ -485,7 +513,7 @@ data:
           --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0
           --reasoning-budget 0
         env:
-          - "CUDA_VISIBLE_DEVICES=0"
+          - "CUDA_VISIBLE_DEVICES=GPU-e52569a1-1ceb-1492-9abe-cd07922b1cf8"    # 3060
         ttl: 0
 
 
@@ -553,10 +581,10 @@ data:
           --dry-allowed-length 2
           --dry-penalty-last-n 4096
           --reasoning-budget 8096
-        # CUDA_VISIBLE_DEVICES=1 ADDED 2026-09-16: pinned to the 5070 Ti --
+        # CUDA_VISIBLE_DEVICES ADDED 2026-09-16, pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
         # see qwen3.8-27b-Expert's own comment above for the full reasoning.
         env:
-          - "CUDA_VISIBLE_DEVICES=1"
+          - "CUDA_VISIBLE_DEVICES=GPU-832b5f69-26d2-3908-7838-831fc0b98a17"    # 5070 Ti
         ttl: 1800
 
       # qwen2.5-coder-7b / qwen2.5-coder-7b-lora-20260712: DROPPED for aibox --
@@ -582,10 +610,10 @@ data:
           -ctk q4_0
           -ctv q4_0
           -c 32768
-        # CUDA_VISIBLE_DEVICES=1 ADDED 2026-09-16: pinned to the 5070 Ti --
+        # CUDA_VISIBLE_DEVICES ADDED 2026-09-16, pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
         # see qwen3.8-27b-Expert's own comment above for the full reasoning.
         env:
-          - "CUDA_VISIBLE_DEVICES=1"
+          - "CUDA_VISIBLE_DEVICES=GPU-832b5f69-26d2-3908-7838-831fc0b98a17"    # 5070 Ti
         ttl: 300
 
       # REMOVED 2026-09-07 (Eldar's call): qwen3.6-35b, gpt-oss-20b. No GGUF
@@ -647,12 +675,12 @@ data:
           -ctv q8_0
           -c 65536
           --reasoning-budget 1024
-        # CUDA_VISIBLE_DEVICES=1 ADDED 2026-09-16: pinned to the 5070 Ti --
+        # CUDA_VISIBLE_DEVICES ADDED 2026-09-16, pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
         # see qwen3.8-27b-Expert's own comment above for the full reasoning.
         # Unwired (see this model's own comment above) but pinned anyway so
         # it doesn't silently land on the 3060 if ever called directly.
         env:
-          - "CUDA_VISIBLE_DEVICES=1"
+          - "CUDA_VISIBLE_DEVICES=GPU-832b5f69-26d2-3908-7838-831fc0b98a17"    # 5070 Ti
         ttl: 300
 
       # ── ADDED 2026-09-08: replaces qwen3-8b as the "casual" route
@@ -713,12 +741,12 @@ data:
           -ctk q8_0
           -ctv q8_0
           -c 65536
-        # CUDA_VISIBLE_DEVICES=1 ADDED 2026-09-16: pinned to the 5070 Ti --
+        # CUDA_VISIBLE_DEVICES ADDED 2026-09-16, pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
         # see qwen3.8-27b-Expert's own comment above for the full reasoning.
         # Unwired (see this model's own comment above) but pinned anyway so
         # it doesn't silently land on the 3060 if ever called directly.
         env:
-          - "CUDA_VISIBLE_DEVICES=1"
+          - "CUDA_VISIBLE_DEVICES=GPU-832b5f69-26d2-3908-7838-831fc0b98a17"    # 5070 Ti
         ttl: 300
 
       # ── ADDED 2026-09-09: replaces llama-3.1-8b as the "casual" route
@@ -763,10 +791,10 @@ data:
           -ctk q8_0
           -ctv q8_0
           -c 65536
-        # CUDA_VISIBLE_DEVICES=1 ADDED 2026-09-16: pinned to the 5070 Ti --
+        # CUDA_VISIBLE_DEVICES ADDED 2026-09-16, pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
         # see qwen3.8-27b-Expert's own comment above for the full reasoning.
         env:
-          - "CUDA_VISIBLE_DEVICES=1"
+          - "CUDA_VISIBLE_DEVICES=GPU-832b5f69-26d2-3908-7838-831fc0b98a17"    # 5070 Ti
         ttl: 300
 
       # ── ACTIVATED 2026-09-07: wired into LiteLLM's semantic router as the
@@ -868,10 +896,10 @@ data:
           --jinja
           --chat-template chatml
           -c 65536 -ctk q4_0 -ctv q4_0
-        # CUDA_VISIBLE_DEVICES=1 ADDED 2026-09-16: pinned to the 5070 Ti --
+        # CUDA_VISIBLE_DEVICES ADDED 2026-09-16, pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
         # see qwen3.8-27b-Expert's own comment above for the full reasoning.
         env:
-          - "CUDA_VISIBLE_DEVICES=1"
+          - "CUDA_VISIBLE_DEVICES=GPU-832b5f69-26d2-3908-7838-831fc0b98a17"    # 5070 Ti
         ttl: 300
 
       # REMOVED 2026-09-07 (Eldar's call): qwen3-vl-30b. No GGUF present on
