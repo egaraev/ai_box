@@ -895,7 +895,11 @@ data:
       vars:
         qpg:  qwopus-general
         h31:  hermes3-llama-3.1-8b
-        med:  medgemma-1.5-4b
+        # med: value CHANGED 2026-09-16 (medgemma-1.5-4b -> llama3.1-aloe-beta-8b,
+        # see the model entry above for the full why) -- alias itself kept
+        # stable, same pattern as q17's rename below, so resident_router
+        # doesn't need touching.
+        med:  llama3.1-aloe-beta-8b
         arch: arch-router-1.5b
         qwe:  qwen3.8-27b-Expert
         qwv:  qwen3.8-27b-Expert-Vision
