@@ -1,13 +1,31 @@
 # ComfyUI: image/video generation backend for the Media Generation roadmap
 # item. Runs mmartial/comfyui-nvidia-docker (ships CUDA 12.9 + a recent
 # PyTorch — Blackwell/RTX 50-series (sm_120) capable, requires NVIDIA driver
-# 570+, which aibox already runs). GPU access is time-sliced alongside
-# llama-swap — see k8s/p0/nvidia-device-plugin.yaml — since this is a
-# single-GPU box. That only lets both pods SCHEDULE at once; it does not
-# make them share VRAM automatically. llama-swap and ComfyUI are not meant
-# to actually generate concurrently — that's coordinated at the app level
-# (a busy-flag + llama-swap's /api/models/unload endpoint, still to be
-# built), not by anything in this manifest.
+# 570+, which aibox already runs).
+#
+# SECOND GPU 2026-09-16 (Eldar's call): a 3060 12GB was added alongside the
+# 5070 Ti, dedicated to Honcho's qwen3-1.7b-cpu model on the llama-swap side
+# (see k8s/p1/llama-swap-configmap.yaml). ComfyUI stays on the 5070 Ti --
+# it needs the bigger card's VRAM, the 3060 doesn't have room for it. Pinned
+# the same way llama-swap's own models are pinned: dropped the
+# `resources.limits.nvidia.com/gpu` device-plugin request (its device
+# selection isn't controllable per physical card once 2 different GPUs
+# exist on the node -- see llama-swap-deployment.yaml's own comment for the
+# full reasoning/kubernetes#133618 citation) and set NVIDIA_VISIBLE_DEVICES
+# directly to GPU 1's index (confirmed via `nvidia-smi -L` after the 3060
+# was installed: GPU 0 = 3060, GPU 1 = 5070 Ti). Unlike llama-swap (which
+# needs to see both cards for its own per-model CUDA_VISIBLE_DEVICES
+# pinning), ComfyUI only ever needs one GPU, so it's pinned directly to "1"
+# rather than "all" -- simpler, and this pod's container never sees the
+# 3060 at all. The former single-GPU time-slicing workaround in
+# k8s/p0/nvidia-device-plugin.yaml is no longer load-bearing for scheduling
+# either this pod or llama-swap's, now that neither requests
+# `nvidia.com/gpu` through the device plugin any more -- left in place
+# since nothing else currently depends on removing it, not touched here.
+# llama-swap and ComfyUI are still not meant to actually generate
+# concurrently -- that's coordinated at the app level (a busy-flag +
+# llama-swap's /api/models/unload endpoint, still to be built), not by
+# anything in this manifest or by GPU placement.
 #
 # Host directories this expects to already exist before first apply (see
 # deploy notes), owned by the uid/gid set in WANTED_UID/WANTED_GID below:
@@ -54,9 +72,8 @@ spec:
               value: normal
             - name: USE_UV
               value: "true"
-          resources:
-            limits:
-              nvidia.com/gpu: 1
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "1"   # 5070 Ti only -- GPU 1, confirmed via nvidia-smi -L
           volumeMounts:
             - name: run
               mountPath: /comfy/mnt
@@ -91,9 +108,10 @@ spec:
 # qdrant-nodeport: points at the same pod the ClusterIP Service above
 # already exposes, nothing about that Service changes. NOT meant for
 # concurrent use with real chat/agent traffic -- see the top-of-file
-# comment: ComfyUI and llama-swap share the one GPU via a full-swap design,
-# so generating an image here will evict whatever chat model is currently
-# loaded.
+# comment: ComfyUI and llama-swap's GPU chat models (everything except
+# qwen3-1.7b-cpu, which lives on its own dedicated 3060) still share the
+# 5070 Ti via a full-swap design, so generating an image here will evict
+# whatever chat model is currently loaded on that card.
 apiVersion: v1
 kind: Service
 metadata:

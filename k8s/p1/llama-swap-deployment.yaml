@@ -8,6 +8,26 @@
 # ArgoCD sync of a config change updates the file on disk but does NOT
 # restart the running llama-swap process automatically. After editing the
 # config, roll the deployment: `kubectl rollout restart deployment/llama-swap -n ai-models`
+#
+# SECOND GPU 2026-09-16 (Eldar's call): a 3060 12GB was added alongside the
+# 5070 Ti so qwen3-1.7b-cpu (Honcho's model, see llama-swap-configmap.yaml's
+# own comment on it) could move off CPU without contending with every other
+# GPU model for the 5070 Ti's VRAM. This pod's child llama-server
+# subprocesses (one per model, spawned by llama-swap itself) each pick a
+# physical card via their own CUDA_VISIBLE_DEVICES env var in the ConfigMap
+# -- so this ONE pod needs to see BOTH physical GPUs at once, which the k8s
+# NVIDIA device plugin can't reliably provide: it hands back one opaque
+# physical device per `nvidia.com/gpu` unit requested (confirmed via
+# kubernetes/kubernetes#133618 -- a plain NVIDIA_VISIBLE_DEVICES pod env var
+# can't add a device the plugin's Allocate() call didn't already mount in),
+# and its device selection isn't controllable per physical card (NVIDIA
+# GitHub discussion #1021). Fix: drop the `resources.limits.nvidia.com/gpu`
+# request entirely (bypasses Allocate() -- never invoked without a resource
+# request) and set NVIDIA_VISIBLE_DEVICES=all directly instead, the same
+# mechanism plain `docker run --gpus all` has always used, independent of
+# k8s device-plugin accounting. Fine on this single-node cluster -- no
+# second node this pod could be scheduled away from. Full reasoning/apply
+# history: gpu-migration-2026-09-15/README.md in this repo.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,9 +54,9 @@ spec:
           ports:
             - containerPort: 8080
               name: http
-          resources:
-            limits:
-              nvidia.com/gpu: 1
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
           volumeMounts:
             - name: config
               mountPath: /etc/llama-swap/config/config.yaml
