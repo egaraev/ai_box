@@ -385,6 +385,25 @@ data:
       # observability without touching any of those callers individually.
       callbacks: ["custom_router_hook.proxy_handler_instance", "prometheus"]
       success_callback: ["langfuse"]
+      # FIXED 2026-09-17: Prometheus's scrapes of /metrics were failing live
+      # with 401 ("Malformed API Key passed in") -- confirmed via Loki logs
+      # once k8s/p8/promtail.yaml's own discovery bug was fixed. LiteLLM's
+      # own docs (docs.litellm.ai/docs/proxy/prometheus) describe this flag
+      # as defaulting to false (no auth needed on /metrics), but a GitHub
+      # security report (BerriAI/litellm#24530: unauthenticated /metrics can
+      # leak multi-tenant PII) suggests the real default was flipped to
+      # require auth in recent builds -- ghcr.io/berriai/litellm:main-latest
+      # (what this cluster runs) clearly enforces it regardless of what the
+      # docs say, so setting this explicitly rather than trusting either the
+      # docs or the observed behavior to hold across image updates. Safe
+      # here for the same reason Postgres/Redis run with no auth elsewhere
+      # in this cluster: single-user homelab, no public ingress, nothing
+      # multi-tenant -- the exact scenario #24530 was warning about doesn't
+      # apply to aibox. Alternative (LiteLLM's dedicated
+      # --prometheus_metrics_port) would need a new port + a new Prometheus
+      # scrape job just to avoid this one flag -- not worth the extra
+      # moving part for a homelab.
+      require_auth_for_metrics_endpoint: false
       # Honcho's embedding calls to nomic-embed-text-v1.5 always pass an
       # explicit `dimensions` param (EMBEDDING_VECTOR_DIMENSIONS=768 in
       # k8s/p2/honcho.yaml) -- LiteLLM's own param-validation treats this as
