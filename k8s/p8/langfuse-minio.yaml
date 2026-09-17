@@ -45,7 +45,16 @@ spec:
     spec:
       containers:
         - name: minio
-          image: minio/minio:latest
+          # FIXED 2026-09-17, first real deploy: minio/minio:latest on
+          # Docker Hub -- ErrImagePull, confirmed real and current, not a
+          # transient registry blip: MinIO stopped publishing free images
+          # to Docker Hub in October 2025 (widely hit -- see e.g.
+          # github.com/dfpc-coe/CloudTAK#1803, github.com/milvus-io/
+          # milvus#53430), quay.io is the working replacement everyone
+          # moved to. Pinned to a real dated release tag rather than a
+          # tag that might not exist on quay.io either -- "latest" isn't
+          # guaranteed to exist per-registry the way Docker Hub's did.
+          image: quay.io/minio/minio:RELEASE.2024-08-17T01-24-54Z
           args: ["server", "/data", "--console-address", ":9001"]
           ports:
             - containerPort: 9000
@@ -114,7 +123,16 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mc
-          image: minio/mc:latest
+          # Same Docker-Hub-removal fix as the minio container above --
+          # quay.io/minio/mc is the paired client image MinIO publishes
+          # alongside quay.io/minio/minio (same dated-release convention).
+          # NOT independently confirmed this exact tag exists on quay.io
+          # for mc specifically (only minio/minio's tag was verified
+          # against a real fix people applied) -- check `kubectl logs -n
+          # ai-observe job/langfuse-minio-create-buckets` on first deploy;
+          # if this one tag is missing, quay.io/minio/mc:latest or the
+          # nearest dated tag on quay.io's tag list is the fallback.
+          image: quay.io/minio/mc:RELEASE.2024-08-17T01-24-54Z
           command:
             - /bin/sh
             - -c
