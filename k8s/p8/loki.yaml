@@ -1,0 +1,152 @@
+# Loki -- log aggregation backend, receives everything promtail.yaml ships
+# from every pod's container logs on aibox. Queried through Grafana
+# (provisioned as a datasource in grafana.yaml), same "internal plumbing,
+# ClusterIP only" reasoning as Prometheus/node-exporter/dcgm-exporter --
+# Eldar never talks to Loki directly.
+#
+# single-binary mode (-target=all): Loki's normal production deployment
+# splits into separate read/write/backend microservices behind an object
+# store (S3/GCS/MinIO) for horizontal scale -- total overkill for one
+# node's worth of logs on a homelab box. -target=all runs every Loki
+# component in one process, and filesystem storage (below) skips the
+# object-store dependency entirely. Same "don't add infra weight without a
+# real reason" call litellm.yaml's top comment makes about Arch-Router, and
+# the same reasoning Loki's own docs give for when single-binary mode is
+# the right choice. Explicitly NOT wired to the LangFuse/MinIO stack the
+# other agent is building in this same namespace this session -- Loki's
+# storage is fully separate, its own PVC below, no shared dependency.
+#
+# grafana/loki:3.7.6 -- confirmed as a real current Loki release tag via a
+# live GitHub-releases search this session (2026-09-17), newer than an
+# initially-assumed 3.3.0 default.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+  namespace: ai-observe
+data:
+  loki.yaml: |
+    auth_enabled: false
+
+    server:
+      http_listen_port: 3100
+
+    common:
+      path_prefix: /loki
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+
+    schema_config:
+      configs:
+        - from: 2024-01-01
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+
+    # Homelab-appropriate limits: promtail is the only client pushing logs
+    # (one node, a few dozen pods), so the defaults Loki ships with are
+    # already generous for this volume -- only bumping the two that a
+    # single-binary/single-tenant deployment with more than a handful of
+    # active pods most commonly hits in practice (ingestion rate and stream
+    # count), so a noisy pod's logs don't get silently dropped.
+    limits_config:
+      ingestion_rate_mb: 16
+      ingestion_burst_size_mb: 32
+      max_streams_per_user: 10000
+      # 30d, matching Prometheus's own retention choice (prometheus.yaml)
+      # for the same "reasonable homelab default, cheap given 1.2T free"
+      # reason -- Loki needs compactor.retention_enabled: true (below) for
+      # this to actually delete old chunks rather than just being a display
+      # default.
+      retention_period: 720h
+
+    compactor:
+      working_directory: /loki/compactor
+      compaction_interval: 10m
+      retention_enabled: true
+      delete_request_store: filesystem
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-data
+  namespace: ai-observe
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: ai-observe
+  labels:
+    app: loki
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # single PVC, single writer -- same reasoning as postgres.yaml/prometheus.yaml
+  selector:
+    matchLabels:
+      app: loki
+  template:
+    metadata:
+      labels:
+        app: loki
+    spec:
+      containers:
+        - name: loki
+          image: grafana/loki:3.7.6
+          args:
+            - -config.file=/etc/loki/loki.yaml
+            - -target=all
+          ports:
+            - containerPort: 3100
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+            - name: data
+              mountPath: /loki
+          # Log ingestion + a handful of PromQL-ish LogQL queries from
+          # Grafana -- moderate, not trivial like node-exporter, since
+          # Loki does real chunk compaction/indexing work in the
+          # background. Generous limit given the free RAM on this box.
+          resources:
+            requests:
+              cpu: "150m"
+              memory: "384Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1536Mi"
+      volumes:
+        - name: config
+          configMap:
+            name: loki-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: loki-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: ai-observe
+spec:
+  selector:
+    app: loki
+  ports:
+    - port: 3100
+      targetPort: 3100
+      name: http

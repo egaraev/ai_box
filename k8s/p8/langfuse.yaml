@@ -1,0 +1,303 @@
+# LangFuse v3 — self-hosted LLM observability/tracing (ai-observe namespace,
+# per README.md's namespace table). Two app processes (langfuse-web: UI +
+# API on :3000, langfuse-worker: async event processor on :3030) sharing
+# four backing stores. Two of those four are NEW dedicated deployments in
+# this same directory (ClickHouse: langfuse-clickhouse.yaml, Minio:
+# langfuse-minio.yaml) because nothing else on this cluster needs an OLAP
+# store or S3-shaped storage. The other two are REUSED rather than
+# duplicated, following this build's own stated philosophy (see
+# k8s/p1/litellm.yaml's top comment: "this whole build has consistently
+# avoided adding infrastructure weight without a real reason"):
+#
+# - Postgres: the existing shared instance in k8s/p2/postgres.yaml
+#   (ai-memory namespace, pgvector/pgvector:pg15, single "postgres" user,
+#   POSTGRES_HOST_AUTH_METHOD=trust). LangFuse gets its own logical
+#   database (`langfuse`) on it rather than a second Postgres pod.
+#   IMPORTANT MANUAL STEP: this database can NOT be created via the
+#   existing postgres-init ConfigMap (k8s/p2/postgres.yaml) -- that
+#   ConfigMap's init.sql only ever runs once, against a freshly-initialized
+#   EMPTY data volume (see that file's own comment on why subPath is fine
+#   there), and this Postgres already has Honcho's data on it. So the
+#   `langfuse` database has to be created by hand, once, via kubectl exec --
+#   see the report this file shipped alongside for the exact command
+#   (not automated here on purpose, same reasoning as postgres-init not
+#   being reusable for this).
+#
+# - Redis: the existing shared instance in k8s/p2/redis.yaml (ai-memory
+#   namespace, redis:8.2, no auth, no persistence). LangFuse gets its own
+#   logical DB index (3) via REDIS_CONNECTION_STRING's /3 suffix, to stay
+#   clear of db 0 which media-gen-mcp's busy-flag key and (most likely)
+#   Honcho's own client both default to (see apps/media-gen-mcp/server.py's
+#   REDIS_URL default and k8s/p1/litellm.yaml's busy-flag comments).
+#   NOT YET VERIFIED (2026-09-17): this separation was NOT independently
+#   confirmed against Honcho's actual redis-py client config -- Honcho may
+#   also default to db 0 (most Redis clients do), but nothing here checked
+#   its source/env to be sure db 3 is actually clear of a THIRD unrelated
+#   consumer. If LangFuse's queue/cache behavior looks wrong after deploy,
+#   check for a collision here first.
+#
+# IMAGES: langfuse/langfuse:3 (web) and langfuse/langfuse-worker:3 (worker)
+# -- these are the documented self-host images for LangFuse v3 per its own
+# docs, but the EXACT current tags weren't independently re-verified against
+# Docker Hub/GHCR this session (same caveat as the ClickHouse/Minio tags in
+# the other two files in this directory) -- confirm before/at first deploy.
+#
+# NEXTAUTH_URL below uses a placeholder LAN IP -- this session has no way to
+# know aibox's actual LAN address. Eldar: replace <aibox-lan-ip> with the
+# real one (same placeholder pattern vault-mcp-deployment.yaml's comments
+# use for http://<aibox-lan-ip>:30081/) before this will actually work for
+# browser login redirects.
+#
+# SECRETS (all namespace ai-observe, created directly on the cluster per
+# k8s/secrets/README.md, never committed -- see this file's accompanying
+# report for the exact kubectl commands):
+#   - postgres-secret (ai-memory, EXISTING -- patched with a new
+#     DATABASE_URL key pointed at the new `langfuse` db, `password` key
+#     left untouched)
+#   - langfuse-secret (NEW -- NEXTAUTH_SECRET / SALT / ENCRYPTION_KEY)
+#   - langfuse-clickhouse-secret (NEW -- CLICKHOUSE_USER / CLICKHOUSE_PASSWORD)
+#   - langfuse-minio-secret (NEW -- MINIO_ROOT_USER / MINIO_ROOT_PASSWORD,
+#     doubles as the S3 access key/secret key LangFuse itself uses)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-web
+  namespace: ai-observe
+  labels:
+    app: langfuse-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: langfuse-web
+  template:
+    metadata:
+      labels:
+        app: langfuse-web
+    spec:
+      containers:
+        - name: langfuse-web
+          image: langfuse/langfuse:3
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: LANGFUSE_DATABASE_URL
+            - name: CLICKHOUSE_URL
+              value: "http://langfuse-clickhouse.ai-observe.svc.cluster.local:8123"
+            - name: CLICKHOUSE_MIGRATION_URL
+              value: "clickhouse://langfuse-clickhouse.ai-observe.svc.cluster.local:9000"
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-clickhouse-secret
+                  key: CLICKHOUSE_USER
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-clickhouse-secret
+                  key: CLICKHOUSE_PASSWORD
+            - name: REDIS_CONNECTION_STRING
+              value: "redis://redis.ai-memory.svc.cluster.local:6379/3"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_BUCKET
+              value: "langfuse-events"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_REGION
+              value: "auto"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
+              value: "http://langfuse-minio.ai-observe.svc.cluster.local:9000"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_USER
+            - name: LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_PASSWORD
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_BUCKET
+              value: "langfuse-media"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_REGION
+              value: "auto"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
+              value: "http://langfuse-minio.ai-observe.svc.cluster.local:9000"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_USER
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_PASSWORD
+            # PLACEHOLDER -- see this file's top comment. Replace
+            # <aibox-lan-ip> with aibox's real LAN address before deploy.
+            - name: NEXTAUTH_URL
+              value: "http://<aibox-lan-ip>:30350"
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-secret
+                  key: NEXTAUTH_SECRET
+            - name: SALT
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-secret
+                  key: SALT
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-secret
+                  key: ENCRYPTION_KEY
+            - name: TELEMETRY_ENABLED
+              value: "false"
+          resources:
+            requests:
+              cpu: "300m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-web
+  namespace: ai-observe
+spec:
+  # NodePort: the one piece of this stack Eldar needs to browse to directly
+  # (ClickHouse/Minio/langfuse-worker all stay ClusterIP-only, same
+  # plain-NodePort-no-ingress pattern as vault-uploader/comfyui-nodeport/
+  # router-dashboard elsewhere in this repo -- Eldar's explicit call per
+  # vault-mcp-deployment.yaml's comment: "for now lets go with nodeport
+  # just like all other services we have now").
+  type: NodePort
+  selector:
+    app: langfuse-web
+  ports:
+    - port: 3000
+      targetPort: 3000
+      nodePort: 30350
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-worker
+  namespace: ai-observe
+  labels:
+    app: langfuse-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: langfuse-worker
+  template:
+    metadata:
+      labels:
+        app: langfuse-worker
+    spec:
+      containers:
+        - name: langfuse-worker
+          image: langfuse/langfuse-worker:3
+          ports:
+            - containerPort: 3030
+              name: http
+          # Same env set as langfuse-web above -- the worker needs the same
+          # DB/ClickHouse/Redis/S3 access to process the async event queue.
+          # NEXTAUTH_* are web-only (auth/session, not needed by the
+          # worker) and deliberately left out here.
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: LANGFUSE_DATABASE_URL
+            - name: CLICKHOUSE_URL
+              value: "http://langfuse-clickhouse.ai-observe.svc.cluster.local:8123"
+            - name: CLICKHOUSE_MIGRATION_URL
+              value: "clickhouse://langfuse-clickhouse.ai-observe.svc.cluster.local:9000"
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-clickhouse-secret
+                  key: CLICKHOUSE_USER
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-clickhouse-secret
+                  key: CLICKHOUSE_PASSWORD
+            - name: REDIS_CONNECTION_STRING
+              value: "redis://redis.ai-memory.svc.cluster.local:6379/3"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_BUCKET
+              value: "langfuse-events"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_REGION
+              value: "auto"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
+              value: "http://langfuse-minio.ai-observe.svc.cluster.local:9000"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_USER
+            - name: LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_PASSWORD
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_BUCKET
+              value: "langfuse-media"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_REGION
+              value: "auto"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
+              value: "http://langfuse-minio.ai-observe.svc.cluster.local:9000"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_USER
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_PASSWORD
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-secret
+                  key: ENCRYPTION_KEY
+            - name: TELEMETRY_ENABLED
+              value: "false"
+          resources:
+            requests:
+              cpu: "300m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-worker
+  namespace: ai-observe
+spec:
+  selector:
+    app: langfuse-worker
+  ports:
+    - port: 3030
+      targetPort: 3030
+      name: http

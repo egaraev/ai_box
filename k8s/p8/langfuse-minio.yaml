@@ -1,0 +1,136 @@
+# Minio for LangFuse v3 — the S3-compatible blob store LangFuse uses for
+# event/media uploads (LANGFUSE_S3_EVENT_UPLOAD_* / _MEDIA_UPLOAD_* below).
+# NEW dedicated deployment: nothing else on this cluster needs S3-shaped
+# storage today, so unlike Postgres/Redis (reused from k8s/p2, see
+# langfuse.yaml's top comment) this one genuinely earns its own moving part.
+#
+# NOT YET VERIFIED (2026-09-17): image tag `minio/minio:latest` -- a pinned
+# recent release tag would be better practice (avoids surprise upgrades on
+# pod reschedule), but no specific current tag was independently confirmed
+# this session. Consider pinning to whatever `minio/minio:RELEASE.<date>`
+# is current before/at first real deploy.
+#
+# Credentials: new `langfuse-minio-secret` (namespace ai-observe),
+# MINIO_ROOT_USER/MINIO_ROOT_PASSWORD -- the standard minio image's own env
+# vars. See k8s/secrets/README.md for the kubectl command.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: langfuse-minio-data
+  namespace: ai-observe
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-minio
+  namespace: ai-observe
+  labels:
+    app: langfuse-minio
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: langfuse-minio
+  template:
+    metadata:
+      labels:
+        app: langfuse-minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:latest
+          args: ["server", "/data", "--console-address", ":9001"]
+          ports:
+            - containerPort: 9000
+              name: api
+            - containerPort: 9001
+              name: console
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: langfuse-minio-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-minio
+  namespace: ai-observe
+spec:
+  selector:
+    app: langfuse-minio
+  ports:
+    - port: 9000
+      targetPort: 9000
+      name: api
+    - port: 9001
+      targetPort: 9001
+      name: console
+---
+# One-shot bucket creation, using the mc (Minio Client) image rather than
+# hand-rolling an init script -- `mc mb --ignore-existing` is idempotent, so
+# this Job is safe to `kubectl apply -f` repeatedly (e.g. after any other
+# change to this file triggers a re-sync) without erroring on buckets that
+# already exist. Two buckets, matching LANGFUSE_S3_EVENT_UPLOAD_BUCKET and
+# LANGFUSE_S3_EVENT_MEDIA_UPLOAD_BUCKET... (see langfuse.yaml) --
+# langfuse-events (raw ingested event blobs) and langfuse-media (uploaded
+# media referenced from traces, e.g. images passed to multimodal calls).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: langfuse-minio-create-buckets
+  namespace: ai-observe
+spec:
+  activeDeadlineSeconds: 120
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: minio/mc:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              mc alias set langfuse-minio http://langfuse-minio.ai-observe.svc.cluster.local:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+              mc mb --ignore-existing langfuse-minio/langfuse-events
+              mc mb --ignore-existing langfuse-minio/langfuse-media
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_PASSWORD

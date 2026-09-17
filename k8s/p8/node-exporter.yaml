@@ -1,0 +1,120 @@
+# node-exporter: host-level metrics (CPU, memory, disk, network, load) for
+# the aibox node itself, scraped by Prometheus (see prometheus.yaml's scrape
+# config, job "node-exporter"). Single-node k3s cluster, so this DaemonSet
+# only ever schedules one pod -- but DaemonSet is still the right kind (not
+# a plain Deployment) since that's what actually gives it the hostPath
+# mounts and matches what every other node-exporter deployment on earth
+# looks like, in case aibox ever does grow a second node.
+#
+# hostNetwork/hostPID NOT set, deliberately -- the more common upstream
+# example (kube-prometheus-stack's own manifests, most blog walkthroughs)
+# runs node-exporter with hostNetwork: true, hostPID: true. Neither is
+# actually needed for the standard collector set (cpu, meminfo, diskstats,
+# filesystem, netdev, loadavg, filefd): those all read from /proc and /sys
+# files that report HOST-WIDE state regardless of which PID or network
+# namespace the reading process sits in -- /proc/stat and /proc/meminfo
+# aren't scoped per-PID-namespace, they're the same file contents no matter
+# who reads them, as long as the container can see the real /proc (hence
+# the hostPath mounts below, not a "real" host view via hostPID).
+# hostNetwork mainly matters for things this pod doesn't need: exposing the
+# metrics port directly on the node's own IP (useful if something outside
+# the cluster needs to scrape it) or collectors that inspect the host's
+# actual network namespace/interfaces directly rather than via /proc/net --
+# not the case here, Prometheus scrapes this pod through the ClusterIP
+# Service below, staying entirely inside the cluster network. Simpler and
+# marginally more contained (no host network namespace access) with no
+# real downside for this use case.
+#
+# prom/node-exporter:v1.12.1 -- confirmed as the latest node_exporter GitHub
+# release (v1.12.1, 2026-07-14) via a live search this session (2026-09-17),
+# used in place of an older assumed default.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: ai-observe
+  labels:
+    app: node-exporter
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+      # Standard node-exporter annotation so it's also self-discoverable via
+      # the pod-role scrape config in prometheus.yaml, on top of the
+      # explicit "node-exporter" job -- harmless duplication (Prometheus
+      # dedupes by target address+labels never actually double-scrapes the
+      # same endpoint twice from two configs that happen to agree), kept
+      # only as documentation of intent, not relied on.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      containers:
+        - name: node-exporter
+          image: prom/node-exporter:v1.12.1
+          args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/host/root
+            # Standard exclusion list (upstream's own recommended default)
+            # so the filesystem collector doesn't try to stat every
+            # container's overlay mount and every k3s-internal bind mount
+            # on the node -- without this, `df`-style metrics get noisy
+            # with hundreds of irrelevant container-layer mount points.
+            - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/pods/.+|run/k3s/.+)($|/)
+            - --collector.netclass.ignored-devices=^(veth.*|docker.*|cni.*|flannel.*|cali.*)$
+          ports:
+            - containerPort: 9100
+              name: metrics
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: sys
+              mountPath: /host/sys
+              readOnly: true
+            - name: root
+              mountPath: /host/root
+              readOnly: true
+              mountPropagation: HostToContainer
+          # Genuinely lightweight -- node-exporter is a single small Go
+          # binary that just reads and reformats /proc and /sys files, no
+          # real CPU work. Limits are generous headroom, not a sizing
+          # exercise, given how much spare RAM/CPU this single-node box has.
+          resources:
+            requests:
+              cpu: "25m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: root
+          hostPath:
+            path: /
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-exporter
+  namespace: ai-observe
+spec:
+  # ClusterIP only -- this is internal plumbing Prometheus scrapes, not
+  # something Eldar ever opens in a browser. Grafana (the actual query UI)
+  # is the one thing in this stack that gets a NodePort -- see grafana.yaml.
+  selector:
+    app: node-exporter
+  ports:
+    - port: 9100
+      targetPort: 9100
+      name: metrics

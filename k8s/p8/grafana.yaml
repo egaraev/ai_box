@@ -1,0 +1,329 @@
+# Grafana -- the one thing in this observability stack Eldar actually opens
+# in a browser (see NodePort Service at the bottom); everything else in
+# k8s/p8 (Prometheus, Loki, node-exporter, dcgm-exporter, promtail) is
+# ClusterIP-only plumbing this pod queries on his behalf.
+#
+# Both datasources (Prometheus + Loki) and one starter dashboard are
+# provisioned automatically via ConfigMaps mounted at Grafana's own
+# provisioning paths, so Eldar doesn't have to click through
+# Connections -> Data Sources by hand after first deploy -- same spirit as
+# postgres-init.yaml auto-running init.sql instead of a manual step.
+#
+# grafana/grafana:11.4.0 -- kept at the task's given default. A live search
+# this session (2026-09-17) turned up Grafana's own docs pages for
+# "What's new in v12.0" through "v12.4", strongly suggesting the 12.x line
+# is now current upstream, but did NOT turn up a specific, confirmed
+# CURRENT docker tag to replace 11.4.0 with (Docker Hub's tag list wasn't
+# directly readable from here) -- flagging this explicitly rather than
+# guessing a version number. Worth checking
+# https://hub.docker.com/r/grafana/grafana/tags before first deploy; 11.4.0
+# will still work (the datasource/dashboard provisioning format used below
+# has been stable across both major lines), just isn't the newest available.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  namespace: ai-observe
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      # 5Gi -- Grafana's own state here is just its sqlite db (dashboards,
+      # users, the provisioning-created datasources) plus plugin cache, not
+      # any of the actual metrics/log data (that lives in Prometheus's and
+      # Loki's own PVCs) -- 5Gi is already generous for that.
+      storage: 5Gi
+---
+# Datasource provisioning -- read once at Grafana startup from
+# /etc/grafana/provisioning/datasources (Grafana's own documented
+# provisioning mechanism, not a custom script). Both URLs use the
+# standard <service>.<namespace>.svc.cluster.local in-cluster DNS form,
+# same as every other cross-service reference in this repo (e.g.
+# vault-mcp-deployment.yaml's QDRANT_URL).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: ai-observe
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus.ai-observe.svc.cluster.local:9090
+        isDefault: true
+        editable: true
+      - name: Loki
+        type: loki
+        access: proxy
+        url: http://loki.ai-observe.svc.cluster.local:3100
+        editable: true
+---
+# Dashboard PROVIDER config -- tells Grafana to load any dashboard JSON it
+# finds under /var/lib/grafana/dashboards (separate from the datasources
+# ConfigMap above; Grafana's provisioning system splits "where do
+# dashboards come from" from the dashboard JSON itself).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: ai-observe
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: aibox
+        orgId: 1
+        folder: aibox
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        options:
+          path: /var/lib/grafana/dashboards
+---
+# The starter dashboard itself -- deliberately minimal (node CPU/RAM, GPU
+# utilization/VRAM/temp, pod restart counts), NOT an attempt at an
+# exhaustive dashboard; Eldar can build out more panels himself once this
+# is live and he knows what he actually wants to watch day to day.
+#
+# GPU panel queries use dcgm-exporter's real, standard metric names
+# (DCGM_FI_DEV_GPU_UTIL, DCGM_FI_DEV_FB_USED, DCGM_FI_DEV_GPU_TEMP -- these
+# are NVIDIA's own dcgm-exporter field names, unchanged across versions,
+# not something specific to the 4.6.0-4.8.3 tag pinned in
+# dcgm-exporter.yaml) -- these are the standard/documented dcgm-exporter
+# metric names, not independently re-verified against a live scrape this
+# session (dcgm-exporter itself carries its own "not yet verified on real
+# hardware" flag, see that file's top comment) -- if the panels come up
+# empty after first deploy, check `curl dcgm-exporter.ai-observe:9400/metrics`
+# for the actual metric names being exposed before assuming the dashboard
+# JSON is wrong.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-aibox
+  namespace: ai-observe
+data:
+  aibox-overview.json: |
+    {
+      "title": "aibox overview",
+      "uid": "aibox-overview",
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "time": { "from": "now-6h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "title": "Node CPU usage",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "targets": [
+            {
+              "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+              "legendFormat": "CPU busy %"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] }
+        },
+        {
+          "id": 2,
+          "title": "Node memory used",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "targets": [
+            {
+              "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
+              "legendFormat": "Used"
+            },
+            {
+              "expr": "node_memory_MemTotal_bytes",
+              "legendFormat": "Total"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+        },
+        {
+          "id": 3,
+          "title": "GPU utilization",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "targets": [
+            {
+              "expr": "DCGM_FI_DEV_GPU_UTIL",
+              "legendFormat": "GPU {{gpu}} ({{modelName}})"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "percent", "max": 100 }, "overrides": [] }
+        },
+        {
+          "id": 4,
+          "title": "GPU VRAM used",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "targets": [
+            {
+              "expr": "DCGM_FI_DEV_FB_USED * 1024 * 1024",
+              "legendFormat": "GPU {{gpu}} ({{modelName}})"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+        },
+        {
+          "id": 5,
+          "title": "GPU temperature",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "targets": [
+            {
+              "expr": "DCGM_FI_DEV_GPU_TEMP",
+              "legendFormat": "GPU {{gpu}} ({{modelName}})"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "celsius" }, "overrides": [] }
+        },
+        {
+          "id": 6,
+          "title": "Pod restarts (last 1h, by namespace/pod)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "targets": [
+            {
+              "expr": "increase(kube_pod_container_status_restarts_total[1h])",
+              "legendFormat": "{{namespace}}/{{pod}}"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: ai-observe
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # single PVC (sqlite db), same reasoning as postgres.yaml/prometheus.yaml
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      # Grafana's container runs as a non-root uid (472) by default and
+      # expects to own its data dir -- fsGroup ensures the PVC's files are
+      # group-writable by that uid regardless of what local-path-provisioner
+      # initializes ownership to, same class of problem ComfyUI's
+      # WANTED_UID/WANTED_GID dance works around a different way.
+      securityContext:
+        fsGroup: 472
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.4.0
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            # Credentials from a NEW Secret (grafana-secret), created
+            # directly on the cluster via kubectl -- never a literal value
+            # in this file. Same pattern as postgres-secret in
+            # postgres.yaml; see k8s/secrets/README.md, which needs a new
+            # section added for grafana-secret (not added here -- that file
+            # is the shared index another pass should update).
+            - name: GF_SECURITY_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-secret
+                  key: admin-user
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-secret
+                  key: admin-password
+            # No public ingress exists yet (see README.md / every other
+            # NodePort service in this repo) so Grafana doesn't know its
+            # own externally-reachable URL -- setting this avoids Grafana
+            # logging startup warnings about a mismatched root_url and
+            # keeps any auto-generated links (e.g. in future alert
+            # notifications) pointing somewhere at least plausible.
+            - name: GF_SERVER_ROOT_URL
+              value: "http://localhost:30300/"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/grafana
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboard-aibox
+              mountPath: /var/lib/grafana/dashboards
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: grafana-data
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+        - name: dashboard-aibox
+          configMap:
+            name: grafana-dashboard-aibox
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: ai-observe
+spec:
+  selector:
+    app: grafana
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+---
+# Browser access -- plain NodePort, same deliberate no-ingress-yet call as
+# every other Eldar-facing service in this repo (see vault-mcp-deployment.yaml's
+# vault-uploader comment and comfyui-deployment.yaml's comfyui-nodeport
+# comment for the same reasoning restated per-file). Port 30300 picked from
+# outside the already-in-use NodePort list (30080, 30081, 30119, 30188,
+# 30400, 30633, 30642, 30678, 30808, 30860) called out in the task for this
+# build. Reachable at http://<aibox-lan-ip>:30300/ once deployed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-nodeport
+  namespace: ai-observe
+spec:
+  type: NodePort
+  selector:
+    app: grafana
+  ports:
+    - port: 3000
+      targetPort: 3000
+      nodePort: 30300
+      name: http

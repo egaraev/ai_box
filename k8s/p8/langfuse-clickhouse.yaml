@@ -1,0 +1,109 @@
+# ClickHouse for LangFuse v3 — the OLAP store LangFuse uses for
+# traces/observations/scores (high-volume, columnar, append-mostly event
+# data). This is a NEW dedicated deployment, not a reuse of anything already
+# on this cluster: nothing else here needs an OLAP store, unlike Postgres/
+# Redis below which LangFuse shares with Honcho/LiteLLM rather than
+# duplicating (see langfuse.yaml's top comment for that reasoning).
+#
+# NOT YET VERIFIED (2026-09-17): clickhouse/clickhouse-server:24.8 was
+# picked as "a recent stable LTS-ish tag" going into this session, but
+# wasn't independently re-checked against ClickHouse's current release page
+# right now -- confirm it still resolves (and isn't meaningfully behind)
+# before/at first real deploy, same spirit as the OpenRouter model-list
+# caveat in k8s/p1/litellm.yaml.
+#
+# Credentials come from a new `langfuse-clickhouse-secret` (namespace
+# ai-observe) -- CLICKHOUSE_USER/CLICKHOUSE_PASSWORD are the standard
+# clickhouse-server image's own auth env vars, not something LangFuse-
+# specific. See k8s/secrets/README.md for the exact kubectl command (added
+# there by the orchestrating session, not this file).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: langfuse-clickhouse-data
+  namespace: ai-observe
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-clickhouse
+  namespace: ai-observe
+  labels:
+    app: langfuse-clickhouse
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: langfuse-clickhouse
+  template:
+    metadata:
+      labels:
+        app: langfuse-clickhouse
+    spec:
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:24.8
+          ports:
+            - containerPort: 8123
+              name: http
+            - containerPort: 9000
+              name: native
+          env:
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-clickhouse-secret
+                  key: CLICKHOUSE_USER
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-clickhouse-secret
+                  key: CLICKHOUSE_PASSWORD
+            # Lets the above user manage/create the langfuse db itself
+            # (LangFuse's own migration step does `CREATE DATABASE` on
+            # ClickHouse the same way it does on Postgres) instead of only
+            # being usable against a pre-existing db.
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+          # Single-node home-lab sizing, not a false-scarcity guess --
+          # cluster has 54Gi RAM / 1.2T disk free per the P8 build brief.
+          # ClickHouse itself recommends more for production OLAP workloads,
+          # but LangFuse's own trace/observation volume on a single-user
+          # homelab is nowhere near that scale.
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: langfuse-clickhouse-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-clickhouse
+  namespace: ai-observe
+spec:
+  selector:
+    app: langfuse-clickhouse
+  ports:
+    - port: 8123
+      targetPort: 8123
+      name: http
+    - port: 9000
+      targetPort: 9000
+      name: native

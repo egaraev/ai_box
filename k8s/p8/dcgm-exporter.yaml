@@ -1,0 +1,133 @@
+# dcgm-exporter: NVIDIA's own GPU metrics exporter (utilization, VRAM used,
+# temperature, power draw, etc. per physical GPU), scraped by Prometheus
+# (see prometheus.yaml's scrape config, job "dcgm-exporter") and rendered
+# on the "GPU" row of the starter Grafana dashboard (grafana.yaml).
+#
+# Image: nvcr.io/nvidia/k8s/dcgm-exporter:4.6.0-4.8.3-distroless -- confirmed
+# as NVIDIA's current tag via their own GitHub repo (NVIDIA/dcgm-exporter)
+# as of this session, 2026-09-17.
+#
+# NOT YET VERIFIED (flagging honestly, same discipline as hermes-agent.yaml's
+# "/mcp" mount-path comment and litellm.yaml's various NOT FULLY VERIFIED
+# notes): the exact securityContext/capability requirement below.
+# NVIDIA's own quickstart docs for dcgm-exporter assume it's deployed via
+# the full GPU Operator (a separate NVIDIA-maintained Helm chart that
+# manages the driver, toolkit, AND dcgm-exporter together as one coupled
+# unit) -- NVIDIA's own docs describe that as the more commonly-tested,
+# more commonly-deployed path. aibox does NOT run the GPU Operator: the
+# device plugin here is deployed standalone (k8s/p0/nvidia-device-plugin.yaml,
+# driver managed directly on the host, k3s's own "nvidia" RuntimeClass),
+# same reasoning as everywhere else in this repo ("avoid adding
+# infrastructure weight without a real reason" -- see litellm.yaml's top
+# comment). That means dcgm-exporter here is running OUTSIDE the
+# environment NVIDIA actually tests it in, and the SYS_ADMIN capability +
+# privileged-ish securityContext below is carried over from NVIDIA's
+# published standalone Helm chart values as a best-effort translation, not
+# something confirmed working against aibox's actual two-GPU (RTX 3060 +
+# RTX 5070 Ti) hardware. CHECK ON FIRST DEPLOY: `kubectl logs -n ai-observe
+# -l app=dcgm-exporter` -- if it crashes or can't attach to NVML, the most
+# likely fix is loosening/adjusting this securityContext block, not
+# anything in the scrape config.
+#
+# NVIDIA_VISIBLE_DEVICES=all (not pinned to one GPU like ComfyUI's "1" or
+# llama-swap's per-model pinning) -- this pod's whole purpose is reporting
+# metrics for BOTH physical cards (the 3060 and the 5070 Ti) regardless of
+# which one any given workload pod currently holds via the device plugin's
+# time-sliced nvidia.com/gpu claims. It doesn't compete for GPU compute
+# time with llama-swap/ComfyUI, it just reads NVML state.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: ai-observe
+  labels:
+    app: dcgm-exporter
+spec:
+  selector:
+    matchLabels:
+      app: dcgm-exporter
+  template:
+    metadata:
+      labels:
+        app: dcgm-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9400"
+    spec:
+      # Same RuntimeClass requirement as every other GPU-touching pod on
+      # aibox (k8s/p0/nvidia-device-plugin.yaml's own comment: k3s registers
+      # "nvidia" as available but not default, pods must opt in explicitly).
+      runtimeClassName: nvidia
+      # Same toleration nvidia-device-plugin-daemonset carries -- copied
+      # defensively in case aibox's node ever does carry an
+      # nvidia.com/gpu:NoSchedule taint (no other manifest in this repo
+      # needs this toleration today, which suggests the taint isn't
+      # actually applied, but costs nothing to include for a DaemonSet that
+      # specifically needs the GPU to function at all).
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: dcgm-exporter
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:4.6.0-4.8.3-distroless
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            # Standard dcgm-exporter env var telling it which port to serve
+            # metrics on -- matches the Service/containerPort below.
+            - name: DCGM_EXPORTER_LISTEN
+              value: ":9400"
+          ports:
+            - containerPort: 9400
+              name: metrics
+          # UNVERIFIED (see top-of-file comment): this securityContext is
+          # translated from NVIDIA's published standalone Helm values for
+          # dcgm-exporter, not confirmed against a real GPU-Operator-free
+          # deployment. SYS_ADMIN is what DCGM's profiling metrics
+          # (occupancy/SM-utilization-class counters) need to program the
+          # GPU's hardware performance counters; the base utilization/VRAM/
+          # temp metrics the starter dashboard actually uses may work with
+          # a narrower capability set -- if this pod fails to start due to
+          # a PodSecurity/admission restriction, that's the first thing to
+          # loosen (this cluster has no PodSecurity policy configured today,
+          # so it likely isn't the blocker, but flagging it regardless).
+          securityContext:
+            runAsNonRoot: false
+            capabilities:
+              add: ["SYS_ADMIN"]
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "300m"
+              memory: "512Mi"
+          volumeMounts:
+            # dcgm-exporter needs to see the host's NVIDIA device nodes
+            # directly to talk NVML/DCGM to the driver -- same reasoning as
+            # every other GPU pod on aibox, just exposed here via the
+            # nvidia RuntimeClass rather than an explicit hostPath (the
+            # RuntimeClass's containerd config handles device node
+            # injection, same as llama-swap/ComfyUI/the device plugin).
+            - name: pod-gpu-resources
+              mountPath: /var/lib/kubelet/pod-resources
+      volumes:
+        - name: pod-gpu-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dcgm-exporter
+  namespace: ai-observe
+spec:
+  # ClusterIP only -- internal, scraped by Prometheus, same reasoning as
+  # node-exporter's Service.
+  selector:
+    app: dcgm-exporter
+  ports:
+    - port: 9400
+      targetPort: 9400
+      name: metrics

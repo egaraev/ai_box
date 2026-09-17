@@ -1,0 +1,115 @@
+# kube-state-metrics -- NOT one of the six components originally scoped for
+# this build (node-exporter/dcgm-exporter/prometheus/grafana/loki/promtail),
+# added here anyway because the starter Grafana dashboard's "pod restart
+# counts" panel needs a metric (kube_pod_container_status_restarts_total)
+# that neither node-exporter nor kubelet/cAdvisor actually expose --
+# restart counts are POD STATUS as tracked by the API server, not a host or
+# container-runtime stat, and kube-state-metrics is the standard, minimal,
+# official component that turns API-server object state (pod status,
+# deployment replica counts, etc.) into Prometheus metrics. Flagging this
+# explicitly rather than silently shipping a dashboard panel that would
+# show "No data" forever -- same honesty convention as every other
+# NOT-independently-verified flag in this stack (see dcgm-exporter.yaml,
+# promtail.yaml). Small, stateless, read-only against the API server, no
+# host access, no PVC -- low-risk addition.
+#
+# registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.19.1 -- confirmed
+# as a real current release tag via a live GitHub search this session
+# (2026-09-17).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+  namespace: ai-observe
+---
+# Read-only, cluster-wide, and broader than prometheus.yaml's own
+# ClusterRole (pods/deployments/replicasets/statefulsets/daemonsets/jobs/
+# nodes/etc.) -- this is the standard upstream kube-state-metrics RBAC set,
+# trimmed to just the object kinds actually in use on aibox rather than
+# copying every resource kind upstream's full manifest lists (no
+# StatefulSets exist on this cluster today, for example, but the verb is
+# cheap to leave in for when one does).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-state-metrics
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "services", "endpoints", "namespaces", "persistentvolumeclaims", "persistentvolumes"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-state-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-state-metrics
+subjects:
+  - kind: ServiceAccount
+    name: kube-state-metrics
+    namespace: ai-observe
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: ai-observe
+  labels:
+    app: kube-state-metrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kube-state-metrics
+  template:
+    metadata:
+      labels:
+        app: kube-state-metrics
+      # Picked up automatically by prometheus.yaml's generic
+      # "kubernetes-pods" scrape job -- no dedicated static job needed in
+      # prometheus.yaml, same auto-discovery mechanism intended for
+      # LiteLLM's own /metrics once that annotation lands on its Service.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      serviceAccountName: kube-state-metrics
+      containers:
+        - name: kube-state-metrics
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.19.1
+          ports:
+            - containerPort: 8080
+              name: http-metrics
+            - containerPort: 8081
+              name: telemetry
+          # Reads API server object state and reformats it -- no host
+          # access, no storage, genuinely tiny even on a cluster many times
+          # aibox's size.
+          resources:
+            requests:
+              cpu: "25m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: ai-observe
+spec:
+  selector:
+    app: kube-state-metrics
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http-metrics

@@ -1,0 +1,259 @@
+# Prometheus -- the metrics store/query engine everything else in k8s/p8
+# feeds (node-exporter, dcgm-exporter, k3s's own kubelet/cAdvisor, and any
+# future app that exposes /metrics with a prometheus.io/scrape: "true"
+# Service annotation, e.g. LiteLLM's own metrics endpoint once the other
+# agent building k8s/p1/litellm.yaml this session wires that annotation
+# onto its Service -- nothing here hardcodes litellm, the pod-role scrape
+# config below picks it up automatically the moment that annotation exists).
+# Grafana (grafana.yaml) is the thing Eldar actually opens in a browser;
+# this stays ClusterIP-only, same "internal plumbing" reasoning as
+# node-exporter/dcgm-exporter/Loki.
+#
+# Single replica Deployment, not a StatefulSet -- this is a one-node
+# homelab cluster with local-path-provisioner (ReadWriteOnce, single-node
+# anyway), so a StatefulSet's ordered-identity guarantees buy nothing here
+# that a plain Deployment + PVC doesn't already give, same reasoning
+# postgres.yaml already uses (Deployment + strategy: Recreate, not a
+# StatefulSet, for a single-instance stateful service on this cluster).
+#
+# prom/prometheus:v3.13.0 -- confirmed as an actual current-ish stable
+# release tag via a live GitHub-releases/SourceForge-mirror search this
+# session (2026-09-17); a Renovate PR seen in the same search referenced
+# v3.14.0 as newer still, so it's possible an even newer patch exists by
+# the time this is actually deployed -- worth a quick check against
+# https://github.com/prometheus/prometheus/releases before first apply.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: ai-observe
+---
+# Cluster-wide (not namespaced) read access -- required for the
+# kubernetes_sd_configs discovery below to enumerate nodes/pods/endpoints
+# across ALL namespaces (ai-models, ai-memory, ai-mcp, etc.), not just
+# ai-observe, and for the node role's /metrics/cadvisor proxy scrape via
+# the API server's /nodes/<name>/proxy/ subresource. This is the first
+# ClusterRole in this repo (everything before P8 has been plain namespaced
+# Deployments) -- standard, minimal read-only set lifted from Prometheus's
+# own published example RBAC, nothing custom.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/proxy", "nodes/metrics", "services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["extensions", "networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: ai-observe
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: ai-observe
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 30s
+      evaluation_interval: 30s
+
+    scrape_configs:
+      # Prometheus scraping itself -- standard, lets the starter Grafana
+      # dashboard (or Eldar poking around later) confirm the scraper is
+      # alive/healthy from inside its own data.
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+
+      - job_name: node-exporter
+        static_configs:
+          - targets: ["node-exporter.ai-observe.svc.cluster.local:9100"]
+
+      - job_name: dcgm-exporter
+        static_configs:
+          - targets: ["dcgm-exporter.ai-observe.svc.cluster.local:9400"]
+
+      # kubelet + cAdvisor -- per-pod CPU/memory (container_cpu_usage_seconds_total,
+      # container_memory_working_set_bytes, etc.), the numbers the "pod
+      # restart counts" and general container-resource panels on the
+      # starter dashboard draw from. k3s's kubelet exposes this over HTTPS
+      # on :10250 using the node's own (self-signed, kubelet-generated)
+      # serving cert -- insecure_skip_verify is the standard way every
+      # published kube-prometheus example handles that, not a shortcut
+      # specific to this cluster. bearer_token_file/ca_file on the second
+      # entry auth the scrape itself against the API server's proxy path.
+      - job_name: kubelet
+        scheme: https
+        tls_config:
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/${1}/proxy/metrics
+
+      - job_name: cadvisor
+        scheme: https
+        tls_config:
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+
+      # Generic pod auto-discovery: any pod in ANY namespace whose Service
+      # (or the pod itself) carries a prometheus.io/scrape: "true"
+      # annotation gets scraped automatically, honoring optional
+      # prometheus.io/path (default /metrics) and prometheus.io/port
+      # (default the pod's own first declared containerPort) annotations
+      # if present. This is the mechanism that will pick up LiteLLM's
+      # /metrics endpoint the moment its own Service in k8s/p1/litellm.yaml
+      # gets that annotation added (a separate agent's work this session,
+      # not done here) -- nothing in THIS file needs to know litellm
+      # exists.
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: ai-observe
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      # 20Gi -- plenty of TSDB headroom for a single-node homelab at 30d
+      # retention (see below) given /data has 1.2T free; no reason to
+      # undersize this and have to grow it later.
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: ai-observe
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # same reasoning as postgres.yaml -- one PVC, only one writer at a time
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.13.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            # 30d retention: a reasonable homelab default -- long enough to
+            # look back a full month for a slow-building trend (e.g. VRAM
+            # creep, disk filling up) without babysitting it, and utterly
+            # cheap given 1.2T free on /data; this is a single low-cardinality
+            # node's worth of metrics (one host, two GPUs, a few dozen pods),
+            # nowhere near the volume that makes long retention expensive at
+            # real scale. Revisit upward only if 20Gi ever turns out to be
+            # too small in practice -- nothing here suggests it will.
+            - --storage.tsdb.retention.time=30d
+            - --web.enable-lifecycle
+          ports:
+            - containerPort: 9090
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: prometheus-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: ai-observe
+spec:
+  # ClusterIP only -- Grafana (provisioned to point at this Service, see
+  # grafana.yaml) is the browser-facing piece; Eldar querying PromQL
+  # directly against :9090 isn't a supported path today, same as
+  # Loki/node-exporter/dcgm-exporter.
+  selector:
+    app: prometheus
+  ports:
+    - port: 9090
+      targetPort: 9090
+      name: http

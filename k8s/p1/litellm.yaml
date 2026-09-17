@@ -367,7 +367,24 @@ data:
           api_key: os.environ/OPENROUTER_API_KEY
 
     litellm_settings:
-      callbacks: ["custom_router_hook.proxy_handler_instance"]
+      # OBSERVABILITY STACK, 2026-09-17 (see k8s/p8/ -- Prometheus/Grafana/
+      # Loki/LangFuse, wired up this same session): "prometheus" is
+      # LiteLLM's own documented built-in callback (docs.litellm.ai/docs/
+      # proxy/prometheus) -- it exposes request/latency/token/cost metrics
+      # at this pod's existing :4000/metrics path, no new port or service
+      # needed. success_callback (a SEPARATE key from callbacks, confirmed
+      # against LiteLLM's own docs) sends a trace of every completed
+      # request to LangFuse (k8s/p8/langfuse.yaml) -- the actual
+      # LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY/LANGFUSE_HOST creds are on
+      # the Deployment's env block below, not here (LiteLLM's Langfuse
+      # integration reads them from the environment, not config.yaml).
+      # LiteLLM is the one place nearly every LLM call in this cluster
+      # already funnels through (Hermes, Honcho, Open WebUI, the gmail/
+      # telegram/vault scripts all call it rather than llama-swap
+      # directly), so wiring tracing in here gives full-stack LLM
+      # observability without touching any of those callers individually.
+      callbacks: ["custom_router_hook.proxy_handler_instance", "prometheus"]
+      success_callback: ["langfuse"]
       # Honcho's embedding calls to nomic-embed-text-v1.5 always pass an
       # explicit `dimensions` param (EMBEDDING_VECTOR_DIMENSIONS=768 in
       # k8s/p2/honcho.yaml) -- LiteLLM's own param-validation treats this as
@@ -1205,6 +1222,14 @@ spec:
     metadata:
       labels:
         app: litellm
+      # 2026-09-17: picked up automatically by k8s/p8/prometheus.yaml's
+      # pod-annotation-based scrape config (kubernetes_sd_configs role:
+      # pod, looking for exactly these three annotation names) -- no
+      # change needed on the prometheus.yaml side when this pod restarts.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4000"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: litellm
@@ -1226,6 +1251,28 @@ spec:
                 secretKeyRef:
                   name: openrouter-secret
                   key: OPENROUTER_API_KEY
+            # LANGFUSE tracing creds, 2026-09-17 (see litellm_settings.
+            # success_callback above and k8s/p8/langfuse.yaml). Unlike
+            # every other secret in this cluster, these AREN'T
+            # self-generated random values -- LANGFUSE_PUBLIC_KEY/
+            # LANGFUSE_SECRET_KEY are issued by LangFuse itself from
+            # inside its own web UI (Project Settings -> API Keys), only
+            # AFTER Eldar has logged in once and created a project there.
+            # So litellm-langfuse-secret has to be created by hand after
+            # that first login, not alongside the other secrets -- see
+            # k8s/secrets/README.md's litellm-langfuse-secret section.
+            - name: LANGFUSE_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-langfuse-secret
+                  key: LANGFUSE_PUBLIC_KEY
+            - name: LANGFUSE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-langfuse-secret
+                  key: LANGFUSE_SECRET_KEY
+            - name: LANGFUSE_HOST
+              value: "http://langfuse-web.ai-observe.svc.cluster.local:3000"
           volumeMounts:
             - name: config
               mountPath: /litellm-extra

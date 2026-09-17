@@ -155,6 +155,111 @@ Rotating: update the key in `.env` first, then re-run the block above
 instead, or `kubectl delete secret openrouter-secret -n ai-models` first),
 then `kubectl delete pod -n ai-models -l app=litellm`.
 
+## grafana-secret (namespace: ai-observe)
+
+Backs `GF_SECURITY_ADMIN_USER`/`GF_SECURITY_ADMIN_PASSWORD` in `k8s/p8/grafana.yaml` -- 2026-09-17 observability stack (Prometheus/Grafana/Loki/LangFuse, see `k8s/p8/`).
+
+```sh
+GF_PASS=$(openssl rand -hex 16)
+kubectl create namespace ai-observe --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic grafana-secret \
+  --namespace ai-observe \
+  --from-literal=admin-user="eldar" \
+  --from-literal=admin-password="$GF_PASS"
+```
+
+Rotating: re-run with a new `GF_PASS`, then `kubectl delete pod -n ai-observe -l app=grafana`.
+
+## LangFuse secrets (namespace: ai-observe) -- 2026-09-17
+
+LangFuse (`k8s/p8/langfuse.yaml`, `-clickhouse.yaml`, `-minio.yaml`) reuses the
+EXISTING shared Postgres and Redis (`k8s/p2/postgres.yaml`/`redis.yaml`,
+namespace ai-memory) rather than deploying new instances -- same
+"no infra weight without a real reason" call as everywhere else in this
+repo. ClickHouse and Minio are new dedicated deployments (nothing else on
+this cluster needs either).
+
+**1. One-time: create LangFuse's own database on the existing shared Postgres**
+(can't use the `postgres-init` ConfigMap for this -- that only ever runs
+against a fresh, empty data volume, and this Postgres already holds
+Honcho's data):
+
+```sh
+kubectl exec -n ai-memory deploy/postgres -- psql -U postgres -c "CREATE DATABASE langfuse;"
+```
+
+**2. Add a `LANGFUSE_DATABASE_URL` key to the existing `postgres-secret`**
+(patch, not recreate -- preserves the `password`/`DB_CONNECTION_URI` keys
+Honcho already depends on):
+
+```sh
+PG_PASS=$(kubectl get secret postgres-secret -n ai-memory -o jsonpath='{.data.password}' | base64 -d)
+kubectl -n ai-memory patch secret postgres-secret --type merge -p \
+  "{\"stringData\":{\"LANGFUSE_DATABASE_URL\":\"postgresql://postgres:${PG_PASS}@postgres.ai-memory.svc.cluster.local:5432/langfuse\"}}"
+```
+
+**3. langfuse-secret** -- LangFuse's own app-level secrets (session signing, API-key hashing, at-rest encryption). Real random values, generated once and never rotated casually (rotating `ENCRYPTION_KEY` breaks decryption of anything already encrypted with the old one):
+
+```sh
+kubectl create namespace ai-observe --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic langfuse-secret \
+  --namespace ai-observe \
+  --from-literal=NEXTAUTH_SECRET="$(openssl rand -hex 32)" \
+  --from-literal=SALT="$(openssl rand -hex 32)" \
+  --from-literal=ENCRYPTION_KEY="$(openssl rand -hex 32)"
+```
+
+**4. langfuse-clickhouse-secret**:
+
+```sh
+kubectl create secret generic langfuse-clickhouse-secret \
+  --namespace ai-observe \
+  --from-literal=CLICKHOUSE_USER="langfuse" \
+  --from-literal=CLICKHOUSE_PASSWORD="$(openssl rand -hex 20)"
+```
+
+**5. langfuse-minio-secret**:
+
+```sh
+kubectl create secret generic langfuse-minio-secret \
+  --namespace ai-observe \
+  --from-literal=MINIO_ROOT_USER="langfuse" \
+  --from-literal=MINIO_ROOT_PASSWORD="$(openssl rand -hex 20)"
+```
+
+Rotating any of 3-5: re-run with fresh values, then
+`kubectl delete pod -n ai-observe -l app=langfuse-web -l app=langfuse-worker`
+(clickhouse/minio pods too if their own secret changed).
+
+## litellm-langfuse-secret (namespace: ai-models) -- 2026-09-17, MANUAL, post-login
+
+Backs `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` in `k8s/p1/litellm.yaml`'s
+litellm Deployment (see that file's `success_callback: ["langfuse"]`
+comment). Unlike every other secret above, these values are NOT
+self-generated random strings -- they're issued by LangFuse's own web UI,
+so this secret can only be created AFTER LangFuse is deployed and Eldar has
+logged in once:
+
+1. Open `http://<aibox-lan-ip>:30350`, sign up (first account becomes the
+   only org member -- single-user homelab, no invite flow needed), create
+   one project (e.g. "aibox").
+2. Project Settings -> API Keys -> Create new API key. Copy the Public Key
+   (`pk-lf-...`) and Secret Key (`sk-lf-...`) shown once.
+3. Create the Secret:
+
+```sh
+kubectl create secret generic litellm-langfuse-secret \
+  --namespace ai-models \
+  --from-literal=LANGFUSE_PUBLIC_KEY="pk-lf-..." \
+  --from-literal=LANGFUSE_SECRET_KEY="sk-lf-..."
+kubectl delete pod -n ai-models -l app=litellm
+```
+
+Until this secret exists, the litellm pod sits in
+`CreateContainerConfigError` -- same as any other missing-Secret case (see
+"Order of operations" below), so deploying `k8s/p1` and `k8s/p8` together
+before this manual step is fine, nothing fails destructively.
+
 ## Order of operations for a fresh cluster
 
 1. Run the three `kubectl create secret` blocks above (they also create the
