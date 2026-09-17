@@ -98,6 +98,23 @@ spec:
                 secretKeyRef:
                   name: langfuse-postgres-secret
                   key: DATABASE_URL
+            # FIXED 2026-09-17, first real deploy: LangFuse's ClickHouse
+            # migrations default to assuming a clustered ClickHouse (they
+            # issue `CREATE TABLE ... ON CLUSTER default ... Engine=
+            # ReplicatedMergeTree`, which needs ClickHouse Keeper/
+            # Zookeeper coordination) -- confirmed live, migration failed
+            # with "There is no Zookeeper configuration in server config"
+            # against our plain single-node clickhouse-server (no cluster/
+            # Keeper setup, matching the "no infra weight without a real
+            # reason" call made everywhere else in this repo -- one
+            # ClickHouse node is genuinely enough here). LangFuse's own
+            # docs confirm CLICKHOUSE_CLUSTER_ENABLED=false is exactly the
+            # documented setting for a single-node/single-container
+            # ClickHouse -- migrations then skip ON CLUSTER/Replicated*
+            # entirely, no Keeper/config.xml changes needed on the
+            # ClickHouse side at all.
+            - name: CLICKHOUSE_CLUSTER_ENABLED
+              value: "false"
             - name: CLICKHOUSE_URL
               value: "http://langfuse-clickhouse.ai-observe.svc.cluster.local:8123"
             - name: CLICKHOUSE_MIGRATION_URL
@@ -233,6 +250,23 @@ spec:
                 secretKeyRef:
                   name: langfuse-postgres-secret
                   key: DATABASE_URL
+            # FIXED 2026-09-17, first real deploy: LangFuse's ClickHouse
+            # migrations default to assuming a clustered ClickHouse (they
+            # issue `CREATE TABLE ... ON CLUSTER default ... Engine=
+            # ReplicatedMergeTree`, which needs ClickHouse Keeper/
+            # Zookeeper coordination) -- confirmed live, migration failed
+            # with "There is no Zookeeper configuration in server config"
+            # against our plain single-node clickhouse-server (no cluster/
+            # Keeper setup, matching the "no infra weight without a real
+            # reason" call made everywhere else in this repo -- one
+            # ClickHouse node is genuinely enough here). LangFuse's own
+            # docs confirm CLICKHOUSE_CLUSTER_ENABLED=false is exactly the
+            # documented setting for a single-node/single-container
+            # ClickHouse -- migrations then skip ON CLUSTER/Replicated*
+            # entirely, no Keeper/config.xml changes needed on the
+            # ClickHouse side at all.
+            - name: CLICKHOUSE_CLUSTER_ENABLED
+              value: "false"
             - name: CLICKHOUSE_URL
               value: "http://langfuse-clickhouse.ai-observe.svc.cluster.local:8123"
             - name: CLICKHOUSE_MIGRATION_URL
