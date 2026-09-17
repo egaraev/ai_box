@@ -3,9 +3,13 @@
 # the mcp>=2.0 floor was determined (FastMCP renamed MCPServer in mcp 2.x).
 mcp>=2.0
 httpx>=0.27
-pypdf>=4.0
 # OCR/document additions, 2026-09-14 (see server.py's top comment):
-pymupdf>=1.24     # rasterizes scanned-PDF pages to images for vision-OCR fallback (import name: fitz)
+# pypdf was here for PDF text extraction until 2026-09-17, when it turned out
+# to shred some real-world PDFs into one character per line (see
+# vault_core.py's extract_pdf_text comment) -- replaced by pymupdf below,
+# already a dependency for the OCR-fallback path, so this is a removal not
+# an addition.
+pymupdf>=1.24     # PDF text extraction (extract_pdf_text) AND rasterizes scanned-PDF pages to images for vision-OCR fallback (import name: fitz)
 python-docx>=1.1  # .docx text extraction (import name: docx)
 pytesseract>=0.3  # local OCR fallback when the vision model call fails -- needs the tesseract-ocr
                    # system package too, see Dockerfile

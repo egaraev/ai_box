@@ -381,15 +381,32 @@ async def ocr_image(client: httpx.AsyncClient, image_bytes: bytes, mime_type: st
         return _ocr_image_locally(image_bytes)
 
 
+# FIXED 2026-09-17: was pypdf's PdfReader.extract_text(). Real bug found
+# ingesting Eldar's PMI job certificate through the new web upload page --
+# pypdf split the extracted text into ONE CHARACTER PER LINE ("d\no\ne\ns"
+# instead of "does"), a known pypdf weakness on PDFs with certain font/glyph
+# encodings (this one's Polish-issued, likely an uncommon embedded font
+# setup). The text still made it into the vault note and got embedded into
+# Qdrant, just shredded into meaningless single-letter chunks -- nothing
+# crashed, nothing errored, it just wasn't searchable, which is why the
+# note looked "not there" from Hermes's side even though it genuinely was.
+# Confirmed directly via Qdrant's own points/scroll API, not just inferred.
+# Switched to pymupdf (fitz) instead -- already a hard dependency here (used
+# for the scanned-PDF OCR fallback below), so this isn't a new dependency,
+# just using the more reliable extractor that was already in the container.
+# pypdf itself is no longer used anywhere in this file; dropped from
+# requirements.txt.
 def extract_pdf_text(path: Path) -> str:
-    import pypdf   # only the PDF branch needs this -- deferred import keeps the top-of-file import list honest about what every request pays for
-    reader = pypdf.PdfReader(str(path))
-    pages = [page.extract_text() or "" for page in reader.pages]
-    return "\n\n".join(pages).strip()
+    import fitz   # pymupdf
+    doc = fitz.open(str(path))
+    try:
+        return "\n\n".join(page.get_text() for page in doc).strip()
+    finally:
+        doc.close()
 
 
-# Only meaningful on a PDF with a real text layer -- pypdf's extract_text()
-# flattens a table into hard-to-read run-on text, so any tables camelot
+# Only meaningful on a PDF with a real text layer -- extract_pdf_text()
+# above flattens a table into hard-to-read run-on text, so any tables camelot
 # finds get appended separately as plain pipe rows. camelot's "lattice"
 # flavor (the default) needs visible table borders/lines to find a table;
 # if a real PDF turns out to have borderless tables, switch to
