@@ -1261,16 +1261,34 @@ spec:
             # So litellm-langfuse-secret has to be created by hand after
             # that first login, not alongside the other secrets -- see
             # k8s/secrets/README.md's litellm-langfuse-secret section.
+            #
+            # optional: true on BOTH refs, added 2026-09-17 after first
+            # real deploy: without this, a secretKeyRef to a Secret/key
+            # that doesn't exist yet blocks the WHOLE pod from starting
+            # (CreateContainerConfigError), not just that one env var --
+            # confirmed live, this took down litellm cluster-wide (every
+            # caller: Hermes, Honcho, Open WebUI, the sync scripts) the
+            # moment this file was applied, since litellm-langfuse-secret
+            # can't exist yet at that point (see comment above -- it needs
+            # a LangFuse login first). optional: true makes k8s just leave
+            # the env var unset instead of refusing to start the
+            # container when the Secret/key is missing -- LiteLLM's own
+            # Langfuse integration handles missing creds by logging a
+            # warning and skipping that one trace, not crashing, so this
+            # is safe either way. Once litellm-langfuse-secret is created
+            # for real, a pod restart picks up the real values normally.
             - name: LANGFUSE_PUBLIC_KEY
               valueFrom:
                 secretKeyRef:
                   name: litellm-langfuse-secret
                   key: LANGFUSE_PUBLIC_KEY
+                  optional: true
             - name: LANGFUSE_SECRET_KEY
               valueFrom:
                 secretKeyRef:
                   name: litellm-langfuse-secret
                   key: LANGFUSE_SECRET_KEY
+                  optional: true
             - name: LANGFUSE_HOST
               value: "http://langfuse-web.ai-observe.svc.cluster.local:3000"
           volumeMounts:
