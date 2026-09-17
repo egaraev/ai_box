@@ -140,6 +140,24 @@ spec:
           image: grafana/promtail:3.3.0
           args:
             - -config.file=/etc/promtail/promtail.yaml
+          # FIXED 2026-09-17: without this, promtail's kubernetes_sd_configs
+          # silently adds its own "only discover pods on my node" field
+          # selector as `spec.nodeName=$HOSTNAME` -- and Kubernetes sets a
+          # container's $HOSTNAME env var to the POD's own name by default,
+          # not the node's. That made the selector read
+          # `spec.nodeName=promtail-<random-suffix>`, which matches no real
+          # node, so kubernetes_sd_configs discovered exactly 0 targets
+          # cluster-wide (confirmed live: /targets showed "0/0 ready" and
+          # promtail_sent_entries_total was 0 despite RBAC being fine and
+          # /var/log/pods having real log directories). This env var
+          # overrides $HOSTNAME to the real node name via the Downward API,
+          # which is what every official promtail DaemonSet example sets it
+          # to for exactly this reason.
+          env:
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           ports:
             - containerPort: 9080
               name: http-metrics
