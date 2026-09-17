@@ -20,11 +20,23 @@
 #   cd ~/repos/aibox-platform/apps/vault-mcp
 #   docker build -t vault-mcp:latest .
 #   docker save vault-mcp:latest | sudo k3s ctr images import -
-# After editing server.py, repeat both of those, then:
+# After editing server.py/vault_core.py/upload_web.py, repeat both of those, then:
 #   kubectl rollout restart deployment/vault-mcp -n ai-mcp
 # (a plain `git push` + ArgoCD sync alone does NOT pick up a code change --
 # only a manifest change self-triggers; the image itself has to be rebuilt
 # and reimported by hand first, same gap as media-gen-mcp.)
+#
+# WEB UPLOAD PAGE (2026-09-17): this same pod now also runs upload_web.py,
+# a plain browser upload form for the vault (see upload_web.py/vault_core.py's
+# own top comments for why it's a second process in the same container
+# rather than a separate service or routes bolted onto the MCP server).
+# Exposed via its own vault-uploader NodePort Service below, :8081 -> :30081
+# -- same plain-NodePort pattern as comfyui-nodeport and router-dashboard,
+# no ingress/auth yet (Eldar's explicit call, 2026-09-17: "for now lets go
+# with nodeport just like all other services we have now" -- an
+# ingress/reverse proxy for LAN-friendly URLs + auth is a deliberate next
+# step, not done here). Reachable today from aibox's own LAN at
+# http://<aibox-lan-ip>:30081/.
 #
 # When THIS FILE itself changes -- `kubectl apply -f` it directly (or let
 # ArgoCD sync k8s/p2 the normal way) in addition to any image rebuild:
@@ -67,6 +79,8 @@ spec:
           ports:
             - containerPort: 8000
               name: http
+            - containerPort: 8081
+              name: upload-http
           env:
             - name: QDRANT_URL
               value: "http://qdrant.ai-memory.svc.cluster.local:6333"
@@ -91,13 +105,18 @@ spec:
             - name: shared-output
               mountPath: /shared-output
               readOnly: true
+          # Bumped 2026-09-17 (was 100m/128Mi request, 500m/768Mi limit):
+          # this pod now runs TWO Python processes (server.py + upload_web.py),
+          # each importing the same heavy stack (opencv-python-headless via
+          # camelot, pymupdf, pytesseract+Pillow) -- the old 768Mi limit was
+          # sized for one process's worth of those imports, not two.
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              cpu: "150m"
+              memory: "256Mi"
             limits:
-              cpu: "500m"
-              memory: "768Mi"
+              cpu: "750m"
+              memory: "1536Mi"
       volumes:
         - name: vault-data
           hostPath:
@@ -123,3 +142,23 @@ spec:
     - port: 8000
       targetPort: 8000
       name: http
+---
+# Separate Service object (not a second port on the one above) so the
+# existing ClusterIP Service Hermes uses for MCP stays untouched -- same
+# reasoning comfyui-nodeport was added as its own Service instead of
+# editing comfyui's existing one. Same pod (selector: app: vault-mcp),
+# just a second, externally-reachable way in.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault-uploader
+  namespace: ai-mcp
+spec:
+  type: NodePort
+  selector:
+    app: vault-mcp
+  ports:
+    - port: 8081
+      targetPort: 8081
+      nodePort: 30081
+      name: upload-http
