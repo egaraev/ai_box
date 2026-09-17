@@ -198,6 +198,26 @@ kubectl -n ai-memory patch secret postgres-secret --type merge -p \
   "{\"stringData\":{\"LANGFUSE_DATABASE_URL\":\"postgresql://postgres:${PG_PASS}@postgres.ai-memory.svc.cluster.local:5432/langfuse\"}}"
 ```
 
+**2b. Copy it into a `langfuse-postgres-secret` in `ai-observe`** -- FIXED
+2026-09-17, first real deploy: `langfuse-web`/`langfuse-worker` (namespace
+`ai-observe`) originally read `DATABASE_URL` straight from `postgres-secret`
+above, but that Secret lives in `ai-memory` and Kubernetes Secrets can't be
+read across namespaces -- confirmed live ("secret postgres-secret not
+found"). Same cross-namespace problem the `litellm-secret` section above
+already solves by duplicating into every namespace that needs it; this is
+the same fix, just for one key instead of the whole master-key secret:
+
+```sh
+LANGFUSE_DB_URL=$(kubectl get secret postgres-secret -n ai-memory -o jsonpath='{.data.LANGFUSE_DATABASE_URL}' | base64 -d)
+kubectl create secret generic langfuse-postgres-secret \
+  --namespace ai-observe \
+  --from-literal=DATABASE_URL="$LANGFUSE_DB_URL"
+```
+
+Rotating: if `postgres-secret`'s password ever changes, re-run step 2 above
+first, then this block again, then
+`kubectl delete pod -n ai-observe -l app=langfuse-web -l app=langfuse-worker`.
+
 **3. langfuse-secret** -- LangFuse's own app-level secrets (session signing, API-key hashing, at-rest encryption). Real random values, generated once and never rotated casually (rotating `ENCRYPTION_KEY` breaks decryption of anything already encrypted with the old one):
 
 ```sh

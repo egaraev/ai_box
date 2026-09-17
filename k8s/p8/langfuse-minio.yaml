@@ -51,10 +51,18 @@ spec:
           # to Docker Hub in October 2025 (widely hit -- see e.g.
           # github.com/dfpc-coe/CloudTAK#1803, github.com/milvus-io/
           # milvus#53430), quay.io is the working replacement everyone
-          # moved to. Pinned to a real dated release tag rather than a
-          # tag that might not exist on quay.io either -- "latest" isn't
-          # guaranteed to exist per-registry the way Docker Hub's did.
-          image: quay.io/minio/minio:RELEASE.2024-08-17T01-24-54Z
+          # moved to.
+          # RE-FIXED same day: the first quay.io tag tried here
+          # (RELEASE.2024-08-17T01-24-54Z, from a GitHub issue comment,
+          # not independently checked against quay.io's real tag list)
+          # turned out not to exist on quay.io at all -- confirmed live,
+          # `not found` on pull. This tag is instead taken from a
+          # different source that explicitly verified it by pulling and
+          # digest-checking it (github.com/MarkAC007/scf-controls-
+          # platform-oss#97) -- much higher confidence, but still watch
+          # `kubectl describe pod` on first real deploy rather than
+          # assuming.
+          image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
           args: ["server", "/data", "--console-address", ":9001"]
           ports:
             - containerPort: 9000
@@ -123,16 +131,16 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mc
-          # Same Docker-Hub-removal fix as the minio container above --
-          # quay.io/minio/mc is the paired client image MinIO publishes
-          # alongside quay.io/minio/minio (same dated-release convention).
-          # NOT independently confirmed this exact tag exists on quay.io
-          # for mc specifically (only minio/minio's tag was verified
-          # against a real fix people applied) -- check `kubectl logs -n
-          # ai-observe job/langfuse-minio-create-buckets` on first deploy;
-          # if this one tag is missing, quay.io/minio/mc:latest or the
-          # nearest dated tag on quay.io's tag list is the fallback.
-          image: quay.io/minio/mc:RELEASE.2024-08-17T01-24-54Z
+          # Same Docker-Hub-removal fix as the minio container above.
+          # FIRST guessed tag here (RELEASE.2024-08-17T01-24-54Z) also
+          # confirmed NOT to exist on quay.io ("not found" on pull, real
+          # cluster error) -- replaced with a tag from a source that
+          # explicitly verified it by pulling and digest-checking it
+          # (github.com/MarkAC007/scf-controls-platform-oss#97), same as
+          # the minio image above. mc and minio are versioned/released
+          # independently by MinIO, so these two tags are intentionally
+          # NOT the same date -- that's expected, not a mismatch.
+          image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
           command:
             - /bin/sh
             - -c

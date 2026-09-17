@@ -48,12 +48,23 @@
 # use for http://<aibox-lan-ip>:30081/) before this will actually work for
 # browser login redirects.
 #
-# SECRETS (all namespace ai-observe, created directly on the cluster per
-# k8s/secrets/README.md, never committed -- see this file's accompanying
-# report for the exact kubectl commands):
+# SECRETS (all namespace ai-observe unless noted, created directly on the
+# cluster per k8s/secrets/README.md, never committed -- see this file's
+# accompanying report for the exact kubectl commands):
+#   - langfuse-postgres-secret (NEW, ai-observe -- holds just DATABASE_URL,
+#     copied from postgres-secret's LANGFUSE_DATABASE_URL key.
+#     FIXED 2026-09-17, first real deploy: langfuse-web/worker originally
+#     referenced `postgres-secret` directly, but that Secret lives in
+#     ai-memory (it's Honcho's) and Kubernetes Secrets can't be read
+#     across namespaces -- confirmed live, "secret postgres-secret not
+#     found" from a pod that's actually in ai-observe. Same cross-
+#     namespace problem k8s/secrets/README.md already documents for
+#     litellm-secret, just missed here on the first pass -- this Secret
+#     is the fix, a small same-value copy living in the right namespace.)
 #   - postgres-secret (ai-memory, EXISTING -- patched with a new
-#     DATABASE_URL key pointed at the new `langfuse` db, `password` key
-#     left untouched)
+#     LANGFUSE_DATABASE_URL key pointed at the new `langfuse` db,
+#     `password` key left untouched; langfuse-postgres-secret above is
+#     copied FROM this key, not a replacement for it)
 #   - langfuse-secret (NEW -- NEXTAUTH_SECRET / SALT / ENCRYPTION_KEY)
 #   - langfuse-clickhouse-secret (NEW -- CLICKHOUSE_USER / CLICKHOUSE_PASSWORD)
 #   - langfuse-minio-secret (NEW -- MINIO_ROOT_USER / MINIO_ROOT_PASSWORD,
@@ -85,8 +96,8 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: postgres-secret
-                  key: LANGFUSE_DATABASE_URL
+                  name: langfuse-postgres-secret
+                  key: DATABASE_URL
             - name: CLICKHOUSE_URL
               value: "http://langfuse-clickhouse.ai-observe.svc.cluster.local:8123"
             - name: CLICKHOUSE_MIGRATION_URL
@@ -220,8 +231,8 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: postgres-secret
-                  key: LANGFUSE_DATABASE_URL
+                  name: langfuse-postgres-secret
+                  key: DATABASE_URL
             - name: CLICKHOUSE_URL
               value: "http://langfuse-clickhouse.ai-observe.svc.cluster.local:8123"
             - name: CLICKHOUSE_MIGRATION_URL
