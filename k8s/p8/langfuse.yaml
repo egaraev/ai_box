@@ -103,6 +103,10 @@ spec:
             - containerPort: 3000
               name: http
           env:
+            # Caps V8's heap below the 3Gi container limit above -- see
+            # that resources block's comment for why this was added.
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=2560"
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -198,13 +202,23 @@ spec:
                   key: ENCRYPTION_KEY
             - name: TELEMETRY_ENABLED
               value: "false"
+          # FIXED 2026-09-17, first real deploy: 1Gi limit was too tight --
+          # confirmed live, langfuse-web crashed on startup with a real
+          # V8 "JavaScript heap out of memory" OOM (Next.js 16 + Prisma +
+          # its MCP feature registration is just a heavier footprint than
+          # the earlier estimate assumed). Raised generously -- aibox has
+          # 54Gi RAM free, no reason to stay tight here. NODE_OPTIONS caps
+          # V8's own heap ceiling explicitly, below the container's memory
+          # limit (leaves headroom for non-heap/native memory) -- makes
+          # future OOMs a clean, predictable V8 error instead of a
+          # kubelet OOMKill with no diagnostic message at all.
           resources:
             requests:
-              cpu: "300m"
-              memory: "512Mi"
-            limits:
-              cpu: "1"
+              cpu: "500m"
               memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "3Gi"
 ---
 apiVersion: v1
 kind: Service
@@ -252,9 +266,13 @@ spec:
               name: http
           # Same env set as langfuse-web above -- the worker needs the same
           # DB/ClickHouse/Redis/S3 access to process the async event queue.
+          # NODE_OPTIONS here too, same OOM fix as langfuse-web (see that
+          # container's resources comment).
           # NEXTAUTH_* are web-only (auth/session, not needed by the
           # worker) and deliberately left out here.
           env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=2560"
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -336,13 +354,23 @@ spec:
                   key: ENCRYPTION_KEY
             - name: TELEMETRY_ENABLED
               value: "false"
+          # FIXED 2026-09-17, first real deploy: 1Gi limit was too tight --
+          # confirmed live, langfuse-web crashed on startup with a real
+          # V8 "JavaScript heap out of memory" OOM (Next.js 16 + Prisma +
+          # its MCP feature registration is just a heavier footprint than
+          # the earlier estimate assumed). Raised generously -- aibox has
+          # 54Gi RAM free, no reason to stay tight here. NODE_OPTIONS caps
+          # V8's own heap ceiling explicitly, below the container's memory
+          # limit (leaves headroom for non-heap/native memory) -- makes
+          # future OOMs a clean, predictable V8 error instead of a
+          # kubelet OOMKill with no diagnostic message at all.
           resources:
             requests:
-              cpu: "300m"
-              memory: "512Mi"
-            limits:
-              cpu: "1"
+              cpu: "500m"
               memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "3Gi"
 ---
 apiVersion: v1
 kind: Service
