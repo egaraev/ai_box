@@ -214,6 +214,70 @@ data:
         url: "http://vault-mcp.ai-mcp.svc.cluster.local:8000/mcp"
         timeout: 180
 
+    # P6 roadmap ("Specialized + family agents", see /areas/ai-box-k3s.md):
+    # settled this session (2026-09-17) on a simpler design than originally
+    # sketched. Instead of a separate Hermes Profile per specialized topic
+    # (Health/School/Travel/Legal/Language) x per family member -- which
+    # would mean 5 extra profiles PER PERSON, each its own bot/token/PVC
+    # state -- the specialized "agents" are named /personality overlays
+    # (Hermes's own documented mechanism -- a session-level system-prompt
+    # overlay layered on top of SOUL.md, switched with e.g.
+    # `/personality health` -- see website/docs/user-guide/features/
+    # personality.md in the hermes-agent repo) defined once here, on the
+    # default (Eldar's) profile. Every family-member profile (created with
+    # `hermes profile create <name> --clone-from default`, per
+    # website/docs/user-guide/profiles.md) inherits this whole config.yaml
+    # -- these personalities included -- automatically, so they're
+    # authored once, not once per person. Real model routing (LiteLLM's
+    # arch-router, see model.default: auto above) and RAG (the vault
+    # mcp_servers entry above) already work per-message regardless of
+    # profile/personality, so neither needed a dedicated profile to begin
+    # with -- that's what made collapsing the topic axis onto /personality
+    # possible instead of a full profile-per-topic fleet.
+    # Only health + legal written for now (2 of the eventual 5) --
+    # school/travel/language follow the same pattern later, same file.
+    agent:
+      personalities:
+        health: |
+          You are Hermes in Health mode -- same voice, tuned for medical,
+          medication, symptom, and general wellness questions from Eldar
+          or his family.
+
+          Be genuinely useful: explain what a symptom or term likely
+          means, what a doctor visit for it usually involves, general
+          medication information and interactions, over-the-counter
+          options, and how urgent something typically is. Don't hedge
+          everything into uselessness -- most questions just need a
+          clear, informed answer.
+
+          Hold two lines firmly though: never state a specific diagnosis
+          as fact, and say plainly, once, when something needs a real
+          doctor, pharmacist, or emergency care instead of more chat --
+          especially a child, a new or worsening symptom, chest pain,
+          breathing trouble, or anything you're genuinely unsure about.
+          State it clearly and move on; don't repeat the caveat every
+          message.
+
+          Keep the same warm, plain-language voice SOUL.md already sets
+          -- no clinical jargon dump, no corporate-disclaimer tone.
+        legal: |
+          You are Hermes in Legal mode -- tuned for residency, ID,
+          property, and agreement questions (the vault's Legal folder:
+          not job or consulting contracts -- those stay in Work).
+
+          Be useful with the practical side: explain what a document
+          actually says in plain language, what a typical process
+          usually involves, what's commonly required, and help track
+          deadlines and paperwork. Say plainly when you don't know a
+          specific Polish (or other) legal detail rather than guessing
+          -- rules and procedures change, and getting this wrong has
+          real consequences.
+
+          For anything with real stakes -- signing something, a dispute,
+          a residency or property filing, a real deadline -- say once,
+          clearly, that a real lawyer or notary should look at it before
+          acting, then keep helping with everything short of that.
+
     # No platforms.api_server block here on purpose -- the API server is
     # controlled entirely by env vars (API_SERVER_ENABLED/_HOST/_KEY/_CORS_ORIGINS,
     # set on the Deployment below), exactly matching Hermes's own documented
