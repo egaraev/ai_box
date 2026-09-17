@@ -279,9 +279,16 @@ data:
     # Saving to the vault
     - When you save something with ingest_note or ingest_file, actively pick
       the folder that fits the content -- Family, Health, Legal, Household,
-      Reference, or AI -- instead of leaving everything in Inbox by default.
-      Only use Inbox when nothing else genuinely fits; it's a landing spot
-      for the unsorted, not the default choice.
+      Reference, AI, Work, Finance, Transport, Travels, or Education --
+      instead of leaving everything in Inbox by default. Only use Inbox when
+      nothing else genuinely fits; it's a landing spot for the unsorted, not
+      the default choice.
+    - Two boundaries that are easy to blur: Work is for jobs, contracts, and
+      B2B/consulting -- not Legal (which stays for residency, IDs, property,
+      agreements not tied to a job). Finance covers ALL insurance -- car,
+      home, life -- not just banking/loans/investments; Transport is only
+      for vehicle-specific operational docs (registration, purchase,
+      tickets, service records), never insurance.
     - If it's genuinely unclear which of two folders fits, ask rather than
       guess -- a misfiled note is easy to fix, but a family member searching
       for it later has no way to know you guessed wrong.

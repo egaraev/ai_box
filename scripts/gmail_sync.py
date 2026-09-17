@@ -90,11 +90,16 @@ OAUTH_KEYS_FILE = GMAIL_MCP_DIR / "gcp-oauth.keys.json"
 DEFAULT_VAULT_ROOT = Path("/data/obsidian_vault")
 
 # Recognized subject-prefix topics -> destination vault folder. Matches
-# vault-mcp's ALLOWED_FOLDERS (apps/vault-mcp/server.py) minus Inbox (nothing
-# here should silently land in Inbox -- an email whose subject doesn't start
-# with one of these words just isn't a match, same as the old AI-only
-# behavior for anything not starting with "AI"). Order matters only in that
-# no word here is a prefix of another, so a plain startswith check is enough.
+# vault-mcp's ALLOWED_FOLDERS (apps/vault-mcp/vault_core.py) minus Inbox
+# (nothing here should silently land in Inbox -- an email whose subject
+# doesn't start with one of these words just isn't a match, same as the old
+# AI-only behavior for anything not starting with "AI"). Order matters only
+# in that no word here is a prefix of another, so a plain startswith check
+# is enough.
+#
+# Expanded 2026-09-17 alongside vault-mcp's own ALLOWED_FOLDERS -- see that
+# file's comment for the Work-vs-Legal and Finance-vs-Transport boundary
+# rules, which apply here too.
 TOPICS = {
     "AI": "AI",
     "HEALTH": "Health",
@@ -102,6 +107,11 @@ TOPICS = {
     "FAMILY": "Family",
     "HOUSEHOLD": "Household",
     "REFERENCE": "Reference",
+    "WORK": "Work",
+    "FINANCE": "Finance",
+    "TRANSPORT": "Transport",
+    "TRAVELS": "Travels",
+    "EDUCATION": "Education",
 }
 
 DEFAULT_QUERY = "from:me subject:(" + " OR ".join(TOPICS) + ")"

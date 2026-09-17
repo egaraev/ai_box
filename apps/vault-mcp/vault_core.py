@@ -45,9 +45,21 @@ ATTACHMENTS_DIR = VAULT_PATH / "Attachments"
 # hallucinated/typo'd folder name (from Hermes) or a bad form value (from
 # the web upload page) can't scatter notes outside Eldar's real top-level
 # vault structure or silently create a new folder he never asked for.
-# Matches Eldar's actual Obsidian top-level folders as of 2026-09-14 -- if
+# Matches Eldar's actual Obsidian top-level folders as of 2026-09-17 -- if
 # he adds a new one in Obsidian, add it here too.
-ALLOWED_FOLDERS = {"Inbox", "Family", "Health", "Legal", "Household", "Reference", "AI"}
+#
+# Expanded 2026-09-17 with Work, Finance, Transport, Travels, Education (was
+# just Inbox/Family/Health/Legal/Household/Reference/AI). A few of these
+# overlap in ways worth spelling out so routing stays consistent:
+#   - Work vs Legal: employment docs, contracts, B2B/consulting -> Work.
+#     Legal stays for residency, IDs, property, agreements not tied to a job.
+#   - Finance vs Transport: ALL insurance (car, home, life, health) -> Finance,
+#     even car insurance -- Transport is for vehicle-specific operational
+#     docs (registration, purchase, tickets, service records), not insurance.
+ALLOWED_FOLDERS = {
+    "Inbox", "Family", "Health", "Legal", "Household", "Reference", "AI",
+    "Work", "Finance", "Transport", "Travels", "Education",
+}
 
 # Both server.py and upload_web.py run as root in their container (see
 # Dockerfile -- no USER set), same as most single-pod services on this

@@ -24,10 +24,11 @@ vault_core + formatting the reply string, same as before. See
 vault_core.py's own top comment for why this is two processes instead of
 one, and entrypoint.sh for how both get started.
 
-Folder routing (2026-09-14): both ingest tools take an optional folder
-param so Hermes can route a save straight into Family/Health/Legal/
-Household/Reference/AI instead of everything always landing in Inbox/ for
-Eldar to re-file by hand later. Restricted to a fixed whitelist
+Folder routing (2026-09-14, expanded 2026-09-17): both ingest tools take an
+optional folder param so Hermes can route a save straight into Family/
+Health/Legal/Household/Reference/AI/Work/Finance/Transport/Travels/
+Education instead of everything always landing in Inbox/ for Eldar to
+re-file by hand later. Restricted to a fixed whitelist
 (vault_core.ALLOWED_FOLDERS) rather than any string Hermes sends, so a
 hallucinated/typo'd folder name can't create new top-level folders Eldar
 never asked for.
@@ -145,8 +146,14 @@ async def ingest_note(content: str, title: str, tags: list[str] | None = None, a
             Leave unset for a normal note.
         folder: Which top-level vault folder to file this under -- one of
             "Inbox" (default; anything that doesn't clearly fit elsewhere),
-            "Family", "Health", "Legal", "Household", "Reference", or "AI".
-            Any other value is rejected.
+            "Family", "Health", "Legal", "Household", "Reference", "AI",
+            "Work" (jobs, contracts, B2B/consulting -- not Legal), "Finance"
+            (banking, loans, investments, ALL insurance including car/home/
+            life -- not Transport), "Transport" (vehicle registration/
+            purchase docs, tickets, service records -- not insurance),
+            "Travels" (itineraries, bookings, visas), or "Education"
+            (schools, universities, courses, exams). Any other value is
+            rejected.
 
     Returns:
         Confirmation with the vault path and how many chunks were indexed.
@@ -206,7 +213,13 @@ async def ingest_file(file_path: str, title: str | None = None, tags: list[str] 
             attachment itself always goes to Attachments/ regardless) -- one
             of "Inbox" (default; anything that doesn't clearly fit
             elsewhere), "Family", "Health", "Legal", "Household",
-            "Reference", or "AI". Any other value is rejected.
+            "Reference", "AI", "Work" (jobs, contracts, B2B/consulting --
+            not Legal), "Finance" (banking, loans, investments, ALL
+            insurance including car/home/life -- not Transport), "Transport"
+            (vehicle registration/purchase docs, tickets, service records --
+            not insurance), "Travels" (itineraries, bookings, visas), or
+            "Education" (schools, universities, courses, exams). Any other
+            value is rejected.
 
     Returns:
         Confirmation with the vault paths (note + attachment) and whether
