@@ -42,11 +42,21 @@
 # Docker Hub/GHCR this session (same caveat as the ClickHouse/Minio tags in
 # the other two files in this directory) -- confirm before/at first deploy.
 #
-# NEXTAUTH_URL below uses a placeholder LAN IP -- this session has no way to
-# know aibox's actual LAN address. Eldar: replace <aibox-lan-ip> with the
-# real one (same placeholder pattern vault-mcp-deployment.yaml's comments
-# use for http://<aibox-lan-ip>:30081/) before this will actually work for
-# browser login redirects.
+# NEXTAUTH_URL below is set to localhost:30350, 2026-09-17 (Eldar's own
+# confirmation: he browses aibox's NodePort services via localhost/
+# 127.0.0.1, not a LAN IP -- a k3s NodePort binds on all of the node's
+# interfaces including loopback, so this works whenever the browser is on
+# the aibox host itself, e.g. over SSH port-forward or a local session).
+# FIXED same day: this was originally left as a literal <aibox-lan-ip>
+# placeholder, which is an invalid URL (real angle-bracket characters) --
+# confirmed live, this broke NextAuth internally and surfaced to Eldar as
+# a plain "Internal Server Error" on basically every page, since
+# NEXTAUTH_URL is used to build every redirect/callback URL, not just the
+# login page. If LangFuse ever needs to be reached from elsewhere on the
+# LAN instead, this needs to change to that real LAN IP or hostname --
+# NextAuth ties session cookies to this exact origin, so it can't be both
+# at once without a reverse proxy in front (see the deferred ingress/
+# reverse-proxy step mentioned when NodePort exposure was first decided).
 #
 # SECRETS (all namespace ai-observe unless noted, created directly on the
 # cluster per k8s/secrets/README.md, never committed -- see this file's
@@ -170,7 +180,7 @@ spec:
             # PLACEHOLDER -- see this file's top comment. Replace
             # <aibox-lan-ip> with aibox's real LAN address before deploy.
             - name: NEXTAUTH_URL
-              value: "http://<aibox-lan-ip>:30350"
+              value: "http://localhost:30350"
             - name: NEXTAUTH_SECRET
               valueFrom:
                 secretKeyRef:
