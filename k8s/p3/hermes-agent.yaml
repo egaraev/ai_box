@@ -144,6 +144,32 @@ data:
       # out of this ConfigMap entirely, consistent with everything else in
       # k8s/secrets/README.md.
       api_key: ""
+      # context_length ADDED 2026-09-18, real bug found: Hermes's `/context`
+      # command reported a 256,000-token window, which doesn't match any
+      # real backend model's actual -c value (65536-100000 across the
+      # routed fleet) -- almost certainly a stale/generic fallback, not a
+      # real auto-detected number, since "default: auto" means Hermes can't
+      # know in advance which physical model LiteLLM's semantic router will
+      # actually pick per message (k8s/p1/litellm.yaml's custom_router_hook.py),
+      # so its normal /v1/models auto-detection has nothing concrete to
+      # query against. Predates today's context-size work entirely -- Hermes
+      # was likely letting real conversations grow well past every backend
+      # model's true ceiling before ever proactively compressing (its
+      # compression trigger is 50% of whatever it *thinks* the window is).
+      # 80000 chosen as the value: after tonight's work, the real per-model
+      # ceilings are qwen3.8-27b-Expert 100000, qwen3.8-27b-Expert-Vision
+      # 80000, hermes3-llama-3.1-8b 100000, llama3.1-aloe-beta-8b 100000
+      # (see k8s/p1/llama-swap-configmap.yaml for all four) -- 80000 is the
+      # true floor across every route "auto" can dispatch to, so it's the
+      # only single global value safe for all of them. Setting it any higher
+      # risks a hard context-overflow error specifically on the vision
+      # route. If Expert-Vision's own ceiling gets raised further later,
+      # raise this to match (see Hermes's own context-length-detection docs:
+      # "Set context_length when auto-detection gets the window size
+      # wrong" -- this is a config override, resolution priority 1, so it
+      # always wins over whatever number auto-detection would otherwise
+      # guess).
+      context_length: 80000
 
     terminal:
       backend: local
