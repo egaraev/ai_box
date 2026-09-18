@@ -321,23 +321,34 @@ data:
         # above) actually happens -- more -c tuning alone won't fix this,
         # the card just doesn't have the headroom.
         #
-        # -c 65536 -> 72000 TESTING 2026-09-18 (Eldar's call), on unified-
-        # cuda13, same rationale as qwen3.8-27b-Expert's successful 65536 ->
-        # 100000 push above: native Blackwell kernels are showing real extra
-        # VRAM headroom at 65536 today (1070-1137MiB free per live captures)
-        # vs. the old build's thin margins at this same context. Stepping to
-        # 72000 first rather than jumping straight to 100000 -- this model's
-        # own history is worse than Expert's (100000 OOM'd 884.62MiB short on
-        # the mmproj buffer specifically, and 81920 hit the catastrophic
-        # throughput-collapse failure mode at ~514MiB free), so the same
-        # extra headroom that let Expert reach 100000 clean may not stretch
-        # as far here once mmproj's fixed buffer cost is added back in.
-        # NOT YET CONFIRMED. MANDATORY before trusting any result: verify the
-        # live process argv via `kubectl exec ... ps aux | grep llama-server`
-        # actually shows the new -c value -- a ConfigMap subPath mount does
-        # NOT hot-reload into an already-running pod, and this exact mistake
-        # produced two rounds of false-positive results on Expert earlier the
-        # same day (see that model's own comment above).
+        # -c 65536 -> 72000 -> 80000 TESTING 2026-09-18 (Eldar's call), on
+        # unified-cuda13, same rationale as qwen3.8-27b-Expert's successful
+        # 65536 -> 100000 push above: native Blackwell kernels are showing
+        # real extra VRAM headroom vs. the old build's thin margins at the
+        # same context. STEP 1 (72000) CONFIRMED via real argv-verified test
+        # (see the ArgoCD note below for why that verification step is now
+        # mandatory): no OOM, 1609.33 t/s prompt / 46.42 t/s decode (both
+        # match the old baselines, no collapse), 874MiB free on the 5070 Ti
+        # -- a real, comfortable margin, better than Expert's own 505MiB at
+        # its locked-in 100000. STEP 2: 80000 is the next step up, matching
+        # Expert's own progression. NOT YET CONFIRMED.
+        #
+        # ArgoCD CAUGHT REVERTING MANUAL APPLIES, same day: discovered mid-
+        # investigation that the aibox-p1 ArgoCD Application was showing
+        # "Synced" while actually still pinned to a commit several pushes
+        # behind HEAD (self-heal was silently reverting every `kubectl apply`
+        # back to that stale revision) -- produced multiple rounds of false-
+        # positive test results on both this model and qwen3.8-27b-Expert
+        # before being caught via `ps aux` showing the wrong -c value in the
+        # live process argv. Fixed via a hard refresh
+        # (`kubectl patch application aibox-p1 -n argocd --type merge -p
+        # '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'`)
+        # to force it to catch up to actual HEAD. MANDATORY before trusting
+        # any -c tuning result on this file going forward: verify the live
+        # process argv via `kubectl exec ... ps aux | grep llama-server`
+        # actually shows the new value -- neither a clean-looking completion
+        # response nor `kubectl apply` saying "configured" nor the ConfigMap
+        # object itself is sufficient proof the running process picked it up.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B/vision/Qwen3.8-27B-UD-Q3_K_XL.gguf
@@ -351,7 +362,7 @@ data:
           --parallel 1
           -fa on
           -b 8192
-          -c 72000 -ctk q4_0 -ctv q4_0
+          -c 80000 -ctk q4_0 -ctv q4_0
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
           --presence-penalty 1.5 --repeat-penalty 1.0
           --reasoning-budget 4096
