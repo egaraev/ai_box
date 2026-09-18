@@ -153,22 +153,25 @@ data:
         # not a functional change. Same swap applied everywhere else
         # --no-mmap appeared in this file -- see each model's own note.
         #
-        # -c 65536 -> 72000 TESTING 2026-09-18 (Eldar's call): now that
-        # unified-cuda13 is confirmed live (see above), real nvidia-smi
-        # captures at 65536 are showing more headroom than the old
-        # unified-cuda image ever showed at this same context (1282MiB
-        # free mid-generation today, vs. the thin/edge-of-card margins
-        # documented under the old build) -- suggesting the native Blackwell
-        # kernels may use a smaller compute/graph_reserve buffer. 80000 is
-        # PROVEN BAD on the old build (OOM, ~470MiB short on the compute
-        # buffer alone, see the 2026-09-05 clean-pod benchmark above) -- 72000
-        # is a deliberate step toward that number, not a repeat of the jump
-        # straight to it. NOT YET CONFIRMED -- watch nvidia-smi and real
-        # decode t/s on the next clean-pod test before calling this settled;
-        # if it holds with real margin (not just "loads"), push toward 80000
-        # next. If it OOMs or shows the same throughput-collapse pattern
+        # -c 65536 -> 72000 -> 80000 TESTING 2026-09-18 (Eldar's call): now
+        # that unified-cuda13 is confirmed live (see above), real nvidia-smi
+        # captures at 65536 showed more headroom than the old unified-cuda
+        # image ever showed at that same context, suggesting the native
+        # Blackwell kernels use a smaller compute/graph_reserve buffer.
+        # STEP 1 (72000) CONFIRMED via real clean-pod test: no OOM, 45.41 t/s
+        # decode (matches the 44.8-46.3 t/s baseline, no collapse), 1137MiB
+        # free on the 5070 Ti after a real completion -- comparable to or
+        # better than the margin seen at 65536 on this same build. STEP 2:
+        # 80000 is the exact value PROVEN BAD on the old unified-cuda build
+        # (OOM, ~470MiB short on the compute buffer alone, see the
+        # 2026-09-05 clean-pod benchmark above) -- testing it directly now
+        # that step 1 confirmed real headroom was gained, not repeating the
+        # old jump blind. NOT YET CONFIRMED -- watch nvidia-smi and real
+        # decode t/s on the next clean-pod test before calling this settled.
+        # If it OOMs or shows the same throughput-collapse pattern
         # Expert-Vision hit at 81920 (prompt processing falling off a cliff
-        # despite technically loading), revert straight back to 65536.
+        # despite technically loading), fall back to the confirmed-good
+        # 72000, not all the way to 65536.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B/Qwen3.8-27B-UD-IQ4_XS.gguf
@@ -181,7 +184,7 @@ data:
           --parallel 1
           -b 512 -ub 64
           -fa on
-          -c 72000 -ctk q4_0 -ctv q4_0
+          -c 80000 -ctk q4_0 -ctv q4_0
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
           --presence-penalty 1.5 --repeat-penalty 1.0
           --reasoning-budget 4096
