@@ -556,6 +556,12 @@ data:
           -c 32768
           --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0
           --reasoning-budget 0
+        # ttl: 0 -> 300 TRIED, then REVERTED, same day 2026-09-18: briefly
+        # took this model out of forced residency so it would idle-evict
+        # off the 3060 between Honcho calls -- reverted within minutes once
+        # Eldar clarified he wants instant responses from BOTH this model
+        # and arch-router-1.5b, not just arch-router. Back to permanently
+        # resident, same as it's been since the 2026-09-16 GPU move.
         env:
           - "CUDA_VISIBLE_DEVICES=GPU-e52569a1-1ceb-1492-9abe-cd07922b1cf8"    # 3060
         ttl: 0
@@ -1002,4 +1008,11 @@ data:
         # q8 (qwen3-8b) and l31 (llama-3.1-8b) REMOVED 2026-09-16 along with
         # their model entries above (Eldar's cleanup call, both long unwired
         # -- see the REMOVED comment where their entries used to be).
+        # q17 (qwen3-1.7b-gpu) TAKEN OUT of this AND-group, then PUT BACK,
+        # same day 2026-09-18: briefly tried letting it idle-evict off the
+        # 3060 between Honcho calls, reverted within minutes once Eldar
+        # clarified he wants instant responses from both q17 and
+        # arch-router-1.5b, not just arch-router. Both stay permanently
+        # resident, same "ttl alone isn't enough, must be ANDed into this
+        # set too" mechanism the 2026-09-07 bug fix above established.
         resident_router: "(qpg | h31 | med | qwe | qwv) & arch & emb & q17"
