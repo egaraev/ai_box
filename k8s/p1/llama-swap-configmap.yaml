@@ -140,6 +140,18 @@ data:
         # -ub can start costing real prompt-processing speed), or take the
         # bigger swing at the actual non-model VRAM baseline (desktop +
         # ComfyUI idle floor).
+        #
+        # --no-mmap -> --load-mode none CHANGED 2026-09-18, forced by the
+        # unified-cuda13 image switch (see llama-swap-deployment.yaml's
+        # top-of-file comment for why that switch happened). Not a tuning
+        # choice -- the newer llama.cpp bundled in that image hard-removed
+        # --no-mmap (`error: invalid argument: --no-mmap`, confirmed live)
+        # in favor of a single --load-mode enum (none/mmap/mlock/dio).
+        # --load-mode none is llama.cpp's own documented direct replacement
+        # for --no-mmap (github.com/ggml-org/llama.cpp discussion #26469) --
+        # same behavior (model loaded fully, no memory-mapped lazy paging),
+        # not a functional change. Same swap applied everywhere else
+        # --no-mmap appeared in this file -- see each model's own note.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B/Qwen3.8-27B-UD-IQ4_XS.gguf
@@ -148,7 +160,7 @@ data:
           --jinja
           -ngl 99
           -t 8
-          --no-mmap
+          --load-mode none
           --parallel 1
           -b 512 -ub 64
           -fa on
@@ -286,7 +298,7 @@ data:
           --jinja
           -ngl 99
           -t 8
-          --no-mmap
+          --load-mode none
           --parallel 1
           -fa on
           -b 8192
@@ -601,7 +613,7 @@ data:
           --n-gpu-layers 99
           --n-cpu-moe 25
           -t 8
-          --no-mmap
+          --load-mode none
           --flash-attn on
           --jinja
           -ctk q4_0
@@ -639,7 +651,7 @@ data:
           --n-gpu-layers 99
           --n-cpu-moe 20
           -t 16
-          --no-mmap
+          --load-mode none
           --flash-attn on
           --jinja
           -ctk q4_0
@@ -706,7 +718,7 @@ data:
           --host 0.0.0.0
           --n-gpu-layers 99
           -t 8
-          --no-mmap
+          --load-mode none
           --parallel 1
           --flash-attn on
           --jinja
@@ -816,7 +828,7 @@ data:
           --host 0.0.0.0
           --n-gpu-layers 99
           -t 8
-          --no-mmap
+          --load-mode none
           --parallel 1
           --flash-attn on
           --jinja
