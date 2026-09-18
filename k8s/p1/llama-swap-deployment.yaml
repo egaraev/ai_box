@@ -1,8 +1,30 @@
 # llama-swap: the GPU model-serving layer for P1. Runs the
-# ghcr.io/mostlygeek/llama-swap:unified-cuda image (bundles a CUDA-built
+# ghcr.io/mostlygeek/llama-swap:unified-cuda13 image (bundles a CUDA-built
 # llama-server + llama-swap in one container), reads its model roster from
 # the ConfigMap in llama-swap-config.yaml, and reads GGUF files from
 # /data/models on the host (hostPath — fine for a single-node cluster).
+#
+# IMAGE TAG 2026-09-18 (Eldar's call): switched unified-cuda -> unified-cuda13.
+# Root cause investigated, not guessed: unified-cuda is built for compute
+# capabilities 60;61;75;86;89 (Pascal through Ada) -- it has NO native kernels
+# for the RTX 5070 Ti (Blackwell, sm_120/compute capability 12.0). It was
+# still running via CUDA's PTX forward-compatibility (JIT-compiling the
+# embedded sm_89 PTX at load time), not via Blackwell-native MMQ kernels --
+# same class of "wrong kernel path" gap documented publicly to cost 5-6x
+# prompt-processing throughput on Blackwell when the binary falls back off
+# its native arch (github.com/mostlygeek/llama-swap unified-cuda13 tag is
+# built CUDA 13.3.1 for 80;86;89;90;100;120, sm_120 included). Confirmed
+# aibox's host driver (595.91.07, CUDA 13.2 per `nvidia-smi`) clears
+# unified-cuda13's CUDA 13 / R580+ driver requirement before switching --
+# this pod only needs the host driver, not a host CUDA toolkit install.
+# VRAM margin on the 5070 Ti is already thin (see llama-swap-configmap.yaml's
+# qwen3.8-27b-Expert comments, -b 512 -ub 64 already tuned down once for
+# OOM) -- a different CUDA/cuBLAS build can shift that baseline slightly
+# either way, so after deploying: re-run the same reasoning-route stress
+# test used for the -ub tuning (5-6 back-to-back messages), confirm no new
+# OOM via /logs/stream/upstream, and compare decode t/s against the
+# previously-measured baseline (44.8 t/s on qwen3.8-27b-Expert at -c 65536)
+# before treating this as a proven win.
 #
 # NOTE: the ConfigMap is mounted via subPath, so a `kubectl apply` /
 # ArgoCD sync of a config change updates the file on disk but does NOT
@@ -78,7 +100,7 @@ spec:
       runtimeClassName: nvidia
       containers:
         - name: llama-swap
-          image: ghcr.io/mostlygeek/llama-swap:unified-cuda
+          image: ghcr.io/mostlygeek/llama-swap:unified-cuda13
           ports:
             - containerPort: 8080
               name: http
