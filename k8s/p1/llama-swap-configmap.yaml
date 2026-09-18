@@ -902,19 +902,45 @@ data:
         # test that originally caught the httpx.ReadTimeout regression (see
         # qwen3.8-27b-Expert's own -t history above) and confirm arch-router
         # classification calls come back faster with no renewed timeouts.
+        # MOVED TO GPU 2026-09-18 (Eldar's call: "cannot wait 7-10 seconds
+        # for each decision" -- arch-router classifies every single "auto"
+        # chat message on the hot path, so its decode speed is felt on
+        # literally every message). Supersedes the -t 8->12 CPU-tuning
+        # rationale above -- this model is no longer CPU-bound at all.
+        # Moved to the RTX 3060 (GPU 0), the same card qwen3-1.7b-gpu (and
+        # therefore Honcho's deriver/dialectic/summary/dream calls) already
+        # runs on -- Eldar's own framing for this change. -ngl 0 -> 99,
+        # --no-mmap dropped (meaningless once weights are on GPU),
+        # --flash-attn on added, -t 12 -> 2 (same small value as
+        # qwen3-1.7b-gpu and nomic-embed-text-v1.5 -- CPU now only covers
+        # prompt/sampling overhead, not real compute).
+        #
+        # PINNED BY UUID, NOT INDEX, same as every other GPU model in this
+        # file after the index-pin bug found during the original second-GPU
+        # migration (see qwen3-1.7b-gpu's own comment above for the full
+        # root cause) -- GPU-e52569a1-1ceb-1492-9abe-cd07922b1cf8 is the
+        # 3060 specifically, not whatever index CUDA happens to rank it.
+        #
+        # VRAM check: 3060 is 12288MiB total; qwen3-1.7b-gpu alone already
+        # uses ~5.5GB there. Arch-Router-1.5B-Q4_K_M is a small ~1GB-class
+        # model at this context size, so the combined footprint should
+        # comfortably fit -- but this box has hit razor-thin-VRAM OOMs
+        # before on the 5070 Ti (see qwen3.8-27b-Expert's own comment), so
+        # worth an nvidia-smi check after first boot rather than assuming.
+        # NOT YET CONFIRMED on aibox.
         cmd: |
           llama-server
           -m /models/arch-router-1.5B/Arch-Router-1.5B-Q4_K_M.gguf
           --port ${PORT}
           --host 0.0.0.0
           --jinja
-          -ngl 0
-          -t 12
-          --no-mmap
+          -ngl 99
+          --flash-attn on
+          -t 2
           -c 24576
           --temp 0
         env:
-          - "CUDA_VISIBLE_DEVICES="
+          - "CUDA_VISIBLE_DEVICES=GPU-e52569a1-1ceb-1492-9abe-cd07922b1cf8"    # 3060
         ttl: 0
 
     matrix:
