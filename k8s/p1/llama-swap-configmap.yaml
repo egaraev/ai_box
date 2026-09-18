@@ -771,6 +771,20 @@ data:
       # the array-specific failure mode itself still needs a real
       # `clarify`-triggering test post-deploy to confirm, not assume.
       hermes3-llama-3.1-8b:
+        # -c 65536 -> 100000 TESTING 2026-09-18 (Eldar's call): matching
+        # qwen3.8-27b-Expert's locked-in 100000 above, so this model (the
+        # "other"/catch-all route target) isn't the weak link capping what
+        # Hermes can safely assume across every route. This is a much
+        # smaller 8B model with real VRAM to spare compared to the 27B
+        # models tested earlier tonight, so this should be low-risk, but
+        # test it properly anyway: MANDATORY verify the live process argv
+        # via `ps aux` before trusting any result (see qwen3.8-27b-Expert's
+        # own comment above for why -- a ConfigMap subPath mount does not
+        # hot-reload, and ArgoCD's self-heal was separately found reverting
+        # manual applies on this same file the same night; check
+        # `kubectl get application aibox-p1 -n argocd -o jsonpath=
+        # '{.status.sync.revision}'` against `git rev-parse HEAD` if a
+        # result looks stale). NOT YET CONFIRMED.
         cmd: |
           llama-server
           -m /models/hermes3-llama-3.1-8B/Hermes-3-Llama-3.1-8B.Q4_K_M.gguf
@@ -784,7 +798,7 @@ data:
           --jinja
           -ctk q8_0
           -ctv q8_0
-          -c 65536
+          -c 100000
         # CUDA_VISIBLE_DEVICES ADDED 2026-09-16, pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
         # see qwen3.8-27b-Expert's own comment above for the full reasoning.
         env:
@@ -881,6 +895,13 @@ data:
       # just a direct curl (the direct curl already worked before this
       # change since it had no conversation history to trigger the bug).
       llama3.1-aloe-beta-8b:
+        # -c 65536 -> 100000 TESTING 2026-09-18 (Eldar's call), same
+        # rationale as hermes3-llama-3.1-8b's own note just above -- this is
+        # the "medical" route target, and needs to match the new fleet-wide
+        # ceiling so it isn't the model that silently caps what Hermes can
+        # trust across every route. MANDATORY verify via `ps aux` before
+        # trusting any result -- see qwen3.8-27b-Expert's comment for why.
+        # NOT YET CONFIRMED.
         cmd: |
           llama-server
           -m /models/Llama3.1-Aloe-Beta-8B/Llama3.1-Aloe-Beta-8B.i1-Q4_K_M.gguf
@@ -895,7 +916,7 @@ data:
           --chat-template-file /models/hermes3-llama-3.1-8B/hermes3-tool-template.jinja
           -ctk q8_0
           -ctv q8_0
-          -c 65536
+          -c 100000
         # CUDA_VISIBLE_DEVICES pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
         # same GPU medgemma-1.5-4b was already using, kept as-is since this
         # is a like-for-like backend swap on the same "medical" route.
