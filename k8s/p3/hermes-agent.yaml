@@ -232,9 +232,29 @@ data:
     # still comfortable for the slowest real path, ingest_file captioning
     # an image via the local vision model (~60s worst case) -- nowhere near
     # media-gen's multi-minute generation calls, so no need for 900s here.
+    # media-augment (added 2026-09-23, Qwen-Image-2.1 image-editing roadmap
+    # item): apps/media-augment-mcp/, deployed by
+    # k8s/media-gen/media-augment-mcp-deployment.yaml. Deliberately a
+    # SEPARATE service from media-gen-mcp, not a new tool on it, so a bug
+    # in its new input-image handling can't take down the working
+    # generate_image/generate_video/generate_music tools -- see that
+    # server's own top-of-file comment for the full design (shares the
+    # same Redis busy flag as media-gen-mcp, so the two still can't run
+    # concurrently, they just live in separate pods). One tool: edit_image.
+    # Its docstring requires the caller (you) to copy the source photo
+    # from your own /opt/data/cache/images/ scratch cache into
+    # /shared-output/ FIRST (you already have write access there -- see
+    # the shared-output volume mount below) and pass that path in, since
+    # /opt/data/cache/images/ itself is a PVC private to this pod, not
+    # reachable from media-augment-mcp's. Same 900s timeout as media-gen
+    # for the same reason (multi-minute generation, possibly a colder
+    # model load given Qwen-Image-2.1's larger ~16GB footprint).
     mcp_servers:
       media-gen:
         url: "http://media-gen-mcp.ai-mcp.svc.cluster.local:8000/mcp"
+        timeout: 900
+      media-augment:
+        url: "http://media-augment-mcp.ai-mcp.svc.cluster.local:8000/mcp"
         timeout: 900
       vault:
         url: "http://vault-mcp.ai-mcp.svc.cluster.local:8000/mcp"

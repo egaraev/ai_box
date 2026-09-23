@@ -1,0 +1,6 @@
+# Same floor as media-gen-mcp/requirements.txt -- see that file's comment
+# for why (mcp 2.x renamed FastMCP -> MCPServer; plain `pip install mcp`
+# already resolves to 2.x).
+mcp>=2.0
+httpx>=0.27
+redis>=5.0

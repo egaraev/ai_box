@@ -1,0 +1,121 @@
+# media-augment-mcp: the HTTP MCP server Hermes calls for image editing/
+# augmentation (edit_image, Qwen-Image-2.1). Split out as its own service
+# from media-gen-mcp (Eldar's explicit call, 2026-09-23) rather than adding
+# a tool there, specifically so a bug in the new input-image handling can't
+# take down the already-working generate_image/generate_video/generate_music
+# tools. Source lives in apps/media-augment-mcp/ in this repo (not published
+# anywhere) -- built and run locally on aibox, same as media-gen-mcp, see
+# that Deployment's own comment for the full reasoning on skipping a
+# registry. See apps/media-augment-mcp/server.py's top-of-file comment for
+# the full design writeup (input-image handoff via /shared-output, the
+# second hop into ComfyUI's own input/ folder, the shared Redis busy flag).
+#
+# BUILD / DEPLOY (run on aibox -- the image has to exist as a local
+# containerd/docker image on the node before this Deployment can start):
+#   cd ~/repos/aibox-platform/apps/media-augment-mcp
+#   docker build -t media-augment-mcp:latest .
+#   docker save media-augment-mcp:latest | sudo k3s ctr images import -
+# After editing server.py, repeat both, then:
+#   kubectl rollout restart deployment/media-augment-mcp -n ai-mcp
+# When THIS FILE changes -- `kubectl apply -f` it (or ArgoCD sync of
+# k8s/media-gen) in addition to any image rebuild.
+#
+# Host directory this expects to already exist before first apply (owned
+# by the same uid/gid ComfyUI's own container runs as -- verify with
+# `id eldar` on aibox, same caveat as comfyui-deployment.yaml's WANTED_UID):
+#   /data/comfyui/basedir/input   <- ALREADY EXISTS, created by ComfyUI's
+#                                    own Deployment; this pod just also
+#                                    mounts it so it can write the source
+#                                    photo there before submitting a prompt.
+# /data/media-gen-output already exists (created by media-gen-mcp's own
+# Deployment, DirectoryOrCreate) -- reused here unchanged, no new dir needed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: media-augment-mcp
+  namespace: ai-mcp
+  labels:
+    app: media-augment-mcp
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # only one generation job should ever be in flight (shared GPU/busy-flag with media-gen-mcp)
+  selector:
+    matchLabels:
+      app: media-augment-mcp
+  template:
+    metadata:
+      labels:
+        app: media-augment-mcp
+    spec:
+      containers:
+        - name: media-augment-mcp
+          image: media-augment-mcp:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: LLAMA_SWAP_URL
+              value: "http://llama-swap.ai-models.svc.cluster.local:8080"
+            - name: COMFYUI_URL
+              value: "http://comfyui.ai-models.svc.cluster.local:8188"
+            - name: REDIS_URL
+              value: "redis://redis.ai-memory.svc.cluster.local:6379/0"
+            - name: SHARED_OUTPUT_DIR
+              value: "/shared-output"
+            - name: COMFYUI_INPUT_DIR
+              value: "/comfyui-input"
+            # For _expand_image_reference (apps/media-augment-mcp/server.py)
+            # -- inserts the mandatory <image1> tag into the caller's plain
+            # edit instruction via a one-shot call to the local expert
+            # model, same base_url/auth pattern media-gen-mcp-deployment.yaml
+            # already uses for its own LiteLLM call.
+            - name: LITELLM_URL
+              value: "http://litellm.ai-models.svc.cluster.local:4000/v1"
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master_key
+          volumeMounts:
+            # Same hostPath as media-gen-mcp/hermes-agent -- reused for
+            # both directions here (Hermes drops the source photo, we drop
+            # the result). See server.py's top-of-file comment.
+            - name: shared-output
+              mountPath: /shared-output
+            # NEW: lets this pod write the source photo directly into
+            # ComfyUI's own input/ folder before submitting a prompt --
+            # ComfyUI's LoadImage node only reads a bare filename out of
+            # that folder, not an arbitrary path.
+            - name: comfyui-input
+              mountPath: /comfyui-input
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: shared-output
+          hostPath:
+            path: /data/media-gen-output
+            type: DirectoryOrCreate
+        - name: comfyui-input
+          hostPath:
+            path: /data/comfyui/basedir/input
+            type: Directory   # must already exist -- ComfyUI's own Deployment created it
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: media-augment-mcp
+  namespace: ai-mcp
+spec:
+  selector:
+    app: media-augment-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
