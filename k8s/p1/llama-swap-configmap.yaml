@@ -349,6 +349,21 @@ data:
         # actually shows the new value -- neither a clean-looking completion
         # response nor `kubectl apply` saying "configured" nor the ConfigMap
         # object itself is sufficient proof the running process picked it up.
+        #
+        # -c 80000 REVERTED back to 72000 2026-09-23: STEP 2 (80000, marked
+        # NOT YET CONFIRMED above) was live in this file and caused a real
+        # cudaMalloc OOM on a genuine Telegram vision request -- "allocating
+        # 884.62 MiB on device 0 ... out of memory" from /logs/stream/upstream,
+        # the exact same shortfall size the 2026-09-06 benchmark hit at c=100000
+        # in a clean pod. 80000 was apparently never actually load-tested (no
+        # confirmation note was ever added, unlike every other step in this
+        # history), and sits close enough to 81920's already-documented danger
+        # zone (514MiB free, catastrophic slowdown, see above) that this isn't
+        # surprising. Reverting to 72000 -- the last value in this file's own
+        # history that was both load-tested AND confirmed via live argv with a
+        # comfortable margin (874MiB free, no slowdown). Re-verify via
+        # `kubectl exec ... ps aux | grep llama-server` after this deploys,
+        # per the ArgoCD note above, before assuming it actually took effect.
         cmd: |
           llama-server
           -m /models/qwen3.8-27B/vision/Qwen3.8-27B-UD-Q3_K_XL.gguf
@@ -362,7 +377,7 @@ data:
           --parallel 1
           -fa on
           -b 8192
-          -c 80000 -ctk q4_0 -ctv q4_0
+          -c 72000 -ctk q4_0 -ctv q4_0
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
           --presence-penalty 1.5 --repeat-penalty 1.0
           --reasoning-budget 4096
