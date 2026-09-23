@@ -365,8 +365,6 @@ async def edit_image(
 
     async with httpx.AsyncClient() as client:
         try:
-            await _unload_chat_model(client)
-
             # Second hop: ComfyUI's LoadImage node only reads a bare
             # filename out of its own input/ folder -- copy the source
             # photo there under a collision-proof name.
@@ -375,7 +373,29 @@ async def edit_image(
             shutil.copyfile(image_path, os.path.join(COMFYUI_INPUT_DIR, input_filename))
             logger.info("staged input image as %s", input_filename)
 
+            # ORDERING BUG FOUND 2026-09-23, real production failure: this
+            # used to call _unload_chat_model() BEFORE _expand_image_reference().
+            # _expand_image_reference() calls LiteLLM with an explicit model
+            # name (IMAGE_TAG_EXPANSION_MODEL), which makes llama-swap LOAD
+            # that chat model back onto the same GPU ComfyUI is about to use --
+            # so the unload was immediately undone by this tool's own next
+            # step, and ComfyUI's real submission hit `Free (according to
+            # CUDA): 3.19 MiB` (confirmed via the actual execution_error).
+            # Fix: do the LLM-dependent tag expansion FIRST (whatever chat
+            # model that needs is fine to have loaded at this point, nothing
+            # GPU-heavy has started yet), THEN unload right before ComfyUI
+            # actually needs the GPU, so nothing reloads a chat model in
+            # between.
             expanded_prompt = await _expand_image_reference(client, prompt)
+
+            await _unload_chat_model(client)
+            # Same reasoning as VRAM_FREE_SETTLE_SECONDS below (2026-09-09
+            # OOM-race precedent) but for the opposite direction: llama-swap
+            # acknowledging the unload call with 200 doesn't mean the model
+            # process has actually finished releasing CUDA memory yet --
+            # give it a moment before ComfyUI tries to allocate on the same
+            # GPU.
+            await asyncio.sleep(VRAM_FREE_SETTLE_SECONDS)
 
             workflow = copy.deepcopy(WORKFLOW_TEMPLATE)
             workflow["1"]["inputs"]["image"] = input_filename
