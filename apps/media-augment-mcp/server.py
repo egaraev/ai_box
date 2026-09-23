@@ -42,20 +42,17 @@ Deployment already mounts as part of its basedir volume -- see
 k8s/media-gen/comfyui-deployment.yaml) added to THIS pod so it can write
 there directly.
 
-WORKFLOW JSON -- unlike media-gen-mcp's WORKFLOW_TEMPLATE (captured live
-via window.app.graphToPrompt() against a real successful generation),
-the template below is a HAND CONVERSION from the litegraph/UI-export
+WORKFLOW JSON -- started as a HAND CONVERSION from the litegraph/UI-export
 JSON Eldar's Windows session handed off (Image_Augmentation.json -- the
-nodes/links/widgets_values array format the ComfyUI frontend saves,
-NOT the flat {"<id>": {"class_type", "inputs"}} format the real /prompt
-API needs). This has NOT been verified against a live ComfyUI instance
-yet (core wasn't updated to v0.37.0+ and the model files weren't
-downloaded yet at the time this was written) -- treat the node IDs/
-class_types/input names below as a best-effort translation, and repeat
-media-gen-mcp's own verification step (capture the REAL graphToPrompt()
-payload from ComfyUI's web UI once a manual test run works end-to-end
-there) before trusting this for real traffic. Node IDs below match the
-source JSON's own id numbering, not renumbered.
+nodes/links/widgets_values array format the ComfyUI frontend saves, NOT
+the flat {"<id>": {"class_type", "inputs"}} format the real /prompt API
+needs), then VERIFIED 2026-09-23 against a real successful generation on
+aibox (Qwen_image_2.1_edit_00001, 359s, background swap on a real family
+photo, correct result) by capturing window.app.graphToPrompt() from that
+run's loaded graph in ComfyUI's own web UI -- same method media-gen-mcp's
+WORKFLOW_TEMPLATE was built from. The captured payload matched the hand
+conversion node-for-node, input-for-input, with no differences. Node IDs
+below match the source JSON's own id numbering, not renumbered.
 """
 import asyncio
 import copy
@@ -120,12 +117,15 @@ BUSY_TTL_SECONDS = 300  # safety-net only -- the finally block is the primary cl
 # media-gen-mcp's generate_video/generate_music already use instead.
 VRAM_FREE_SETTLE_SECONDS = 3
 
-# Qwen-Image-2.1's three files sum to ~16.1GB -- much larger than Z-Image
-# Turbo's single 12.3GB checkpoint -- so a cold load (first call after
-# ComfyUI restarts, or after any other model evicted it) can plausibly run
-# longer than generate_image's tuned 180s. Generous ceiling, same
-# reasoning as media-gen-mcp's own POLL_TIMEOUT_SECONDS comment.
-POLL_TIMEOUT_SECONDS = 300
+# A real warm-ComfyUI generation on aibox (2026-09-23 manual verification
+# run) took 359s end to end -- already past the original 300s value this
+# constant was first set to, so that was a confirmed-too-short bug, not
+# just a cautious guess that needed padding. 600s gives real margin above
+# that observed number, plus room for a cold load (first call after
+# ComfyUI restarts, or after any other model evicted it) which can run
+# longer still given Qwen-Image-2.1's three files sum to ~16.1GB -- much
+# larger than Z-Image Turbo's single 12.3GB checkpoint.
+POLL_TIMEOUT_SECONDS = 600
 POLL_INTERVAL_SECONDS = 1.0
 PROGRESS_REPORT_INTERVAL_SECONDS = 20  # see media-gen-mcp's own comment on this same constant
 
@@ -154,8 +154,9 @@ Rewrite the user's instruction:
 - Output ONLY the rewritten instruction text. No preamble, no explanation, no surrounding quotes."""
 
 
-# API-format translation of Image_Augmentation.json -- SEE THE TOP-OF-FILE
-# WARNING, this has not been verified against a live ComfyUI yet.
+# API-format translation of Image_Augmentation.json -- verified 2026-09-23
+# against a real successful generation's own graphToPrompt() capture, see
+# the top-of-file WORKFLOW JSON note.
 WORKFLOW_TEMPLATE = {
     "1": {
         "class_type": "LoadImage",
