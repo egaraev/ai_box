@@ -87,6 +87,22 @@ LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "")
 # read, we drop the edited result here for Hermes to attach) rather than
 # adding a second hostPath just for inputs. One shared drop folder is
 # simpler than two, and nothing here needs them kept apart.
+#
+# HOST PERMISSIONS, real production bug hit 2026-09-23: the underlying host
+# directory (/data/media-gen-output on aibox) was created as root:root 755,
+# which blocked Hermes's own terminal-tool writes into it -- those run as
+# uid=10000(hermes), a dedicated service account, NOT the aibox host's
+# personal eldar account, and NOT root even though the hermes-agent/
+# media-augment-mcp containers themselves run as uid 0 (irrelevant here,
+# since Hermes's terminal tool writes hit the host filesystem directly, not
+# through this container). Fixed with `sudo chmod 777 /data/media-gen-output`
+# on the host. This directory is mounted with DirectoryOrCreate (see
+# k8s/media-gen/media-augment-mcp-deployment.yaml and media-gen-mcp's own
+# deployment) -- if it's ever deleted and k8s recreates it, it comes back as
+# root:root 755 and silently reintroduces this exact failure. If edit_image
+# (or Hermes attaching a photo) starts failing with permission denied again,
+# check this first: `ls -ld /data/media-gen-output` on the aibox host should
+# show drwxrwxrwx.
 SHARED_OUTPUT_DIR = os.environ.get("SHARED_OUTPUT_DIR", "/shared-output")
 
 # NEW volume, not shared with any other pod today -- see the top-of-file
