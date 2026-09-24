@@ -74,6 +74,29 @@ spec:
               value: "true"
             - name: NVIDIA_VISIBLE_DEVICES
               value: "1"   # 5070 Ti only -- GPU 1, confirmed via nvidia-smi -L
+            # LTX-2.3 TEST 2026-09-24: the LTXAV transformer (23.8GB staged,
+            # per live log) doesn't fit in this card's 15.8GB VRAM, so
+            # ComfyUI's DynamicVRAM/comfy-aimdo system pages it in/out of
+            # host RAM on demand (real mechanism -- comfy_aimdo's VBAR
+            # page-fault model, not a naive cache). Live log showed the
+            # 23.8GB model getting "prepared for dynamic VRAM loading" TWICE
+            # in one generation (once per sampling pass, low-res then
+            # high-res), suggesting real eviction between the two passes,
+            # not just a logging artifact. Testing whether that's caused by
+            # inaccurate VRAM-pressure readings: NVML can under/over-report
+            # free VRAM inside a containerized/nvidia-runtimeClass pod vs a
+            # bare-metal Windows install, which would trigger eviction
+            # earlier than actually needed. --disable-nvml-pressure switches
+            # DynamicVRAM to raw CUDA pressure polling instead. This env var
+            # is read by the mmartial image's init.bash and appended
+            # verbatim to ComfyUI's main.py launch line (COMFY_CMDLINE_EXTRA
+            # -- confirmed via the image's own init.bash source). Compare
+            # the next generation's log for whether "23835MB Staged" still
+            # appears twice -- if it does, this wasn't the cause and should
+            # be reverted (remove this env var) rather than left in as dead
+            # weight.
+            - name: COMFY_CMDLINE_EXTRA
+              value: "--disable-nvml-pressure"
           volumeMounts:
             - name: run
               mountPath: /comfy/mnt
