@@ -516,17 +516,62 @@ data:
     MEDIA_GEN_BUSY_KEY = "media-gen:busy"
     BUSY_FALLBACK_MODEL = "openrouter-fallback"
 
+    # ADDED 2026-09-24, real production bug: the Redis flag above ONLY gets
+    # set by media-gen-mcp's own code -- a generation submitted directly
+    # through ComfyUI's own UI (which is how every LTX-2.3 model/graph on
+    # this box was actually validated before wiring it into media-gen-mcp,
+    # see apps/media-gen-mcp/server.py's own VIDEO_WORKFLOW_TEMPLATE
+    # comment) never touches that key at all, even though it fully occupies
+    # the same shared 5070 Ti every local chat model (qwen3.8-27b-Expert,
+    # hermes3-llama-3.1-8b, etc -- see llama-swap-configmap.yaml, almost
+    # every GPU model group is pinned to that one card) also needs. Real
+    # incident: qwen3.8-27b-Expert and hermes3-llama-3.1-8b both hit repeated
+    # "upstream command exited prematurely" (llama-swap's generic wrapper
+    # around a CUDA OOM) while a manual ComfyUI-UI generation was running,
+    # because this check saw Redis clear and routed to the local model as
+    # normal -- the cloud fallback never engaged even though it exists
+    # specifically for this situation. Fix: ALSO ask ComfyUI's own /queue
+    # endpoint whether it's actively working on something right now,
+    # regardless of who submitted it -- that's the real, authoritative
+    # signal for "is this GPU busy", the Redis flag was only ever a fast
+    # proxy for it on the one submission path that bothers to set it.
+    COMFYUI_URL = "http://comfyui.ai-models.svc.cluster.local:8188"
+    # Short timeout deliberately -- this runs on the hot path for every
+    # single "auto" chat request, so a slow/unreachable ComfyUI must never
+    # noticeably delay an ordinary chat message. Fails open (treated as
+    # "not running anything") on any error, same fail-open principle the
+    # Redis check already uses -- a missed busy signal degrades to
+    # yesterday's behavior (a chat request might race ComfyUI for VRAM),
+    # not a new failure mode, so there's no reason to ever block a chat
+    # request on this check itself.
+    COMFYUI_QUEUE_CHECK_TIMEOUT_SECONDS = 3.0
+
     async def _media_gen_busy():
-        if _REDIS is None:
-            return False
+        if _REDIS is not None:
+            try:
+                if bool(await _REDIS.get(MEDIA_GEN_BUSY_KEY)):
+                    return True
+            except Exception as exc:  # noqa: BLE001 -- Redis unreachable etc. -- fall through to the ComfyUI check
+                logger.warning(
+                    "media-gen busy check (redis) failed (%s: %s) -- falling back to comfyui queue check",
+                    type(exc).__name__, exc,
+                )
         try:
-            return bool(await _REDIS.get(MEDIA_GEN_BUSY_KEY))
-        except Exception as exc:  # noqa: BLE001 -- Redis unreachable etc. -- never block chat on this
+            async with httpx.AsyncClient(timeout=COMFYUI_QUEUE_CHECK_TIMEOUT_SECONDS) as client:
+                resp = await client.get(f"{COMFYUI_URL}/queue")
+                resp.raise_for_status()
+                # ComfyUI's own /queue shape: {"queue_running": [...],
+                # "queue_pending": [...]} -- non-empty queue_running means a
+                # job is actively being worked on right now (as opposed to
+                # merely queued), which is the real GPU-contention signal.
+                if resp.json().get("queue_running"):
+                    return True
+        except Exception as exc:  # noqa: BLE001 -- ComfyUI unreachable/slow etc. -- never block chat on this
             logger.warning(
-                "media-gen busy check failed (%s: %s) -- assuming not busy",
+                "media-gen busy check (comfyui queue) failed (%s: %s) -- assuming not busy",
                 type(exc).__name__, exc,
             )
-            return False
+        return False
 
     ARCH_ROUTER_URL = "http://llama-swap.ai-models.svc.cluster.local:8080/v1/chat/completions"
     ARCH_ROUTER_MODEL = "arch-router-1.5b"
