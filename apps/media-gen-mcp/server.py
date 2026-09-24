@@ -147,18 +147,30 @@ COMFYUI_RESTART_READY_POLL_INTERVAL_SECONDS = 2.0
 # driver-level teardown that can lag behind the new pod's own readiness,
 # which has nothing to do with the old pod's GPU state at all.
 #
-# CAVEAT: unlike VRAM_FREE_SETTLE_SECONDS's own 2026-09-09 incident, this
-# wasn't confirmed with a live-streamed upstream stderr showing the actual
-# CUDA allocation failure (that only streams in real time via llama-swap's
-# /logs/stream/upstream -- see aibox-config-restart-verify skill -- and
-# wasn't being tailed when this happened). Applied as a precaution based on
-# strong circumstantial evidence (3 real crashes, exact timing match) rather
-# than waiting for a second confirmed incident to nail the cause -- same
-# reasoning generate_music's own cleanup switch used above. Picked a bit
-# more generous than VRAM_FREE_SETTLE_SECONDS's 3s since a full pod
-# teardown (container kill + cgroup cleanup + driver reclaim) has more
-# moving parts than a single /free API call finishing.
-COMFYUI_POD_TEARDOWN_SETTLE_SECONDS = 5
+# UPDATE 2026-09-24, same day, real measured follow-up incident: the 5s
+# value above turned out to be way too short. A live test showed the exact
+# same crash happening even WITH the 5s settle in place --
+# "ComfyUI back up and answering after restart" logged at 11:06:16.051,
+# the tool-use router's next match (which only fires once the busy flag
+# clears, i.e. only after this function's sleep+return) logged at
+# 11:06:21.068 -- exactly +5.02s, confirming the 5s sleep really was
+# running -- and qwen3.8-27b-Expert STILL failed to start, burning through
+# litellm's 2 internal retries until 11:06:38.883 (+22.8s). Hermes's own
+# retry (which re-hit the same router match at 11:06:41.310, +25.3s)
+# finally succeeded. So the real VRAM/CUDA teardown after a full ComfyUI
+# pod restart apparently takes on the order of 20-25s, not 5 -- bumped to
+# 30s for margin over that measured window.
+#
+# CAVEAT: still not confirmed via a live-streamed upstream stderr showing
+# the actual CUDA allocation failure (that only streams in real time via
+# llama-swap's /logs/stream/upstream -- see aibox-config-restart-verify
+# skill -- and wasn't being tailed during either incident so far). Both
+# incidents match the same timing signature (crash clusters right after a
+# ComfyUI pod restart, recovers once enough time has passed), which is
+# strong evidence for the VRAM-teardown-race theory, but if crashes persist
+# even at 30s, the next step should be capturing that live trace rather
+# than keeping this number.
+COMFYUI_POD_TEARDOWN_SETTLE_SECONDS = 30
 # Must be the SAME path inside both this container and hermes-agent's --
 # see the "DELIVERY" note above. A hostPath volume, not a PVC: this is a
 # single-node cluster, so both pods always land on the same node anyway,
