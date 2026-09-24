@@ -64,6 +64,8 @@ spec:
           env:
             - name: WANTED_UID
               value: "1000"   # verify with `id eldar` on aibox — edit if different
+            - name: DISABLE_UPGRADES
+              value: "true"
             - name: WANTED_GID
               value: "1000"
             - name: BASE_DIRECTORY
@@ -95,8 +97,6 @@ spec:
             # appears twice -- if it does, this wasn't the cause and should
             # be reverted (remove this env var) rather than left in as dead
             # weight.
-            - name: COMFY_CMDLINE_EXTRA
-              value: "--disable-nvml-pressure"
           volumeMounts:
             - name: run
               mountPath: /comfy/mnt
