@@ -130,6 +130,35 @@ COMFYUI_POD_LABEL_SELECTOR = "app=comfyui"
 # wedge the busy flag -- and hence the router's cloud-fallback -- forever).
 COMFYUI_RESTART_READY_TIMEOUT_SECONDS = 120
 COMFYUI_RESTART_READY_POLL_INTERVAL_SECONDS = 2.0
+# ADDED 2026-09-24, real production failure (circumstantial, not confirmed
+# via a raw CUDA trace -- see the caveat below): a real generate_video call
+# delivered its video fine, but the very next chat completion (Hermes's own
+# follow-up reply, routed to qwen3.8-27b-Expert) crashed 3 times in a row
+# right after this function's restart-and-wait-ready returned -- confirmed
+# via llama-swap's own log, `[WARN] matrix: starting qwen3.8-27b-Expert
+# failed: upstream command exited prematurely`, timestamps lining up exactly
+# with the busy flag clearing and the next chat request landing. Hermes's
+# own retry logic recovered on attempt 2, so this was invisible to Eldar,
+# but a real crash happened. Same class of race this codebase has hit and
+# fixed multiple times already (see VRAM_FREE_SETTLE_SECONDS above): the
+# NEW ComfyUI pod answering "/" only proves ITS web server started, not
+# that the OLD pod's CUDA context has actually been torn down and its VRAM
+# reclaimed by the driver yet -- pod deletion is a kubelet/containerd/
+# driver-level teardown that can lag behind the new pod's own readiness,
+# which has nothing to do with the old pod's GPU state at all.
+#
+# CAVEAT: unlike VRAM_FREE_SETTLE_SECONDS's own 2026-09-09 incident, this
+# wasn't confirmed with a live-streamed upstream stderr showing the actual
+# CUDA allocation failure (that only streams in real time via llama-swap's
+# /logs/stream/upstream -- see aibox-config-restart-verify skill -- and
+# wasn't being tailed when this happened). Applied as a precaution based on
+# strong circumstantial evidence (3 real crashes, exact timing match) rather
+# than waiting for a second confirmed incident to nail the cause -- same
+# reasoning generate_music's own cleanup switch used above. Picked a bit
+# more generous than VRAM_FREE_SETTLE_SECONDS's 3s since a full pod
+# teardown (container kill + cgroup cleanup + driver reclaim) has more
+# moving parts than a single /free API call finishing.
+COMFYUI_POD_TEARDOWN_SETTLE_SECONDS = 5
 # Must be the SAME path inside both this container and hermes-agent's --
 # see the "DELIVERY" note above. A hostPath volume, not a PVC: this is a
 # single-node cluster, so both pods always land on the same node anyway,
@@ -763,13 +792,15 @@ async def _restart_comfyui_and_wait_ready(client: httpx.AsyncClient, ctx: Contex
     start = time.monotonic()
     last_progress = start
     deadline = start + COMFYUI_RESTART_READY_TIMEOUT_SECONDS
+    comfyui_answered = False
     while time.monotonic() < deadline:
         await asyncio.sleep(COMFYUI_RESTART_READY_POLL_INTERVAL_SECONDS)
         try:
             resp = await client.get(f"{COMFYUI_URL}/", timeout=5.0)
             if resp.status_code == 200:
                 logger.info("ComfyUI back up and answering after restart")
-                return
+                comfyui_answered = True
+                break
         except Exception:  # noqa: BLE001 -- expected while the pod is still (re)starting
             pass
         now = time.monotonic()
@@ -786,10 +817,21 @@ async def _restart_comfyui_and_wait_ready(client: httpx.AsyncClient, ctx: Contex
             except Exception as exc:  # noqa: BLE001 -- best effort, must not break the restart wait
                 logger.warning("report_progress failed (%s: %s)", type(exc).__name__, exc)
             last_progress = now
-    logger.warning(
-        "ComfyUI did not answer within %ss of restart -- clearing busy flag anyway",
-        COMFYUI_RESTART_READY_TIMEOUT_SECONDS,
-    )
+    if not comfyui_answered:
+        logger.warning(
+            "ComfyUI did not answer within %ss of restart -- clearing busy flag anyway",
+            COMFYUI_RESTART_READY_TIMEOUT_SECONDS,
+        )
+
+    # ADDED 2026-09-24, same incident as COMFYUI_POD_TEARDOWN_SETTLE_SECONDS's
+    # own comment above -- "/" answering 200 only proves the NEW pod's web
+    # server is up, not that the OLD pod's CUDA context has actually been
+    # torn down and its VRAM reclaimed by the driver yet. Sleep here
+    # unconditionally (whether ComfyUI answered or we gave up waiting) so
+    # whatever chat-model load happens right after the busy flag clears gets
+    # a bit more real-world margin, mirroring how VRAM_FREE_SETTLE_SECONDS is
+    # applied unconditionally elsewhere regardless of what /free reported.
+    await asyncio.sleep(COMFYUI_POD_TEARDOWN_SETTLE_SECONDS)
 
 
 @mcp.tool()
