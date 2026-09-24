@@ -199,7 +199,27 @@ data:
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
           --presence-penalty 1.5 --repeat-penalty 1.0
           --reasoning-budget 4096
-          --reasoning-effort medium
+          # medium -> xhigh CHANGED 2026-09-24 (Eldar's call), after a real
+          # benchmark on this box: 3 reps each of an easy and a "hard trap"
+          # problem showed xhigh consistently FASTER than both low and
+          # medium (avg 10.42s/5.05s vs medium's 15.97s/11.02s), not slower.
+          # Root cause: this GGUF's own chat_template only injects a
+          # reasoning_instructions string for 'xhigh' ("...prioritize
+          # correctness, consistency, and clarity in the final answer") and
+          # 'low' ("keep your thinking brief...") -- there's no branch for
+          # 'medium' at all, so medium silently got ZERO steering and
+          # defaulted to the most verbose/decorated markdown output of the
+          # three (highest token count, highest wall time), not a real
+          # middle ground. Hermes's real traffic never sets reasoning_effort
+          # per-request, so it was always falling back to this launch flag --
+          # meaning every real qwen3.8-27b-Expert completion was hitting the
+          # single worst-performing setting of the three with no measured
+          # accuracy benefit (all three got the trap problem right).
+          # CAVEAT: only tested on one easy + one not-actually-hard trap
+          # problem (n=3 reps each) -- correctness under xhigh on a genuinely
+          # hard multi-step problem is not yet verified, only speed. Revisit
+          # if xhigh starts producing worse answers on real Hermes traffic.
+          --reasoning-effort xhigh
         # CUDA_VISIBLE_DEVICES ADDED 2026-09-16: second GPU (RTX 3060) now on
         # the node, dedicated to qwen3-1.7b-gpu only (named qwen3-1.7b-cpu
         # until a later rename -- see that model's own comment) -- every
@@ -381,7 +401,15 @@ data:
           --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
           --presence-penalty 1.5 --repeat-penalty 1.0
           --reasoning-budget 4096
-          --reasoning-effort high
+          # high -> xhigh CHANGED 2026-09-24 (Eldar's call): no behavior
+          # change -- this GGUF's own chat_template already silently remaps
+          # 'high' to 'xhigh' internally (only 'xhigh'/'medium'/'low' are
+          # real values it recognizes), so this was already running as
+          # xhigh. Spelled out explicitly now for consistency with
+          # qwen3.8-27b-Expert's own change (see that model's comment above
+          # for the real benchmark behind it) instead of relying on the
+          # template's silent remap.
+          --reasoning-effort xhigh
         # CUDA_VISIBLE_DEVICES ADDED 2026-09-16, pinned BY UUID, not index (avoids the CUDA-device-ordering bug) --
         # see qwen3.8-27b-Expert's own comment above for the full reasoning
         # (second GPU now on the node, everything except qwen3-1.7b-cpu
