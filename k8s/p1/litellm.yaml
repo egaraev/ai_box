@@ -896,42 +896,56 @@ data:
     # the same safe failure direction as deep-reasoning's: an occasional
     # non-tool message just gets the slower, more careful model instead of
     # the fast one.
-    TOOL_USE_TRIGGERS = (
-        # image generation
-        "generate an image", "generate a image", "generate image",
-        "generate a picture", "generate picture", "generate a photo",
-        "make me an image", "make me a picture", "make an image",
-        "create an image", "create a picture",
-        # video generation
-        "generate a video", "generate video", "make me a video",
-        "make a video", "create a video",
-        # music generation -- the exact class that found this bug
-        "generate a song", "generate music", "generate a mp3",
-        "generate an mp3", "generate lyrics", "make me a song",
-        "make me a mp3", "make me music", "create a song", "create music",
-        "compose a song", "compose music", "music creating model",
-        "music generating model",
-        # image editing
-        "edit_image", "edit the image", "edit this image", "edit that image",
-        "edit my image", "edit the photo", "edit this photo",
-        "edit that photo", "edit my photo", "change the background",
-        "replace the background", "swap the background",
-        "remove the background",
-        # vault (search/ingest)
+    # CHANGED 2026-09-24 (real miss caught live): this started as a fixed
+    # phrase list ("generate a mp3", "generate music", etc.), same shape as
+    # DEEP_REASONING_TRIGGERS. First real test broke it immediately --
+    # Eldar's actual message was "Generate me a mp3 file with music for
+    # kids", and NONE of the fixed phrases matched, because "generate a
+    # mp3" is not a substring of "generate me a mp3" (the inserted "me"
+    # breaks it), same for "generate music" vs "generate me a mp3 file
+    # with music for kids" (the words aren't adjacent). A fixed-phrase list
+    # can't keep up with ordinary word order variation. Switched the media
+    # generation/editing half to a verb-anywhere AND noun-anywhere check
+    # instead (MEDIA_ACTION_VERBS / MEDIA_NOUNS below) -- order- and
+    # phrasing-independent, so "generate me a mp3", "produce a song",
+    # "please make a video of", "can you edit this photo" all match without
+    # needing every word-order variant spelled out. Vault
+    # operations/explicit tool names/meta tool-use phrases stay as fixed
+    # phrases (VAULT_TRIGGERS/TOOL_NAME_TRIGGERS/TOOL_META_TRIGGERS below)
+    # since those are much more fixed idioms in practice than "please can
+    # you generate/create/make/produce me a <thing>" is.
+    MEDIA_ACTION_VERBS = (
+        "generate", "regenerate", "create", "compose", "produce",
+        "make me", "make a", "make an", "write me", "give me", "sing",
+        "edit", "change", "replace", "swap", "remove", "modify", "retouch",
+    )
+
+    MEDIA_NOUNS = (
+        "image", "picture", "photo", "video", "clip", "gif", "song",
+        "music", "mp3", "lyrics", "background",
+    )
+
+    VAULT_TRIGGERS = (
         "search_vault", "search the vault", "ingest_file", "ingest_note",
         "add this to the vault", "add to the vault", "save this to the vault",
         "save to the vault", "add to my notes", "save to my notes",
-        # explicit tool function names, in case Hermes's own narration or a
-        # pasted error message ends up in the latest user turn
-        "generate_image", "generate_video", "generate_music",
-        # meta -- about tool use/honesty itself. Real transcript evidence
-        # this was added for: once a fabrication happens, every follow-up
-        # in that thread is the user pushing back ("Did you use the tool?",
-        # "did you call the tool") -- these carry none of the media
-        # keywords above (they're about the PROOF, not a new request) but
-        # are exactly the turns that most need the reliable model, since
-        # this is precisely where hermes3-llama-3.1-8b kept re-fabricating
-        # instead of admitting it or actually retrying.
+    )
+
+    # explicit tool function names, in case Hermes's own narration or a
+    # pasted error message ends up in the latest user turn
+    TOOL_NAME_TRIGGERS = (
+        "generate_image", "generate_video", "generate_music", "edit_image",
+    )
+
+    # meta -- about tool use/honesty itself. Real transcript evidence this
+    # was added for: once a fabrication happens, every follow-up in that
+    # thread is the user pushing back ("Did you use the tool?", "did you
+    # call the tool") -- these carry none of the media keywords above
+    # (they're about the PROOF, not a new request) but are exactly the
+    # turns that most need the reliable model, since this is precisely
+    # where hermes3-llama-3.1-8b kept re-fabricating instead of admitting
+    # it or actually retrying.
+    TOOL_META_TRIGGERS = (
         "use the tool", "used the tool", "use that tool", "call the tool",
         "called the tool", "run the tool", "did you use the tool",
         "did you call the tool", "did you run the tool",
@@ -948,7 +962,18 @@ data:
             if isinstance(content, str):
                 content = _strip_memory_context(content)
                 lowered = content.lower()
-                for t in TOOL_USE_TRIGGERS:
+                # media generation/editing: verb ANYWHERE + noun ANYWHERE
+                # in the message, not a fixed phrase -- see the comment
+                # above TOOL_USE_TRIGGERS' replacement for why.
+                has_verb = any(v in lowered for v in MEDIA_ACTION_VERBS)
+                has_noun = any(n in lowered for n in MEDIA_NOUNS)
+                if has_verb and has_noun:
+                    logger.info(
+                        "tool-use media verb+noun matched in: %r",
+                        content[:200],
+                    )
+                    return True
+                for t in VAULT_TRIGGERS + TOOL_NAME_TRIGGERS + TOOL_META_TRIGGERS:
                     if t in lowered:
                         logger.info(
                             "tool-use trigger matched %r in: %r",
