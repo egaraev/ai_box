@@ -234,16 +234,14 @@ PROGRESS_REPORT_INTERVAL_SECONDS = 20
 
 DEFAULT_NEGATIVE_PROMPT = "low quality, bad anatomy, extra digits, missing digits, extra limbs, missing limbs"
 
-# Wan2.2's own official ComfyUI template default negative prompt (kept
-# verbatim, not translated -- it's what the checkpoint was tuned/tested
-# against). Unlike HunyuanVideo's cfg-distilled checkpoint, Wan2.2 T2V-A14B
-# uses real cfg=3.5 guidance, so this actually has an effect.
-DEFAULT_VIDEO_NEGATIVE_PROMPT = (
-    "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，"
-    "整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，"
-    "画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，"
-    "静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走，裸露，NSFW"
-)
+# LTX-2.3's own official ComfyUI template default negative prompt (kept
+# verbatim -- captured directly from the real submitted /prompt payload
+# for a verified-successful generation, see VIDEO_WORKFLOW_TEMPLATE's own
+# comment below). Replaces Wan2.2's Chinese-language negative prompt
+# (removed 2026-09-24 when LTX-2.3 replaced Wan2.2 entirely) -- this one is
+# English because it's what LTX-2.3's own template ships with, not a
+# translation choice.
+DEFAULT_VIDEO_NEGATIVE_PROMPT = "pc game, console game, video game, cartoon, childish, ugly"
 
 # Wan2.2 T2V-A14B (like most open video models) has weak-to-no recall of
 # named characters/franchises/celebrities/real people -- confirmed
@@ -384,179 +382,324 @@ WORKFLOW_TEMPLATE = {
     },
 }
 
-# Video: Wan2.2 T2V-A14B (Alibaba), GGUF Q4_K_M quantized -- replaces the
-# earlier HunyuanVideo 1.5 setup (2026-09-08 - 09) after Eldar asked for
-# less hallucination / better precision / longer videos and research
-# pointed at switching model families rather than tuning the cfg-distilled
-# Hunyuan checkpoint (whose cfg is baked to 1, so negative prompts do
-# essentially nothing there). Wan2.2 T2V-A14B is a genuine two-expert MoE
-# (27B total params, 14B active per step: a "high-noise" expert for the
-# first half of denoising, a "low-noise" expert for the second half) with
-# real non-distilled CFG guidance (cfg=3.5), so negative prompts actually
-# matter here -- see DEFAULT_VIDEO_NEGATIVE_PROMPT above.
+# Video: LTX-2.3 (Lightricks) -- replaces the earlier Wan2.2 T2V-A14B setup
+# (2026-09-24, Eldar's explicit request, right after this project's
+# CUDA 13.0 / torch-nightly-cu130 upgrade closed enough of a generation-
+# speed gap to make LTX-2.3 practical here). LTX-2.3 was actually looked at
+# once before and shelved (2026-09-08, "the LTX-2 mis-sizing mistake" --
+# see the old Wan2.2 comment this replaces) over unverified community VRAM
+# claims -- this pass is different: it's grounded in a real generation
+# that was submitted, polled, and downloaded live against this exact box
+# (2026-09-24, same day as the CUDA upgrade work), not a repeat of that
+# mistake.
 #
-# Two open questions from research had to be settled empirically before
-# committing to this, both confirmed live against the real GGUF files on
-# this box (2026-09-09) rather than trusted from docs/community claims --
-# the project has been burned by unverified community VRAM numbers before
-# (the LTX-2 mis-sizing mistake, 2026-09-08, is why LTX-2.3 was researched
-# but NOT picked here despite promising-looking community posts):
-#   1. Do the two experts need to be simultaneously VRAM-resident? NO --
-#      confirmed via a real nvidia-smi trace (1s samples) through an
-#      actual generation: the high-noise expert loads + samples, plateaus
-#      ~13.3-13.5GB, gets EVICTED, then the low-noise expert loads +
-#      samples, plateaus at the same ~13.2-13.3GB ceiling -- not additive.
-#      ComfyUI's model manager swaps them sequentially, the same way
-#      llama-swap swaps chat models.
-#   2. Does Q4_K_M actually fit the 16GB card with real headroom? YES --
-#      peak observed was 13495MiB against a 16303MiB card (~2.8GB spare)
-#      at 480x480 / 33 frames / 20 steps.
+# Two real advantages over Wan2.2, both confirmed by the live test, not
+# assumed: LTX-2.3 generates synced AUDIO along with the video in the same
+# pass (Wan2.2 was silent-video-only), and it renders at a much higher
+# native resolution (1920x1080 vs Wan2.2's 832x480) via a two-pass
+# pipeline instead of Wan2.2's single KSamplerAdvanced split:
+#   1. low-res draft pass -- EmptyLTXVLatentVideo at HALF the target
+#      resolution -> SamplerCustomAdvanced (9-step euler_ancestral_cfg_pp,
+#      cfg=1, RANDOMIZED seed -- the only seed this tool exposes, node
+#      324:279 below).
+#   2. LTXVLatentUpsampler does a 2x spatial upscale of that draft's
+#      latent back up to the target resolution.
+#   3. refinement pass -- a second SamplerCustomAdvanced (4-step
+#      euler_cfg_pp, a fast/distilled sigma schedule "0.85, 0.7250,
+#      0.4219, 0.0", cfg=1, FIXED seed=42, node 324:278 below) sharpens
+#      the upscaled latent. This seed and schedule are the template's own
+#      tuned values for its distilled LoRA (ltx-2.3-22b-distilled-
+#      lora-384.safetensors, loaded at strength 0.5) -- not something this
+#      tool exposes, the same way Wan2.2's cfg=3.5/shift=5 weren't.
+#   4. VAEDecodeTiled (video) + LTXVAudioVAEDecode (audio) -> CreateVideo
+#      muxes both into one file -> SaveVideo.
+# Text conditioning goes through Gemma 3 12B (LTXAVTextEncoderLoader) --
+# a real LLM, not a CLIP-style text encoder like Wan2.2's UMT5 -- so this
+# may end up recognizing named characters/franchises far better than
+# Wan2.2 did (see CHARACTER_EXPANSION_SYSTEM_PROMPT's own comment above).
+# UNCONFIRMED either way -- generate_video() below still runs every prompt
+# through that same expansion step as a precaution, since it's a
+# best-effort no-op on failure, not because LTX-2.3's own name recognition
+# has actually been tested.
 #
-# Graph captured live via window.app.graphToPrompt() in a browser tab
-# against the running ComfyUI pod, starting from ComfyUI's own official
-# "Wan 2.2 14B Text to Video" template (Browse Templates -> search
-# "Wan2.2"), then:
-#   - both "Load Diffusion Model" (UNETLoader, safetensors) nodes swapped
-#     for "Unet Loader (GGUF)" (UnetLoaderGGUF) nodes pointing at the
-#     Q4_K_M-quantized high/low-noise files actually on disk (the fp8
-#     safetensors files the template defaults to were deliberately never
-#     downloaded -- only the smaller GGUF quants, for VRAM headroom)
-#   - the template's built-in "Lightning LoRA" turbo-mode scaffolding (2
-#     LoraLoaderModelOnly nodes + 5 ComfySwitchNode nodes + primitive
-#     int/float nodes picking between "Original" and "Lightning" timing/
-#     cfg values) stripped out entirely -- not needed, and the Lightning
-#     LoRA files (2.29GB) were never downloaded. What's left below is
-#     hardcoded to the template's own "Original" (non-turbo) branch
-#     values: 20 steps total, split at step 10 (halfway) between experts,
-#     cfg=3.5, shift=5 -- the template's own tuned defaults for this
-#     checkpoint, not guessed.
-# Submitted for real via the ComfyUI UI (Run button) against this exact
-# graph -- CONFIRMED end-to-end: a real 480x480, 33-frame (~2s @ 16fps)
-# video generated successfully, visually confirmed coherent (not noise),
-# with the VRAM behavior described in points 1/2 above.
+# Graph below is the EXACT payload ComfyUI's own frontend submitted for a
+# real, verified-successful generation on this box -- captured live via
+# `fetch('/history/<prompt_id>')` against the running pod's real API
+# (not graphToPrompt() this time, though the result is equivalent: the
+# history endpoint hands back the literal graph that was actually
+# submitted) after running ComfyUI's own official LTX-2.3 Text-to-Video
+# template end to end from the UI and confirming a real, coherent video
+# with audio came out. Node IDs use the "324:NNN" naming ComfyUI's own UI
+# assigned when it flattened the template's subgraph (id 324, containing
+# nodes 278-323) into the submitted /prompt payload -- kept verbatim
+# rather than renumbered, same "don't touch what's proven to work"
+# approach WORKFLOW_TEMPLATE and MUSIC_WORKFLOW_TEMPLATE already use.
+# Node 325 (SaveVideo) sits outside the subgraph in the original capture.
 #
-# NOT YET VERIFIED: delivery to Telegram. Image delivery took three passes
-# to get right (see generate_image's docstring/comment above) because
-# Hermes doesn't auto-attach tool output -- it scans reply TEXT for a path.
-# That fix (bare path + MEDIA:<path> line) is carried over here on the
-# assumption it's format-agnostic, but that assumption is still UNTESTED
-# for video specifically and was already untested under the old Hunyuan
-# version this replaces -- first real Telegram test after deploying this
-# will confirm or break it.
+# "Switch to Text to Video?" (324:304) is hardcoded True -- the template
+# also supports img2vid (LTXVImgToVideoInplace, bypassed when this is
+# True) but generate_video() is text-to-video only, same scope as the old
+# Wan2.2 tool. ComfyUI's own graph validator still requires node 324:322
+# (LoadImage) to name a real file even while fully bypassed, so it's
+# pinned to a placeholder confirmed to already exist in aibox's ComfyUI
+# input folder ("1c0f4c651854421d919f7d6507e72746.jpg" -- the same
+# placeholder that got the standalone workflow JSON working earlier this
+# same debugging session) -- it's never actually read.
+#
+# Confirmed output mapping via that same live /history fetch: node "325"
+# (SaveVideo) reports its output under the "images" key, same convention
+# SaveImage and Wan2.2's own SaveVideo both used.
+#
+# NOT YET VERIFIED from THIS tool specifically (same caveat every new
+# model here gets until it's actually exercised end to end through Hermes):
+# delivery to Telegram, and whether ComfyUI actually releases VRAM cleanly
+# on its own afterward. LTX-2.3 loads via plain CheckpointLoaderSimple
+# (not GGUF like Wan2.2), so it MAY behave like Z-Image Turbo -- release
+# cleanly via /free -- rather than needing Wan2.2's hard pod-restart
+# workaround, but that hasn't been proven with a live VRAM trace yet, so
+# generate_video()'s cleanup below conservatively keeps using the
+# already-proven-safe _restart_comfyui_and_wait_ready until someone
+# actually runs that trace.
 VIDEO_WORKFLOW_TEMPLATE = {
-    "1": {
-        "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan", "device": "default"},
-        "class_type": "CLIPLoader",
-        "_meta": {"title": "Load CLIP"},
-    },
-    "2": {
-        "inputs": {"vae_name": "wan_2.1_vae.safetensors"},
-        "class_type": "VAELoader",
-        "_meta": {"title": "Load VAE"},
-    },
-    "3": {
-        "inputs": {"unet_name": "wan2.2_t2v_high_noise_14B_Q4_K_M.gguf"},
-        "class_type": "UnetLoaderGGUF",
-        "_meta": {"title": "Unet Loader (GGUF) - High Noise"},
-    },
-    "4": {
-        "inputs": {"unet_name": "wan2.2_t2v_low_noise_14B_Q4_K_M.gguf"},
-        "class_type": "UnetLoaderGGUF",
-        "_meta": {"title": "Unet Loader (GGUF) - Low Noise"},
-    },
-    "5": {
-        "inputs": {"shift": 5, "model": ["3", 0]},
-        "class_type": "ModelSamplingSD3",
-        "_meta": {"title": "ModelSamplingSD3 (High Noise)"},
-    },
-    "6": {
-        "inputs": {"shift": 5, "model": ["4", 0]},
-        "class_type": "ModelSamplingSD3",
-        "_meta": {"title": "ModelSamplingSD3 (Low Noise)"},
-    },
-    "7": {
-        "inputs": {"text": "", "clip": ["1", 0]},
-        "class_type": "CLIPTextEncode",
-        "_meta": {"title": "CLIP Text Encode (Positive Prompt)"},
-    },
-    "8": {
-        "inputs": {"text": DEFAULT_VIDEO_NEGATIVE_PROMPT, "clip": ["1", 0]},
-        "class_type": "CLIPTextEncode",
-        "_meta": {"title": "CLIP Text Encode (Negative Prompt)"},
-    },
-    "9": {
-        "inputs": {"width": 832, "height": 480, "length": 49, "batch_size": 1},
-        "class_type": "EmptyHunyuanLatentVideo",
-        "_meta": {"title": "Empty Latent Video"},
-    },
-    "10": {
+    "325": {
         "inputs": {
-            "add_noise": "enable",
-            "noise_seed": 42,
-            "steps": 20,
-            "cfg": 3.5,
-            "sampler_name": "euler",
-            "scheduler": "simple",
-            "start_at_step": 0,
-            "end_at_step": 10,
-            "return_with_leftover_noise": "enable",
-            "model": ["5", 0],
-            "positive": ["7", 0],
-            "negative": ["8", 0],
-            "latent_image": ["9", 0],
-        },
-        "class_type": "KSamplerAdvanced",
-        "_meta": {"title": "KSampler (Advanced) - High Noise Pass"},
-    },
-    "11": {
-        "inputs": {
-            "add_noise": "disable",
-            "noise_seed": 0,
-            "steps": 20,
-            "cfg": 3.5,
-            "sampler_name": "euler",
-            "scheduler": "simple",
-            "start_at_step": 10,
-            "end_at_step": 20,
-            "return_with_leftover_noise": "disable",
-            "model": ["6", 0],
-            "positive": ["7", 0],
-            "negative": ["8", 0],
-            "latent_image": ["10", 0],
-        },
-        "class_type": "KSamplerAdvanced",
-        "_meta": {"title": "KSampler (Advanced) - Low Noise Pass"},
-    },
-    "12": {
-        "inputs": {"samples": ["11", 0], "vae": ["2", 0]},
-        "class_type": "VAEDecode",
-        "_meta": {"title": "VAE Decode"},
-    },
-    "13": {
-        "inputs": {"fps": 16, "bit_depth": "auto", "color_space": "sRGB", "images": ["12", 0]},
-        "class_type": "CreateVideo",
-        "_meta": {"title": "Create Video"},
-    },
-    "14": {
-        "inputs": {
-            "filename_prefix": "video/wan2.2_t2v",
+            "filename_prefix": "video/ltx2.3_t2v",
             "format": "auto",
             "format.codec": "auto",
             "codec": "auto",
-            "video": ["13", 0],
+            "video": ["324:312", 0],
         },
         "class_type": "SaveVideo",
         "_meta": {"title": "Save Video"},
     },
+    "324:278": {"inputs": {"noise_seed": 42}, "class_type": "RandomNoise", "_meta": {"title": "RandomNoise"}},
+    "324:279": {"inputs": {"noise_seed": 982558454235282}, "class_type": "RandomNoise", "_meta": {"title": "RandomNoise"}},
+    "324:280": {
+        "inputs": {"video_latent": ["324:290", 0], "audio_latent": ["324:309", 1]},
+        "class_type": "LTXVConcatAVLatent",
+        "_meta": {"title": "Concat AV Latent"},
+    },
+    "324:281": {
+        "inputs": {"ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"},
+        "class_type": "LTXVAudioVAELoader",
+        "_meta": {"title": "Load LTXV Audio VAE"},
+    },
+    "324:282": {"inputs": {"sampler_name": "euler_cfg_pp"}, "class_type": "KSamplerSelect", "_meta": {"title": "KSamplerSelect"}},
+    "324:283": {"inputs": {"sigmas": "0.85, 0.7250, 0.4219, 0.0"}, "class_type": "ManualSigmas", "_meta": {"title": "ManualSigmas"}},
+    "324:284": {
+        "inputs": {"cfg": 1, "model": ["324:287", 0], "positive": ["324:286", 0], "negative": ["324:286", 1]},
+        "class_type": "CFGGuider",
+        "_meta": {"title": "CFG Guider"},
+    },
+    "324:285": {
+        "inputs": {
+            "noise": ["324:279", 0],
+            "guider": ["324:316", 0],
+            "sampler": ["324:293", 0],
+            "sigmas": ["324:308", 0],
+            "latent_image": ["324:321", 0],
+        },
+        "class_type": "SamplerCustomAdvanced",
+        "_meta": {"title": "SamplerCustomAdvanced"},
+    },
+    "324:286": {
+        "inputs": {"positive": ["324:306", 0], "negative": ["324:306", 1], "latent": ["324:309", 0]},
+        "class_type": "LTXVCropGuides",
+        "_meta": {"title": "LTXVCropGuides"},
+    },
+    "324:287": {
+        "inputs": {
+            "lora_name": "ltx-2.3-22b-distilled-lora-384.safetensors",
+            "strength_model": 0.5,
+            "model": ["324:318", 0],
+        },
+        "class_type": "LoraLoaderModelOnly",
+        "_meta": {"title": "Load LoRA"},
+    },
+    "324:288": {
+        "inputs": {"longer_edge": 1536, "images": ["324:292", 0]},
+        "class_type": "ResizeImagesByLongerEdge",
+        "_meta": {"title": "Resize Images by Longer Edge (DEPRECATED)"},
+    },
+    "324:289": {
+        "inputs": {"samples": ["324:309", 0], "upscale_model": ["324:313", 0], "vae": ["324:318", 2]},
+        "class_type": "LTXVLatentUpsampler",
+        "_meta": {"title": "LTXVLatentUpsampler"},
+    },
+    "324:290": {
+        "inputs": {
+            "strength": 1,
+            "bypass": ["324:304", 0],
+            "vae": ["324:318", 2],
+            "image": ["324:291", 0],
+            "latent": ["324:289", 0],
+        },
+        "class_type": "LTXVImgToVideoInplace",
+        "_meta": {"title": "LTXVImgToVideoInplace"},
+    },
+    "324:291": {
+        "inputs": {"img_compression": 18, "image": ["324:288", 0]},
+        "class_type": "LTXVPreprocess",
+        "_meta": {"title": "LTXV Preprocess"},
+    },
+    "324:292": {
+        "inputs": {
+            "resize_type": "scale dimensions",
+            "resize_type.width": ["324:314", 0],
+            "resize_type.height": ["324:301", 0],
+            "resize_type.crop": "center",
+            "scale_method": "lanczos",
+            "input": ["324:322", 0],
+        },
+        "class_type": "ResizeImageMaskNode",
+        "_meta": {"title": "Resize Image/Mask"},
+    },
+    "324:293": {"inputs": {"sampler_name": "euler_ancestral_cfg_pp"}, "class_type": "KSamplerSelect", "_meta": {"title": "KSamplerSelect"}},
+    "324:294": {
+        "inputs": {"expression": "a/2", "values.a": ["324:314", 0]},
+        "class_type": "ComfyMathExpression",
+        "_meta": {"title": "Math Expression"},
+    },
+    "324:296": {
+        "inputs": {"expression": "a/2", "values.a": ["324:301", 0]},
+        "class_type": "ComfyMathExpression",
+        "_meta": {"title": "Math Expression"},
+    },
+    "324:297": {
+        "inputs": {"width": ["324:294", 1], "height": ["324:296", 1], "length": ["324:323", 1], "batch_size": 1},
+        "class_type": "EmptyLTXVLatentVideo",
+        "_meta": {"title": "Empty LTXV Latent Video"},
+    },
+    "324:298": {
+        "inputs": {
+            "strength": 0.7,
+            "bypass": ["324:304", 0],
+            "vae": ["324:318", 2],
+            "image": ["324:291", 0],
+            "latent": ["324:297", 0],
+        },
+        "class_type": "LTXVImgToVideoInplace",
+        "_meta": {"title": "LTXVImgToVideoInplace"},
+    },
+    "324:299": {
+        "inputs": {"samples": ["324:311", 1], "audio_vae": ["324:281", 0]},
+        "class_type": "LTXVAudioVAEDecode",
+        "_meta": {"title": "LTXV Audio VAE Decode"},
+    },
+    "324:300": {
+        "inputs": {"expression": "a", "values.a": ["324:302", 0]},
+        "class_type": "ComfyMathExpression",
+        "_meta": {"title": "Math Expression (fps)"},
+    },
+    "324:301": {"inputs": {"value": 1080}, "class_type": "PrimitiveInt", "_meta": {"title": "Height"}},
+    "324:302": {"inputs": {"value": 25}, "class_type": "PrimitiveInt", "_meta": {"title": "Frame Rate"}},
+    "324:303": {"inputs": {"value": 5}, "class_type": "PrimitiveInt", "_meta": {"title": "Duration"}},
+    "324:304": {"inputs": {"value": True}, "class_type": "PrimitiveBoolean", "_meta": {"title": "Switch to Text to Video?"}},
+    "324:305": {
+        "inputs": {"text": ["324:320", 0], "clip": ["324:319", 0]},
+        "class_type": "CLIPTextEncode",
+        "_meta": {"title": "CLIP Text Encode (Prompt)"},
+    },
+    "324:306": {
+        "inputs": {"frame_rate": ["324:300", 0], "positive": ["324:305", 0], "negative": ["324:315", 0]},
+        "class_type": "LTXVConditioning",
+        "_meta": {"title": "LTXVConditioning"},
+    },
+    "324:307": {
+        "inputs": {"frames_number": ["324:323", 1], "frame_rate": ["324:300", 1], "batch_size": 1, "audio_vae": ["324:281", 0]},
+        "class_type": "LTXVEmptyLatentAudio",
+        "_meta": {"title": "Empty LTXV Latent Audio"},
+    },
+    "324:308": {
+        "inputs": {"sigmas": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"},
+        "class_type": "ManualSigmas",
+        "_meta": {"title": "ManualSigmas"},
+    },
+    "324:309": {"inputs": {"av_latent": ["324:285", 0]}, "class_type": "LTXVSeparateAVLatent", "_meta": {"title": "Separate AV Latent"}},
+    "324:310": {
+        "inputs": {
+            "noise": ["324:278", 0],
+            "guider": ["324:284", 0],
+            "sampler": ["324:282", 0],
+            "sigmas": ["324:283", 0],
+            "latent_image": ["324:280", 0],
+        },
+        "class_type": "SamplerCustomAdvanced",
+        "_meta": {"title": "SamplerCustomAdvanced"},
+    },
+    "324:311": {"inputs": {"av_latent": ["324:310", 0]}, "class_type": "LTXVSeparateAVLatent", "_meta": {"title": "Separate AV Latent"}},
+    "324:312": {
+        "inputs": {
+            "fps": ["324:300", 0],
+            "bit_depth": "auto",
+            "color_space": "sRGB",
+            "codec": "none",
+            "images": ["324:317", 0],
+            "audio": ["324:299", 0],
+        },
+        "class_type": "CreateVideo",
+        "_meta": {"title": "Create Video"},
+    },
+    "324:313": {
+        "inputs": {"model_name": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"},
+        "class_type": "LatentUpscaleModelLoader",
+        "_meta": {"title": "Load Latent Upscale Model"},
+    },
+    "324:314": {"inputs": {"value": 1920}, "class_type": "PrimitiveInt", "_meta": {"title": "Width"}},
+    "324:315": {
+        "inputs": {"text": "pc game, console game, video game, cartoon, childish, ugly", "clip": ["324:319", 0]},
+        "class_type": "CLIPTextEncode",
+        "_meta": {"title": "CLIP Text Encode (Prompt)"},
+    },
+    "324:316": {
+        "inputs": {"cfg": 1, "model": ["324:287", 0], "positive": ["324:306", 0], "negative": ["324:306", 1]},
+        "class_type": "CFGGuider",
+        "_meta": {"title": "CFG Guider"},
+    },
+    "324:317": {
+        "inputs": {
+            "tile_size": 768,
+            "overlap": 64,
+            "temporal_size": 4096,
+            "temporal_overlap": 4,
+            "samples": ["324:311", 0],
+            "vae": ["324:318", 2],
+        },
+        "class_type": "VAEDecodeTiled",
+        "_meta": {"title": "VAE Decode (Tiled)"},
+    },
+    "324:318": {"inputs": {"ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"}, "class_type": "CheckpointLoaderSimple", "_meta": {"title": "Load Checkpoint"}},
+    "324:319": {
+        "inputs": {
+            "text_encoder": "gemma_3_12B_it_fp4_mixed.safetensors",
+            "ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors",
+            "device": "default",
+        },
+        "class_type": "LTXAVTextEncoderLoader",
+        "_meta": {"title": "Load LTXV Audio Text Encoder"},
+    },
+    "324:320": {"inputs": {"value": ""}, "class_type": "PrimitiveStringMultiline", "_meta": {"title": "Prompt"}},
+    "324:321": {
+        "inputs": {"video_latent": ["324:298", 0], "audio_latent": ["324:307", 0]},
+        "class_type": "LTXVConcatAVLatent",
+        "_meta": {"title": "Concat AV Latent"},
+    },
+    "324:322": {
+        "inputs": {"image": "1c0f4c651854421d919f7d6507e72746.jpg"},
+        "class_type": "LoadImage",
+        "_meta": {"title": "Load Image"},
+    },
+    "324:323": {
+        "inputs": {"expression": "a * b + 1", "values.a": ["324:303", 0], "values.b": ["324:302", 0]},
+        "class_type": "ComfyMathExpression",
+        "_meta": {"title": "Math Expression (length)"},
+    },
 }
 
-# Two cold GGUF loads (~9GB each, high-noise then low-noise, sequentially --
-# see the VRAM trace note above VIDEO_WORKFLOW_TEMPLATE) plus sampling took
-# on the order of a few minutes for a small 480x480/33-frame/20-step test
-# clip on this box -- not precisely timed, but clearly longer than the old
-# single-checkpoint Hunyuan path since two separate models now load per
-# call instead of one. A longer request (more frames/steps) could run well
-# past image gen's 180s budget. Generous, not tuned.
+# Real measured end-to-end time for this exact graph on this box (default
+# 1920x1080/5s/25fps settings, live-tested 2026-09-24): ~160-180s -- well
+# under budget here, but a longer/bigger request could run well past that,
+# so this stays generous rather than tuned tight to the measured number.
 VIDEO_POLL_TIMEOUT_SECONDS = 600
 VIDEO_BUSY_TTL_SECONDS = 900  # safety-net only, same finally-block pattern as images
 
@@ -1011,44 +1154,44 @@ async def generate_video(
     prompt: str,
     ctx: Context,
     negative_prompt: str = "",
-    length: int = 49,
-    steps: int = 20,
+    width: int = 1920,
+    height: int = 1080,
+    duration_seconds: int = 5,
+    fps: int = 25,
     seed: int = -1,
 ) -> str:
-    """Generate a short video locally with Wan2.2 T2V-A14B (via ComfyUI on aibox's GPU).
+    """Generate a short video WITH audio locally with LTX-2.3 (via ComfyUI on aibox's GPU).
 
-    Fixed at 832x480 (480p) and cfg=3.5/shift=5 -- these are the checkpoint's
-    own tuned defaults (from ComfyUI's official Wan2.2 template), not
-    independently tunable. Runs at 16fps (Wan2.2's native rate -- NOT the
-    24fps the old HunyuanVideo checkpoint this replaces used, so the same
-    `length` now covers slightly more real-world seconds). Two GGUF-
-    quantized "expert" models (high-noise, low-noise -- a genuine
-    Mixture-of-Experts architecture) load sequentially during a single
-    call, never simultaneously (confirmed via a live VRAM trace -- see the
-    comment above VIDEO_WORKFLOW_TEMPLATE), so this still fits the 16GB
-    card with headroom despite being two ~9GB GGUF files. Like
-    generate_image, this fully unloads whatever chat model is resident to
-    give the whole GPU to ComfyUI, then reloads the chat model lazily
-    afterward. Any chat message sent elsewhere during that window is
-    automatically redirected to a cloud model.
+    Replaces the earlier Wan2.2 T2V-A14B pipeline (2026-09-24). Two real
+    upgrades over Wan2.2, both confirmed by a real live test on this box,
+    not assumed: LTX-2.3 generates synced AUDIO along with the video in
+    the same call (Wan2.2 was silent-video-only), and it renders at a much
+    higher default resolution (1920x1080 vs Wan2.2's 832x480). Internally
+    this runs a two-pass pipeline -- a fast low-res draft, then a 2x
+    latent upscale plus a short distilled refinement pass -- not one flat
+    KSampler the way Wan2.2 was; see the comment above
+    VIDEO_WORKFLOW_TEMPLATE for the full breakdown. Real measured
+    end-to-end time on this box for this exact graph at the defaults
+    below: ~160-180s. Like generate_image, this fully unloads whatever
+    chat model is resident to give the whole GPU to ComfyUI, then reloads
+    the chat model lazily afterward -- any chat message sent elsewhere
+    during that window is automatically redirected to a cloud model.
 
-    Unlike the old Hunyuan checkpoint (cfg-distilled, cfg baked to 1), this
-    one uses real cfg=3.5 guidance, so negative_prompt actually has an
-    effect here -- it's no longer just a no-op parameter kept for parity.
-
-    Named characters (e.g. "Tony Stark", "a Spacemarine from Starcraft") are
-    handled automatically -- before submitting to ComfyUI, this call runs
-    `prompt` through the local expert chat model, which rewrites any named
-    character/franchise/celebrity/real-person reference into a plain visual
-    description (build, outfit/armor, colors, distinguishing features).
-    Wan2.2 doesn't reliably recognize names by themselves (confirmed
-    empirically -- see the comment above CHARACTER_EXPANSION_SYSTEM_PROMPT),
-    so it's fine, and expected, to reference a character directly in
-    `prompt` -- no need to describe their appearance by hand. This adds
-    real latency (the expert model itself is slow, up to ~30-50s) on top of
-    the video generation time; if that expansion call fails for any reason
-    it silently falls back to the original prompt rather than blocking the
-    generation, so a failure here degrades quality, not reliability.
+    Named characters (e.g. "Tony Stark", "a Spacemarine from Starcraft")
+    are handled automatically -- before submitting to ComfyUI, this call
+    runs `prompt` through the local expert chat model, which rewrites any
+    named character/franchise/celebrity/real-person reference into a plain
+    visual description (build, outfit/armor, colors, distinguishing
+    features), the same expansion step the old Wan2.2 version of this tool
+    used (see the comment above CHARACTER_EXPANSION_SYSTEM_PROMPT). LTX-2.3
+    uses Gemma 3 12B as its text encoder -- a real LLM, not a CLIP-style
+    encoder like Wan2.2's UMT5 -- so it may turn out to need this expansion
+    step less than Wan2.2 did, but that hasn't actually been tested yet,
+    so it's kept on as a precaution. This adds real latency (the expert
+    model itself is slow, up to ~30-50s) on top of the video generation
+    time; if that expansion call fails for any reason it silently falls
+    back to the original prompt rather than blocking the generation, so a
+    failure here degrades quality, not reliability.
 
     Args:
         prompt: What the video should show. Describe subject, motion,
@@ -1057,16 +1200,20 @@ async def generate_video(
             reference directly (see above) -- they get auto-translated to
             a visual description before generation.
         negative_prompt: What to avoid. Empty by default falls back to
-            DEFAULT_VIDEO_NEGATIVE_PROMPT (the checkpoint's own tuned
-            default) rather than actually submitting an empty string.
-        length: Number of frames at 16fps (e.g. 49 =~ 3s). Longer videos
-            take proportionally longer to generate. Must be 1 + a multiple
-            of 4 (ComfyUI's own constraint for this latent node).
-        steps: Total sampling steps, split evenly across the high-noise and
-            low-noise expert passes (e.g. 20 -> 10 steps each). Default 20
-            (this workflow's own template default).
+            DEFAULT_VIDEO_NEGATIVE_PROMPT (LTX-2.3's own template default).
+        width: Output width in pixels. Default 1920. The low-res draft
+            pass renders at half this and gets 2x upscaled back up, so
+            keep this an even number.
+        height: Output height in pixels. Default 1080 -- same even-number
+            note as width.
+        duration_seconds: Video length in seconds. Default 5. Longer
+            videos take proportionally longer to generate.
+        fps: Output frame rate. Default 25 (this template's own default).
         seed: Fixed seed for reproducibility. Default -1 picks a random
-            seed each call.
+            seed each call. Only affects the low-res draft pass -- the
+            refinement pass uses a fixed seed by design (part of the
+            template's own tuned distilled-LoRA schedule, not something
+            this tool exposes, the same way Wan2.2's cfg/shift weren't).
 
     Returns:
         A short confirmation message containing a `MEDIA:<path>` line for
@@ -1087,7 +1234,6 @@ async def generate_video(
         )
 
     resolved_seed = random.randint(0, 2**31 - 1) if seed < 0 else seed
-    split_step = max(1, steps // 2)
 
     async with httpx.AsyncClient() as client:
         try:
@@ -1100,21 +1246,23 @@ async def generate_video(
             await _unload_chat_model(client)
 
             workflow = copy.deepcopy(VIDEO_WORKFLOW_TEMPLATE)
-            workflow["7"]["inputs"]["text"] = expanded_prompt
-            workflow["8"]["inputs"]["text"] = negative_prompt or DEFAULT_VIDEO_NEGATIVE_PROMPT
-            workflow["9"]["inputs"]["length"] = length
-            workflow["10"]["inputs"]["steps"] = steps
-            workflow["10"]["inputs"]["end_at_step"] = split_step
-            workflow["10"]["inputs"]["noise_seed"] = resolved_seed
-            workflow["11"]["inputs"]["steps"] = steps
-            workflow["11"]["inputs"]["start_at_step"] = split_step
+            workflow["324:320"]["inputs"]["value"] = expanded_prompt
+            workflow["324:315"]["inputs"]["text"] = negative_prompt or DEFAULT_VIDEO_NEGATIVE_PROMPT
+            workflow["324:314"]["inputs"]["value"] = width
+            workflow["324:301"]["inputs"]["value"] = height
+            workflow["324:303"]["inputs"]["value"] = duration_seconds
+            workflow["324:302"]["inputs"]["value"] = fps
+            workflow["324:279"]["inputs"]["noise_seed"] = resolved_seed
 
             submit_resp = await client.post(
                 f"{COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=30.0
             )
             submit_resp.raise_for_status()
             prompt_id = submit_resp.json()["prompt_id"]
-            logger.info("submitted video prompt_id=%s seed=%s length=%s", prompt_id, resolved_seed, length)
+            logger.info(
+                "submitted video prompt_id=%s seed=%s %sx%s %ss@%sfps",
+                prompt_id, resolved_seed, width, height, duration_seconds, fps,
+            )
 
             poll_start = time.monotonic()
             last_progress = poll_start
@@ -1138,7 +1286,7 @@ async def generate_video(
                         await ctx.report_progress(
                             progress=now - poll_start,
                             total=VIDEO_POLL_TIMEOUT_SECONDS,
-                            message="Wan2.2 still rendering...",
+                            message="LTX-2.3 still rendering...",
                         )
                     except Exception as exc:  # noqa: BLE001 -- best effort, must not break generation
                         logger.warning("report_progress failed (%s: %s)", type(exc).__name__, exc)
@@ -1155,9 +1303,10 @@ async def generate_video(
                 raise RuntimeError(f"ComfyUI reported an error for prompt {prompt_id}: {status}")
 
             # SaveVideo's output uses the same "images" key ComfyUI uses for
-            # SaveImage (confirmed empirically against a real completed job,
-            # not documented anywhere obvious) -- node "14" here, not "9".
-            videos = history.get("outputs", {}).get("14", {}).get("images", [])
+            # SaveImage and Wan2.2's own SaveVideo (confirmed empirically
+            # against a real completed job, not documented anywhere
+            # obvious) -- node "325" here, not "14" (Wan2.2's node id).
+            videos = history.get("outputs", {}).get("325", {}).get("images", [])
             if not videos:
                 raise RuntimeError(f"ComfyUI finished prompt {prompt_id} but produced no video output")
             video_ref = videos[0]
@@ -1194,18 +1343,18 @@ async def generate_video(
             # stuck lock here means up to 15 minutes of every chat message
             # AND every future generate call getting bounced, not 5.
             #
-            # CHANGED 2026-09-09 from the plain _free_comfyui_vram +
-            # VRAM_FREE_SETTLE_SECONDS pattern generate_image still uses:
-            # Wan2.2's GGUF-loaded experts turned out not to reliably
-            # release VRAM through /free AT ALL (a real generation left
-            # python3 pinned at 10756MiB for 9+ minutes after /free
-            # returned 200 -- not a slow drain, a genuinely stuck
-            # allocation), which then OOM'd the next local chat-model load
-            # exactly like the settle-delay race did, just with no delay
-            # long enough to ever fix it. See
-            # _restart_comfyui_and_wait_ready's own docstring above for the
-            # full story (third-party corroboration included) and the RBAC
-            # this now requires.
+            # STILL using the hard-restart cleanup (_restart_comfyui_and_
+            # wait_ready) inherited from Wan2.2, not the gentler
+            # _free_comfyui_vram + settle-delay pattern generate_image
+            # uses -- LTX-2.3 loads via plain CheckpointLoaderSimple (not
+            # GGUF like Wan2.2), so it MAY release VRAM cleanly through
+            # /free the way Z-Image Turbo does, but that hasn't been
+            # confirmed with a live VRAM trace yet. Given how expensive a
+            # wrong guess is here (a crash-looping main chat model -- see
+            # generate_music's own finally-block comment for the one time
+            # this project guessed wrong and paid for it), this keeps the
+            # already-proven-safe hard restart until someone actually runs
+            # that trace and confirms /free alone is enough.
             await asyncio.shield(_restart_comfyui_and_wait_ready(client, ctx))
             await asyncio.shield(_redis.delete(BUSY_KEY))
 
