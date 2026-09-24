@@ -851,6 +851,22 @@ MUSIC_BUSY_TTL_SECONDS = 600
 mcp = MCPServer("media-gen")
 _redis = redis.from_url(REDIS_URL, decode_responses=True)
 
+# _unload_chat_model used to fire the unload POST and immediately move on to
+# submitting the ComfyUI workflow. Real production bug hit 2026-09-24: Eldar
+# submitted a video through Hermes, the chat model that answered him
+# ("queuing your video...") was still resident, and ComfyUI failed to start
+# because it raced that still-loading chat model for VRAM -- POST /api/
+# models/unload returning 200 only means llama-swap ACCEPTED the request,
+# not that the llama-server child process has actually exited and the
+# driver has reclaimed its VRAM yet, which is not instant for a multi-GB
+# model. Poll llama-swap's own /running endpoint (same one apps/router-
+# dashboard/dashboard.py already uses -- confirmed shape:
+# {"running": [{"model": "qwen3.8-27b-Expert", ...}]}, empty list once
+# nothing's loaded) until it's actually empty before returning, capped so a
+# stuck llama-swap can't hang generation forever.
+UNLOAD_CONFIRM_TIMEOUT_SECONDS = 20
+UNLOAD_POLL_INTERVAL_SECONDS = 1
+
 
 async def _unload_chat_model(client: httpx.AsyncClient) -> None:
     try:
@@ -858,6 +874,27 @@ async def _unload_chat_model(client: httpx.AsyncClient) -> None:
         logger.info("llama-swap unload -> %s", resp.status_code)
     except Exception as exc:  # noqa: BLE001 -- best effort, don't block generation on this
         logger.warning("llama-swap unload failed (%s: %s) -- continuing anyway", type(exc).__name__, exc)
+        return
+
+    deadline = time.monotonic() + UNLOAD_CONFIRM_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            resp = await client.get(f"{LLAMA_SWAP_URL}/running", timeout=5.0)
+            resp.raise_for_status()
+            data = resp.json()
+            running = data.get("running") or data.get("models") or []
+            if not running:
+                logger.info("llama-swap unload confirmed -- no models running")
+                return
+        except Exception as exc:  # noqa: BLE001 -- best effort, keep polling till the deadline
+            logger.warning("llama-swap /running check failed (%s: %s) -- retrying", type(exc).__name__, exc)
+        await asyncio.sleep(UNLOAD_POLL_INTERVAL_SECONDS)
+
+    logger.warning(
+        "llama-swap still reports a running model %ss after unload -- "
+        "submitting to ComfyUI anyway, may race for VRAM",
+        UNLOAD_CONFIRM_TIMEOUT_SECONDS,
+    )
 
 
 async def _free_comfyui_vram(client: httpx.AsyncClient) -> None:
