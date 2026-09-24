@@ -74,29 +74,40 @@ spec:
               value: "true"
             - name: NVIDIA_VISIBLE_DEVICES
               value: "1"   # 5070 Ti only -- GPU 1, confirmed via nvidia-smi -L
-            # LTX-2.3 TEST 2026-09-24: the LTXAV transformer (23.8GB staged,
-            # per live log) doesn't fit in this card's 15.8GB VRAM, so
-            # ComfyUI's DynamicVRAM/comfy-aimdo system pages it in/out of
-            # host RAM on demand (real mechanism -- comfy_aimdo's VBAR
-            # page-fault model, not a naive cache). Live log showed the
-            # 23.8GB model getting "prepared for dynamic VRAM loading" TWICE
-            # in one generation (once per sampling pass, low-res then
-            # high-res), suggesting real eviction between the two passes,
-            # not just a logging artifact. Testing whether that's caused by
-            # inaccurate VRAM-pressure readings: NVML can under/over-report
-            # free VRAM inside a containerized/nvidia-runtimeClass pod vs a
-            # bare-metal Windows install, which would trigger eviction
-            # earlier than actually needed. --disable-nvml-pressure switches
-            # DynamicVRAM to raw CUDA pressure polling instead. This env var
-            # is read by the mmartial image's init.bash and appended
-            # verbatim to ComfyUI's main.py launch line (COMFY_CMDLINE_EXTRA
-            # -- confirmed via the image's own init.bash source). Compare
-            # the next generation's log for whether "23835MB Staged" still
-            # appears twice -- if it does, this wasn't the cause and should
-            # be reverted (remove this env var) rather than left in as dead
-            # weight.
+            # LTX-2.3 SPEED INVESTIGATION 2026-09-24, round 2 (round 1 ruled
+            # out below). Real timed baseline on aibox for a 1920x1080/10s
+            # generation: 198.28s (low-res pass 8/8 steps @ 6.81s/it, high-res
+            # pass 3/3 steps @ 35.48s/it) vs Eldar's Windows box (same 5070 Ti
+            # 16GB card) reporting roughly 4x faster on the same workflow.
+            # ROUND 1 (--disable-nvml-pressure, tested live): re-ran the same
+            # generation with this flag active -- 215.41s total, 6.84s/it and
+            # 35.47s/it per pass, i.e. NO measurable difference from the
+            # 198.28s baseline (the gap is noise, if anything slightly
+            # slower). Confirmed via `ps aux` that the flag really was in the
+            # live process's argv, so this was a clean negative result, not a
+            # failed deploy. RULED OUT -- VRAM-pressure sensing accuracy is
+            # not the bottleneck.
+            # ROUND 2 (current): the round-2 log surfaced a new, more direct
+            # lead that round 1's log didn't show: "Model storage policy:
+            # fast_disk=True paths=['.../ltx-2.3-22b-dev-fp8.safetensors']".
+            # ComfyUI's DynamicVRAM has two staging modes (see --fast-disk /
+            # --disable-fast-disk in comfy/cli_args.py): stage through
+            # regular (unpinned) system RAM, or stream directly from disk on
+            # every page-in. fast_disk=True here means it's re-reading from
+            # /data (NVMe) on demand during the sampling loop rather than
+            # keeping the ~45GB model set cached in the 50GB+ of free host
+            # RAM this box has -- plausible root cause, and it lines up with
+            # Eldar's original Windows observation (~60GB system RAM used
+            # there, consistent with a RAM-resident staging strategy instead
+            # of disk streaming). Testing --disable-fast-disk to force
+            # RAM-backed staging and see if it closes the gap. Same
+            # deploy/verify method as round 1: env var read by the mmartial
+            # image's init.bash, appended to main.py's launch line via
+            # COMFY_CMDLINE_EXTRA -- confirm with `ps aux | grep main.py` on
+            # the new pod before trusting any timing comparison, and revert
+            # this line if the timing doesn't move either.
             - name: COMFY_CMDLINE_EXTRA
-              value: "--disable-nvml-pressure"
+              value: "--disable-fast-disk"
           volumeMounts:
             - name: run
               mountPath: /comfy/mnt
