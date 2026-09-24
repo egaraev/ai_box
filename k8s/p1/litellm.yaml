@@ -862,6 +862,104 @@ data:
         return False
 
 
+    # ADDED 2026-09-24, real production bug (Eldar's report: "with music it
+    # is constantly failing... generate the same kind of music... Did you
+    # call the tool?" repeated across a whole Telegram thread). Root-caused
+    # by correlating litellm's own "auto -> route -> model" log against
+    # media-gen-mcp's log of its two genuinely real generate_music calls
+    # that session: BOTH real successes AND every single fabricated
+    # "MEDIA:/shared-output/..." response traced back to the SAME model,
+    # hermes3-llama-3.1-8b, via the SAME "other" route -- not one
+    # fabrication traced to qwen3.8-27b-Expert (the "reasoning" route),
+    # which only ever produced short confession/starting stubs, never a
+    # fake result. So this isn't "the 8B model can't call tools" (it did,
+    # twice, for real) -- it's that arch-router's classifier has no
+    # deterministic fast path for tool-use requests the way it already does
+    # for vision/deep-reasoning above, so an ordinary tool-use follow-up
+    # ("generate me a song", "did you call the tool?") carries none of
+    # DEEP_REASONING_TRIGGERS' keywords and kept landing on "other" ->
+    # hermes3-llama-3.1-8b, the less reliable of the two models at actually
+    # invoking a tool instead of narrating plausible text -- and that
+    # unreliability compounds the longer a fabricated "success" already
+    # sits in the conversation history for the model to pattern-match
+    # against. Same deterministic-fast-path pattern as
+    # DEEP_REASONING_TRIGGERS/_wants_vision_tool above: skip the 1.5B
+    # classifier's judgment call entirely and go straight to "reasoning" ->
+    # qwen3.8-27b-Expert whenever the request plausibly needs ANY of
+    # Hermes's real tools (see hermes-agent.yaml's mcp_servers block and
+    # each server's own @mcp.tool()-decorated functions for the current
+    # source-of-truth tool list -- extend this list here whenever a new
+    # tool is added there). Multi-word phrases, not bare verbs like
+    # "generate"/"create"/"make" alone, same discipline
+    # DEEP_REASONING_TRIGGERS already explains above (a bare-word list
+    # would swallow ordinary casual chat) -- but a false positive here is
+    # the same safe failure direction as deep-reasoning's: an occasional
+    # non-tool message just gets the slower, more careful model instead of
+    # the fast one.
+    TOOL_USE_TRIGGERS = (
+        # image generation
+        "generate an image", "generate a image", "generate image",
+        "generate a picture", "generate picture", "generate a photo",
+        "make me an image", "make me a picture", "make an image",
+        "create an image", "create a picture",
+        # video generation
+        "generate a video", "generate video", "make me a video",
+        "make a video", "create a video",
+        # music generation -- the exact class that found this bug
+        "generate a song", "generate music", "generate a mp3",
+        "generate an mp3", "generate lyrics", "make me a song",
+        "make me a mp3", "make me music", "create a song", "create music",
+        "compose a song", "compose music", "music creating model",
+        "music generating model",
+        # image editing
+        "edit_image", "edit the image", "edit this image", "edit that image",
+        "edit my image", "edit the photo", "edit this photo",
+        "edit that photo", "edit my photo", "change the background",
+        "replace the background", "swap the background",
+        "remove the background",
+        # vault (search/ingest)
+        "search_vault", "search the vault", "ingest_file", "ingest_note",
+        "add this to the vault", "add to the vault", "save this to the vault",
+        "save to the vault", "add to my notes", "save to my notes",
+        # explicit tool function names, in case Hermes's own narration or a
+        # pasted error message ends up in the latest user turn
+        "generate_image", "generate_video", "generate_music",
+        # meta -- about tool use/honesty itself. Real transcript evidence
+        # this was added for: once a fabrication happens, every follow-up
+        # in that thread is the user pushing back ("Did you use the tool?",
+        # "did you call the tool") -- these carry none of the media
+        # keywords above (they're about the PROOF, not a new request) but
+        # are exactly the turns that most need the reliable model, since
+        # this is precisely where hermes3-llama-3.1-8b kept re-fabricating
+        # instead of admitting it or actually retrying.
+        "use the tool", "used the tool", "use that tool", "call the tool",
+        "called the tool", "run the tool", "did you use the tool",
+        "did you call the tool", "did you run the tool",
+        "actually call the tool", "actually use the tool",
+        "never fabricate", "don't fabricate", "fabricat",
+    )
+
+
+    def _wants_tool_use(messages):
+        for m in reversed(messages):
+            if m.get("role") != "user":
+                continue
+            content = m.get("content")
+            if isinstance(content, str):
+                content = _strip_memory_context(content)
+                lowered = content.lower()
+                for t in TOOL_USE_TRIGGERS:
+                    if t in lowered:
+                        logger.info(
+                            "tool-use trigger matched %r in: %r",
+                            t, content[:200],
+                        )
+                        return True
+            # only the latest user turn counts -- stop here either way
+            return False
+        return False
+
+
     # ADDED 2026-09-13 (Eldar's finding + fix): investigating the same
     # "why does qwen3.8 get used so much" complaint that led to the
     # ROUTE_TO_MODEL["other"] fix above turned up a second, separate cause.
@@ -1052,6 +1150,21 @@ data:
                 data["model"] = ROUTE_TO_MODEL["reasoning"]
                 logger.info(
                     "auto -> reasoning (explicit deep-thought keyword) -> %s",
+                    data["model"],
+                )
+                return data
+
+            # Deterministic fast path, same idea as the checks above: any
+            # request that plausibly needs one of Hermes's real tools
+            # (media generation/editing, vault search/ingest) goes straight
+            # to the 27B model, no classifier judgment call involved -- see
+            # TOOL_USE_TRIGGERS above for the real production bug this
+            # fixes (hermes3-llama-3.1-8b, the "other"/"casual" route
+            # model, fabricating tool results instead of calling the tool).
+            if _wants_tool_use(messages):
+                data["model"] = ROUTE_TO_MODEL["reasoning"]
+                logger.info(
+                    "auto -> reasoning (tool-use keyword) -> %s",
                     data["model"],
                 )
                 return data
