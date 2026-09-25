@@ -357,10 +357,47 @@ data:
       # or by naming the model directly. GPT-6 Astra and Claude's "Fable"
       # tier deliberately NOT wired here -- Eldar's own top-of-the-line
       # reserve, manual-only from his PC, not for routine Hermes use.
+      # PROMPT CACHING, added 2026-09-25: real production cost found -- a
+      # single "how big videos can we handle" investigation put ~13 Opus
+      # calls through this route in 3 minutes (Eldar's own OpenRouter
+      # Activity log), each one resending nearly the same 40-58k-token
+      # conversation from scratch at full price (37,946 -> 58,453 input
+      # tokens across the run, $0.20-$0.32 EACH), because Hermes's own
+      # tool-calling loop necessarily resends the whole growing history on
+      # every internal step and nothing here was telling Anthropic which
+      # prefix was reusable. cache_control_injection_points is LiteLLM's own
+      # documented mechanism (docs.litellm.ai/docs/tutorials/prompt_caching)
+      # for auto-inserting Anthropic's ephemeral cache_control breakpoints
+      # without Hermes itself having to send them -- confirmed it also
+      # applies to OpenRouter's Claude routes, not just direct anthropic/
+      # calls (same docs page's supported-provider list). Two breakpoints:
+      # the system message (Hermes's own system prompt + SOUL.md content,
+      # identical on every call) and the last message in the array (marks
+      # everything through the most-recent turn as cacheable, so the NEXT
+      # call in the same tool loop -- which only appends one more message --
+      # gets a cache hit on everything before it, instead of repricing the
+      # whole conversation again). NOT wired onto gpt-sol-alias below: OpenAI
+      # caches automatically server-side for prompts over ~1024 tokens, no
+      # cache_control markers needed, so this would be a no-op there.
+      # UNVERIFIED against this deployment's real traffic (the exact
+      # location/role/index keys below are corroborated across three
+      # separate LiteLLM GitHub PRs/issues, not read off one single
+      # authoritative example -- the docs site itself gave inconsistent
+      # answers across repeated fetches) -- check the next real multi-call
+      # Opus session in LangFuse or the raw response `usage` block for
+      # cache_read_input_tokens > 0 before trusting this actually cut cost.
+      # If it silently no-ops, the fallback is Anthropic's own console
+      # (console.anthropic.com) cache-analytics view for this key, or just
+      # watching whether repeat-call cost in OpenRouter's Activity log drops.
       - model_name: claude-opus-alias
         litellm_params:
           model: openrouter/anthropic/claude-opus-5
           api_key: os.environ/OPENROUTER_API_KEY
+          cache_control_injection_points:
+            - location: message
+              role: system
+            - location: message
+              index: -1
       - model_name: gpt-sol-alias
         litellm_params:
           model: openrouter/openai/gpt-5.6-sol
