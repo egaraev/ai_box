@@ -960,9 +960,22 @@ data:
     # judgment needed -- also naturally covers Georgian/Azerbaijani/
     # Armenian and anything else outside plain ASCII, not just Cyrillic.
     def _wants_reliable_for_script(messages):
+        # FIXED 2026-09-27, same day, confirmed live: this originally
+        # stopped at the FIRST role="user" message scanning backward
+        # (same "latest turn only" pattern as every other _wants_* check
+        # in this file) -- but a message that tested correctly in
+        # isolation returned False on real traffic. Root cause: the same
+        # one _wants_vision_tool's own comment above already suspected but
+        # couldn't confirm -- Hermes's agent loop appends its own
+        # tool-call results as EXTRA role="user" messages (no native
+        # tool/function role), so several role="user" entries can be
+        # stacked at the end of the array with no assistant message
+        # between them, and the real human text isn't necessarily the
+        # last one. Scans back through the whole trailing consecutive
+        # block of user-role messages instead of stopping at the first.
         for m in reversed(messages):
             if m.get("role") != "user":
-                continue
+                break  # left the trailing user-turn block
             content = m.get("content")
             if isinstance(content, str):
                 content = _strip_memory_context(content)
@@ -972,8 +985,6 @@ data:
                         content[:200],
                     )
                     return True
-            # only the latest user turn counts -- stop here either way
-            return False
         return False
 
 
