@@ -19,9 +19,36 @@
 # When THIS FILE changes -- `kubectl apply -f` it in addition to any
 # image rebuild.
 #
-# No hostPath volumes, no PVC, no GPU -- unlike media-gen-mcp/
-# media-augment-mcp/vault-mcp, this pod holds no local state at all.
-# Honcho (k8s/p2/honcho.yaml, already deployed) IS its persistent store.
+# No PVC, no GPU. Honcho (k8s/p2/honcho.yaml, already deployed) is the
+# persistent store for conversation memory -- but there IS one small
+# hostPath volume below, for watch-history.yaml, the structured "what
+# Eldar's watched" file the update_watch_history tool edits (see
+# server.py's WATCH HISTORY comment). Honcho's dialectic recall isn't a
+# good fit for that -- it's a short, exact list needing precise lookups,
+# not fuzzy semantic search -- so it's a plain file instead, same
+# hostPath-single-file pattern as the other *-mcp services that hold
+# local state.
+#
+# ONE-TIME SETUP before the first `kubectl apply` of this file: the
+# hostPath below expects the file to already exist on aibox, so seed it
+# once from the repo's copy:
+#   mkdir -p /srv/aibox/movies-mcp
+#   cp ~/repos/aibox-platform/apps/movies-mcp/watch-history.yaml /srv/aibox/movies-mcp/watch-history.yaml
+# After that, the pod owns it -- don't overwrite it by re-copying the
+# repo's seed copy over it again; that seed is intentionally left to go
+# stale (see watch-history.yaml's own top comment).
+#
+# ALSO NOTE: as of 2026-09-27 that same hostPath file is ALSO written by
+# scripts/gmail_sync.py running in the n8n pod (k8s/n8n/n8n-deployment.yaml
+# gets its own mount of the identical host path) -- see that script's
+# MOVIE-topic comment. Two pods, one file, both on aibox's single node.
+#
+# tmdb-secret (added 2026-09-27, check_anticipated tool): NOT defined here,
+# same convention as litellm-secret -- created directly on the cluster,
+# never committed to git (see k8s/secrets/README.md). Eldar needs a free
+# API key from themoviedb.org/settings/api (manual signup, can't be done
+# on his behalf) first, then:
+#   kubectl create secret generic tmdb-secret -n ai-mcp --from-literal=api_key=<the key>
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,6 +84,11 @@ spec:
             # "false" today, so there's no secret to source one from. If
             # that ever changes, add a secretKeyRef here the same way
             # LITELLM_API_KEY does above.
+            - name: TMDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tmdb-secret
+                  key: api_key
           resources:
             requests:
               cpu: "50m"
@@ -64,6 +96,17 @@ spec:
             limits:
               cpu: "250m"
               memory: "256Mi"
+          volumeMounts:
+            - name: watch-history
+              mountPath: /app/watch-history.yaml
+      volumes:
+        # single-file hostPath -- requires the file to already exist on
+        # the node (type: File fails fast if it doesn't), see the
+        # ONE-TIME SETUP comment above.
+        - name: watch-history
+          hostPath:
+            path: /srv/aibox/movies-mcp/watch-history.yaml
+            type: File
   selector:
     matchLabels:
       app: movies-mcp
