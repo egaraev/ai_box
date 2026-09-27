@@ -1388,6 +1388,7 @@ data:
         "ты тут", "ты здесь", "але", "алло", "тест", "проверка",
         # greetings
         "привет", "приветик", "здравствуй", "здравствуйте", "хай",
+        "здорова",  # ADDED 2026-09-27 -- Eldar's real "Здорова чувак" test
         "доброе утро", "добрый день", "добрый вечер", "доброй ночи",
         # farewells
         "пока", "до свидания", "увидимся", "счастливо", "до встречи",
@@ -1396,12 +1397,41 @@ data:
         "спасибо", "спасибо большое", "благодарю", "пожалуйста",
         "ок", "окей", "хорошо", "отлично", "супер", "класс", "понял",
         "поняла", "понятно", "ладно",
-        # how-are-you small talk
+        # how-are-you small talk / mood replies -- "нормуль"/"ниче" are
+        # colloquial variants of "нормально" (ADDED 2026-09-27, Eldar's
+        # real "Та нормуль" test); "та" is a common Ukrainian-influenced
+        # Russian filler ("well/nah"), included as its own prefix-safe
+        # entries rather than a bare "та" trigger, since "та" alone is
+        # common enough at the start of unrelated words/phrases to risk
+        # false positives
         "как дела", "как ты", "как жизнь", "все хорошо", "всё хорошо",
-        "нормально",
+        "нормально", "нормуль", "ничё", "ниче",
+        "та нормуль", "та ниче", "та ничё", "та ладно", "та норм",
         # bot/identity chit-chat
         "кто ты", "что ты", "ты бот", "ты робот", "ты настоящий",
     )
+
+
+    # ADDED 2026-09-27 (same day, Eldar's live test): removing the
+    # blanket non-ASCII rule exposed that arch-router-1.5b's own
+    # semantic judgment is ALSO unreliable for casual Russian -- two
+    # real messages that were plainly small talk ("Здорова чувак", "Та
+    # нормуль") both got classified "reasoning" by the classifier
+    # itself (confirmed via the raw `arch-router raw response:
+    # "{'route': 'reasoning'}"` log line, no deterministic match
+    # anywhere above it), not by any leftover old code. Neither was an
+    # exact whole-message match against CASUAL_TRIGGERS above (extra
+    # words, missing vocabulary), and growing that list to cover every
+    # real Russian variant is the exact whack-a-mole Eldar wants to
+    # avoid. CASUAL_PREFIX_MAX_LEN gates a looser check in
+    # _wants_casual below: for non-ASCII messages only, match if the
+    # message STARTS WITH a known Cyrillic opener (not just equals it),
+    # as long as the whole thing is still short. The length cap is the
+    # safety net against a real, longer request that happens to open
+    # with a greeting ("Привет, отметь что я посмотрел Fringe") getting
+    # silently misrouted to the fast model -- picked generously above
+    # the longest real casual phrases already in the list above.
+    CASUAL_PREFIX_MAX_LEN = 40
 
 
     def _wants_casual(messages):
@@ -1438,6 +1468,26 @@ data:
                         content[:200],
                     )
                     return True
+                # ADDED 2026-09-27: see CASUAL_PREFIX_MAX_LEN's own
+                # comment above for why this exists. Cyrillic-only
+                # (English keeps the strict whole-message rule above,
+                # unchanged) and word-boundary-safe on purpose -- plain
+                # substring "пока" (bye) would also match inside
+                # "покажи" (show me), a completely different word. Uses
+                # a regex negative lookahead ((?!\w)) rather than a
+                # literal trailing space, since a real word boundary can
+                # also be punctuation ("Здорова, как сам?" -- comma
+                # right after the greeting, no space) or end of string.
+                if not normalized.isascii() and len(normalized) <= CASUAL_PREFIX_MAX_LEN:
+                    for trigger in CASUAL_TRIGGERS:
+                        if trigger.isascii():
+                            continue
+                        if re.match(re.escape(trigger) + r"(?!\w)", normalized):
+                            logger.info(
+                                "casual trigger matched (Cyrillic prefix %r, len=%d): %r",
+                                trigger, len(normalized), content[:200],
+                            )
+                            return True
         return False
 
 
