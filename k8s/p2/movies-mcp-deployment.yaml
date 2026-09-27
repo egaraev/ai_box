@@ -1,0 +1,82 @@
+# movies-mcp: the HTTP MCP server Hermes calls for movie questions
+# (ask_movies) -- the first of the "specialist agent" family (movies/
+# medical/legal/...), each its own tiny pod with its own persistent
+# Honcho-backed memory. See apps/movies-mcp/server.py's top-of-file
+# comment for the full design writeup (Honcho workspace/peer/session
+# layout, why LiteLLM's "auto" route rather than a named local model).
+# Source lives in apps/movies-mcp/ in this repo (not published anywhere)
+# -- built and run locally on aibox, same no-registry pattern as every
+# other *-mcp service here (see media-augment-mcp-deployment.yaml's own
+# comment for the full reasoning).
+#
+# BUILD / DEPLOY (run on aibox -- the image has to exist as a local
+# containerd/docker image on the node before this Deployment can start):
+#   cd ~/repos/aibox-platform/apps/movies-mcp
+#   docker build -t movies-mcp:latest .
+#   docker save movies-mcp:latest | sudo k3s ctr images import -
+# After editing server.py, repeat both, then:
+#   kubectl rollout restart deployment/movies-mcp -n ai-mcp
+# When THIS FILE changes -- `kubectl apply -f` it in addition to any
+# image rebuild.
+#
+# No hostPath volumes, no PVC, no GPU -- unlike media-gen-mcp/
+# media-augment-mcp/vault-mcp, this pod holds no local state at all.
+# Honcho (k8s/p2/honcho.yaml, already deployed) IS its persistent store.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: movies-mcp
+  namespace: ai-mcp
+  labels:
+    app: movies-mcp
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: movies-mcp
+    spec:
+      containers:
+        - name: movies-mcp
+          image: movies-mcp:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: LITELLM_URL
+              value: "http://litellm.ai-models.svc.cluster.local:4000/v1"
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master_key
+            - name: HONCHO_URL
+              value: "http://honcho-api.ai-memory.svc.cluster.local:8000"
+            # No HONCHO_API_KEY entry -- honcho-config's AUTH_USE_AUTH is
+            # "false" today, so there's no secret to source one from. If
+            # that ever changes, add a secretKeyRef here the same way
+            # LITELLM_API_KEY does above.
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+  selector:
+    matchLabels:
+      app: movies-mcp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: movies-mcp
+  namespace: ai-mcp
+spec:
+  selector:
+    app: movies-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http

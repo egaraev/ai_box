@@ -1,0 +1,7 @@
+# Same floor as the other *-mcp services in this repo -- see
+# media-gen-mcp/requirements.txt's comment for why (mcp 2.x renamed
+# FastMCP -> MCPServer; plain `pip install mcp` already resolves to 2.x).
+# No redis here -- unlike media-gen-mcp/media-augment-mcp, this tool
+# doesn't touch the GPU, so it has no busy-flag to coordinate.
+mcp>=2.0
+httpx>=0.27
