@@ -1013,10 +1013,37 @@ data:
         "save to the vault", "add to my notes", "save to my notes",
     )
 
+    # ADDED 2026-09-27, same root cause as the media-gen fix above, caught
+    # live on movies-mcp: Eldar's "Update movie info that i stoped watching
+    # Fringe on episode 19-th" got a confident "I've updated it" reply from
+    # Hermes with nothing actually written (confirmed by reading
+    # watch-history.yaml directly -- still the empty seed). None of these
+    # phrasings carry a MEDIA_ACTION_VERBS+MEDIA_NOUNS match (no
+    # generate/create + image/video/song), so they were falling through to
+    # the classifier same as the original media-gen bug did. Fixed-phrase
+    # list, same discipline as VAULT_TRIGGERS above (movie requests are
+    # varied enough that a verb+noun pattern would either miss real
+    # requests or catch unrelated ones -- see server.py's own tool
+    # docstrings in apps/movies-mcp/server.py for the real phrasings this
+    # is modeled on).
+    MOVIE_TRIGGERS = (
+        "mark as watched", "mark it as watched", "mark this as watched",
+        "stopped watching", "stop watching", "i stopped", "on hold",
+        "update watch history", "update my watch history",
+        "update the watch history", "watch history", "movie info",
+        "update movie info", "add to anticipated", "anticipated list",
+        "waiting for the next season", "waiting for a new season",
+        "new season of", "next season of", "is back yet", "any update on",
+        "what am i waiting on", "recommend a movie", "recommend a show",
+        "recommend something to watch", "what should i watch",
+        "movie recommendation",
+    )
+
     # explicit tool function names, in case Hermes's own narration or a
     # pasted error message ends up in the latest user turn
     TOOL_NAME_TRIGGERS = (
         "generate_image", "generate_video", "generate_music", "edit_image",
+        "ask_movies", "update_watch_history", "check_anticipated",
     )
 
     # meta -- about tool use/honesty itself. Real transcript evidence this
@@ -1027,12 +1054,22 @@ data:
     # turns that most need the reliable model, since this is precisely
     # where hermes3-llama-3.1-8b kept re-fabricating instead of admitting
     # it or actually retrying.
+    # EXTENDED 2026-09-27: the movies-mcp incident's own follow-ups
+    # ("Check if you updated that", "You did not update anything") don't
+    # contain the word "tool" at all -- the original list would have missed
+    # them completely. Generic update/save-confirmation phrasing added
+    # alongside the tool-specific ones; a false positive here just means an
+    # unrelated message gets the slower, more careful model, same safe
+    # failure direction as every other trigger list in this file.
     TOOL_META_TRIGGERS = (
         "use the tool", "used the tool", "use that tool", "call the tool",
         "called the tool", "run the tool", "did you use the tool",
         "did you call the tool", "did you run the tool",
         "actually call the tool", "actually use the tool",
         "never fabricate", "don't fabricate", "fabricat",
+        "did you update", "did you save", "did you actually",
+        "you did not update", "you didn't update", "you did not save",
+        "you didn't save", "check if you updated", "check if you saved",
     )
 
 
@@ -1055,7 +1092,7 @@ data:
                         content[:200],
                     )
                     return True
-                for t in VAULT_TRIGGERS + TOOL_NAME_TRIGGERS + TOOL_META_TRIGGERS:
+                for t in VAULT_TRIGGERS + MOVIE_TRIGGERS + TOOL_NAME_TRIGGERS + TOOL_META_TRIGGERS:
                     if t in lowered:
                         logger.info(
                             "tool-use trigger matched %r in: %r",
