@@ -812,16 +812,24 @@ data:
 
 
     def _has_image(messages):
+        # FIXED 2026-09-27, same day as _wants_reliable_for_script's fix
+        # (see that function's own comment for the confirmed root cause):
+        # stopping at the FIRST role="user" message can land on a Hermes
+        # tool-call artifact instead of the real message, so this now
+        # scans the whole trailing consecutive block of user-role
+        # messages -- but still stops (break) the moment it leaves that
+        # block, so an image from an OLDER, already-answered turn still
+        # can't leak into a later unrelated request (verified locally
+        # against the same scenario that caused the 2026-09-09
+        # whole-conversation bug in DEEP_REASONING_TRIGGERS below).
         for m in reversed(messages):
             if m.get("role") != "user":
-                continue
+                break  # left the trailing user-turn block
             content = m.get("content")
             if isinstance(content, list):
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "image_url":
                         return True
-            # only the latest user turn counts -- stop here either way
-            return False
         return False
 
 
@@ -848,9 +856,15 @@ data:
     # a stale tool artifact and what it actually contains, same diagnostic
     # approach DEEP_REASONING_TRIGGERS already uses above.
     def _wants_vision_tool(messages):
+        # FIXED 2026-09-27: this comment block above predicted exactly
+        # this failure mode before it was ever confirmed -- see
+        # _wants_reliable_for_script's own comment for the live
+        # confirmation. Now scans the whole trailing consecutive block
+        # of user-role messages instead of stopping at the first one,
+        # same fix as _has_image above.
         for m in reversed(messages):
             if m.get("role") != "user":
-                continue
+                break  # left the trailing user-turn block
             content = m.get("content")
             if isinstance(content, str):
                 content = _strip_memory_context(content)
@@ -863,7 +877,6 @@ data:
                             marker, len(content), content[:300],
                         )
                         return True
-            return False
         return False
 
 
@@ -925,9 +938,22 @@ data:
 
 
     def _wants_deep_reasoning(messages):
+        # FIXED 2026-09-27: the bug note above this function fixed
+        # scanning the WHOLE conversation (an old "think deeply" message
+        # sticking to every later unrelated turn). That fix over-corrected
+        # to stopping at the very first role="user" message, which turned
+        # out to have its own bug -- Hermes's agent loop appends its own
+        # tool-call results as extra role="user" messages, so the first
+        # one found scanning backward can be a tool artifact rather than
+        # the real message (confirmed live for _wants_reliable_for_script,
+        # see its own comment). This scans the whole trailing consecutive
+        # block of user-role messages, but still breaks the moment it
+        # leaves that block -- so an older turn (separated by an assistant
+        # reply) still can't leak in, verified locally against the exact
+        # scenario that caused the original 2026-09-09 bug.
         for m in reversed(messages):
             if m.get("role") != "user":
-                continue
+                break  # left the trailing user-turn block
             content = m.get("content")
             if isinstance(content, str):
                 content = _strip_memory_context(content)
@@ -939,8 +965,6 @@ data:
                             t, content[:200],
                         )
                         return True
-            # only the latest user turn counts -- stop here either way
-            return False
         return False
 
 
@@ -1171,9 +1195,18 @@ data:
 
 
     def _wants_tool_use(messages):
+        # FIXED 2026-09-27: same tool-artifact-stacking bug as
+        # _wants_reliable_for_script (see its own comment) -- likely
+        # cause of the slow, multi-retry Fringe/Silo watch-history update
+        # struggles earlier today, since once Hermes had already made one
+        # tool call in a turn, this check's "latest user message" could
+        # land on that tool's own result instead of Eldar's actual
+        # instruction. Now scans the whole trailing consecutive block of
+        # user-role messages, still bounded (break) at the previous
+        # assistant reply so an older turn can't leak in.
         for m in reversed(messages):
             if m.get("role") != "user":
-                continue
+                break  # left the trailing user-turn block
             content = m.get("content")
             if isinstance(content, str):
                 content = _strip_memory_context(content)
@@ -1208,8 +1241,7 @@ data:
                             t, content[:200],
                         )
                         return True
-            # only the latest user turn counts -- stop here either way
-            return False
+        return False
         return False
 
 
@@ -1286,9 +1318,13 @@ data:
 
 
     def _wants_casual(messages):
+        # FIXED 2026-09-27: same tool-artifact-stacking bug as
+        # _wants_reliable_for_script (see its own comment). Scans the
+        # whole trailing consecutive block of user-role messages, still
+        # bounded (break) at the previous assistant reply.
         for m in reversed(messages):
             if m.get("role") != "user":
-                continue
+                break  # left the trailing user-turn block
             content = m.get("content")
             if isinstance(content, str):
                 # Strip whitespace and common leading/trailing punctuation,
@@ -1301,8 +1337,6 @@ data:
                         content[:200],
                     )
                     return True
-            # only the latest user turn counts -- stop here either way
-            return False
         return False
 
 
@@ -1334,9 +1368,18 @@ data:
 
 
     def _wants_cloud_alias(messages):
+        # FIXED 2026-09-27: same tool-artifact-stacking bug as
+        # _wants_reliable_for_script (see its own comment) -- an explicit
+        # "use opus"/"use sol" instruction could get silently missed if
+        # Hermes had already made a tool call earlier in the same turn.
+        # Scans the whole trailing consecutive block of user-role
+        # messages, still bounded (break) at the previous assistant
+        # reply so an older turn's alias request can't stick to a later
+        # unrelated one (that was the original 2026-09-09 bug this
+        # function's own comment above documents).
         for m in reversed(messages):
             if m.get("role") != "user":
-                continue
+                break  # left the trailing user-turn block
             content = m.get("content")
             if isinstance(content, str):
                 content = _strip_memory_context(content)
@@ -1349,8 +1392,6 @@ data:
                                 t, model_name, content[:200],
                             )
                             return model_name
-            # only the latest user turn counts -- stop here either way
-            return None
         return None
 
 
