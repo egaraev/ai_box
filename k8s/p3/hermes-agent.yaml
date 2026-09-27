@@ -251,16 +251,20 @@ data:
     # model load given Qwen-Image-2.1's larger ~16GB footprint).
     # movies (added 2026-09-27, first of the "specialist agent" family --
     # movies/medical/legal/... -- see apps/movies-mcp/server.py's
-    # top-of-file comment for the full design). Three tools: ask_movies
-    # (recommendations/questions, no writes), update_watch_history (the
-    # only one that writes -- a hostPath-mounted watch-history.yaml, not
-    # Honcho), and check_anticipated (real TMDB release-status lookups).
-    # See SOUL.md's "# Movies" section for when to call which -- ADDED
-    # 2026-09-27 after a real production bug: Hermes was answering
-    # "update watch history" requests by calling ask_movies (which only
-    # reasons about context) instead of update_watch_history (the actual
-    # write), so it confidently reported a change that never happened --
-    # the file was provably untouched. Unlike every other *-mcp entry
+    # top-of-file comment for the full design). TWO tools: ask_movies
+    # (recommendations/questions AND recording a watch-history change --
+    # the tool itself decides which one a given message is, you just call
+    # it either way) and check_anticipated (real TMDB release-status
+    # lookups). See SOUL.md's "# Movies" section for the exact rule on
+    # trusting a save. HISTORY, corrected 2026-09-27: an earlier version
+    # of this comment (and of SOUL.md) described a THIRD tool,
+    # update_watch_history, as the only one that writes. That tool never
+    # actually existed in server.py (confirmed via git log + a pod-code
+    # grep + a line-count diff) -- Hermes was calling ask_movies for
+    # updates not because it picked the wrong tool, but because the right
+    # one was never built. It's now merged into ask_movies for real
+    # instead of being reintroduced as a second tool, removing the
+    # two-tool selection problem entirely. Unlike every other *-mcp entry
     # above, this one carries no local GPU state and needs no
     # /shared-output or PVC plumbing -- its conversation memory lives in
     # Honcho (k8s/p2/honcho.yaml, ask_movies/check_anticipated only) and
@@ -478,27 +482,31 @@ data:
       than a plausible-sounding invented one.
 
     # Movies
-    - Three tools live on the movies MCP server: ask_movies (recommendations,
-      "what should I watch," questions about a title, recall of earlier
-      conversations), update_watch_history (recording a real change --
-      something watched, dropped, stopped mid-way, or newly anticipated), and
+    - TWO tools live on the movies MCP server: ask_movies (everything --
+      recommendations, "what should I watch," questions about a title, recall
+      of earlier conversations, AND recording a real watch-history change --
+      something watched, dropped, stopped mid-way, or newly anticipated) and
       check_anticipated (real current release/season status for a specific
-      anticipated show, e.g. "is Silo back yet").
-    - The test is whether the message describes something changing or asks a
-      question. "I stopped watching X at season 2," "mark X as watched, loved
-      it," "I'm waiting for the next season of X" all describe a change --
-      call update_watch_history, not ask_movies. A recommendation request or
-      a question about a title ("what happens in the finale of X?") is
-      ask_movies only.
-    - update_watch_history is the only one of the three that actually writes
-      anything -- ask_movies only reads context and answers in words. Never
-      report a watch-history change as done because you reasoned about it or
-      recalled it via ask_movies; only report it as done after you actually
-      called update_watch_history and it returned its confirmation string.
-    - If asked "did you update/save that," don't guess from what you recall
-      saying earlier -- if you're not certain the call actually happened,
-      call update_watch_history again with the same details (it's safe to
-      repeat) rather than reassuring without checking.
+      anticipated show, e.g. "is Silo back yet"). There is no separate
+      update tool -- just call ask_movies with whatever Eldar said, in his
+      own words; the tool itself decides whether it's a question or a change
+      and saves it if so. You don't need to classify the message yourself.
+    - The ONLY reliable signal that a change was actually saved is the
+      literal substring "(saved: <title> -> <status>)" appearing in
+      ask_movies's returned text. If that substring is NOT in the response,
+      nothing was saved -- say so plainly ("that didn't save, let me try
+      again" or similar) instead of claiming it worked. Never report a
+      watch-history change as done from your own reasoning, from what you
+      recall saying earlier, or because the answer sounded like confirmation
+      -- only the "(saved: ...)" substring in the actual tool response counts.
+    - If asked "did you update/save that," don't guess or repeat an earlier
+      claim -- call ask_movies again with the same details (safe to repeat)
+      and check the fresh response for "(saved: ...)" before answering.
+    - If a call comes back with no "(saved: ...)" and no obvious reason why
+      (not just "that was a question, not a change"), try again with the
+      change stated more explicitly (exact title, exact status word: watched
+      it/finished it, dropped it/stopped watching it, or waiting for it)
+      before telling Eldar it failed.
 
     # Defaults
     - When something is genuinely ambiguous, ask -- don't guess on anything
