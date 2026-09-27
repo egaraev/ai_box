@@ -251,15 +251,26 @@ data:
     # model load given Qwen-Image-2.1's larger ~16GB footprint).
     # movies (added 2026-09-27, first of the "specialist agent" family --
     # movies/medical/legal/... -- see apps/movies-mcp/server.py's
-    # top-of-file comment for the full design). One tool: ask_movies.
-    # Unlike every other *-mcp entry above, this one carries no local
-    # GPU state and needs no /shared-output or PVC plumbing -- its
-    # persistence lives entirely in Honcho (k8s/p2/honcho.yaml), which
-    # this pod calls directly. 120s is generous for what's normally a
-    # couple of quick HTTP round-trips (Honcho recall + one LiteLLM
-    # call + Honcho save), well under media-gen's multi-minute renders,
-    # with real margin over LiteLLM's own 90s per-call timeout in case
-    # the "auto" router falls back to a slower/cloud model.
+    # top-of-file comment for the full design). Three tools: ask_movies
+    # (recommendations/questions, no writes), update_watch_history (the
+    # only one that writes -- a hostPath-mounted watch-history.yaml, not
+    # Honcho), and check_anticipated (real TMDB release-status lookups).
+    # See SOUL.md's "# Movies" section for when to call which -- ADDED
+    # 2026-09-27 after a real production bug: Hermes was answering
+    # "update watch history" requests by calling ask_movies (which only
+    # reasons about context) instead of update_watch_history (the actual
+    # write), so it confidently reported a change that never happened --
+    # the file was provably untouched. Unlike every other *-mcp entry
+    # above, this one carries no local GPU state and needs no
+    # /shared-output or PVC plumbing -- its conversation memory lives in
+    # Honcho (k8s/p2/honcho.yaml, ask_movies/check_anticipated only) and
+    # its structured watch history in that hostPath file (movies-mcp-
+    # deployment.yaml), both called/read directly. 120s is generous for
+    # what's normally a couple of quick HTTP round-trips (Honcho recall +
+    # one LiteLLM call + Honcho save, or a TMDB search + lookup), well
+    # under media-gen's multi-minute renders, with real margin over
+    # LiteLLM's own 90s per-call timeout in case the "auto" router falls
+    # back to a slower/cloud model.
     mcp_servers:
       media-gen:
         url: "http://media-gen-mcp.ai-mcp.svc.cluster.local:8000/mcp"
@@ -465,6 +476,29 @@ data:
       error message back rather than guessing at a different path or making
       up a reason it might have failed -- the real error is more useful
       than a plausible-sounding invented one.
+
+    # Movies
+    - Three tools live on the movies MCP server: ask_movies (recommendations,
+      "what should I watch," questions about a title, recall of earlier
+      conversations), update_watch_history (recording a real change --
+      something watched, dropped, stopped mid-way, or newly anticipated), and
+      check_anticipated (real current release/season status for a specific
+      anticipated show, e.g. "is Silo back yet").
+    - The test is whether the message describes something changing or asks a
+      question. "I stopped watching X at season 2," "mark X as watched, loved
+      it," "I'm waiting for the next season of X" all describe a change --
+      call update_watch_history, not ask_movies. A recommendation request or
+      a question about a title ("what happens in the finale of X?") is
+      ask_movies only.
+    - update_watch_history is the only one of the three that actually writes
+      anything -- ask_movies only reads context and answers in words. Never
+      report a watch-history change as done because you reasoned about it or
+      recalled it via ask_movies; only report it as done after you actually
+      called update_watch_history and it returned its confirmation string.
+    - If asked "did you update/save that," don't guess from what you recall
+      saying earlier -- if you're not certain the call actually happened,
+      call update_watch_history again with the same details (it's safe to
+      repeat) rather than reassuring without checking.
 
     # Defaults
     - When something is genuinely ambiguous, ask -- don't guess on anything
