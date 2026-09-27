@@ -794,15 +794,23 @@ data:
     # _wants_cloud_alias below do the identical whole-string substring
     # scan, so a recalled memory mentioning e.g. "step by step" or "use
     # opus" could just as easily force deep-reasoning or trigger a real
-    # paid cloud API call the same way. _wants_casual is NOT affected --
-    # it requires the ENTIRE (stripped) message to exactly equal a short
-    # phrase, and a 14k-char memory dump can never equal one. _has_image
-    # isn't affected either -- it only matches list-shaped multimodal
-    # content, a different structure from this text-stuffing bug. So this
-    # strip is applied to all three substring-scanning functions
-    # (_wants_vision_tool, _wants_deep_reasoning, _wants_cloud_alias) and
-    # deliberately left out of _has_image/_wants_casual, which don't need
-    # it.
+    # paid cloud API call the same way. _has_image isn't affected --
+    # it only matches list-shaped multimodal content, a different
+    # structure from this text-stuffing bug.
+    #
+    # CORRECTED 2026-09-27 (Eldar's live test): this comment used to
+    # claim _wants_casual was ALSO unaffected, on the theory that "a
+    # 14k-char memory dump can never equal a short phrase" -- true, but
+    # the practical effect is the opposite of "unaffected": since the
+    # dump gets appended on effectively every turn, the ENTIRE raw
+    # message (short reply + huge dump) almost never equals a bare
+    # CASUAL_TRIGGERS phrase, so _wants_casual barely ever fires in
+    # production, not just for the new Russian entries but for the
+    # original English ones too -- confirmed live: a plain "Привет"
+    # missed casual and fell through to the non-ASCII reasoning path,
+    # because the real content was "Привет\n\n<memory-context>...".
+    # _wants_casual now strips memory context first, same as the three
+    # functions above -- see its own definition below.
     MEMORY_CONTEXT_MARKER = "<memory-context>"
 
 
@@ -1355,11 +1363,25 @@ data:
         # _wants_reliable_for_script (see its own comment). Scans the
         # whole trailing consecutive block of user-role messages, still
         # bounded (break) at the previous assistant reply.
+        #
+        # FIXED 2026-09-27, second bug found the same day (Eldar's live
+        # test): now also strips memory context before matching -- see
+        # MEMORY_CONTEXT_MARKER's own comment above for the confirmed
+        # root cause (Honcho appends a recalled-memory block directly
+        # onto the user's message string on effectively every turn, so
+        # without this the entire message almost never equals a bare
+        # CASUAL_TRIGGERS phrase). This was silently breaking casual
+        # detection for English messages too, not just the new Russian
+        # entries -- just less noticeable, since a missed English casual
+        # match only costs an extra classifier round-trip rather than
+        # forcing the expensive reliable model the way it does for
+        # Russian.
         for m in reversed(messages):
             if m.get("role") != "user":
                 break  # left the trailing user-turn block
             content = m.get("content")
             if isinstance(content, str):
+                content = _strip_memory_context(content)
                 # Strip whitespace and common leading/trailing punctuation,
                 # lowercase -- the ENTIRE message must match, see comment
                 # above for why this isn't a substring check.
