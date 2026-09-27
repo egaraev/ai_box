@@ -38,18 +38,35 @@
 # tool called it (this looked at first like the same "model fabricates
 # tool success" bug media-gen-mcp hit -- it wasn't; Hermes really was
 # calling the tool, the write itself was silently failing every time).
-# Fix: mount the PARENT DIRECTORY (/srv/aibox/movies-mcp) at /app/data
-# instead, and point WATCH_HISTORY_PATH at a file inside it
-# (/app/data/watch-history.yaml) -- now the temp file and the real file
-# both live inside the same bind-mounted directory, so the rename is a
-# normal same-filesystem operation and actually succeeds.
+# Fix: mount the PARENT DIRECTORY at /app/data instead, and point
+# WATCH_HISTORY_PATH at a file inside it (/app/data/watch-history.yaml)
+# -- now the temp file and the real file both live inside the same
+# bind-mounted directory, so the rename is a normal same-filesystem
+# operation and actually succeeds.
+#
+# MOVED INTO THE OBSIDIAN VAULT (2026-09-27, Eldar's request): was
+# /srv/aibox/movies-mcp (a bare, root-owned, ungrouped spot on the node).
+# Eldar wants one single place of truth for all specialist-agent data,
+# for easier management and backup -- the vault (/data/obsidian_vault,
+# same path vault-mcp and hermes-agent already mount, see vault-mcp-
+# deployment.yaml's own top comment) is already backed up as one unit,
+# so parking data there instead of scattered hostPath dirs means backing
+# up the vault backs this up too. Deliberately kept as a PLAIN YAML file,
+# not a real Obsidian note (Eldar considered and declined that -- more
+# moving parts, this session already found enough real bugs for one day)
+# -- this is purely a location change, server.py's code is untouched,
+# WATCH_HISTORY_PATH inside the container stays /app/data/watch-history.yaml.
+# _system/ prefix (leading underscore, Obsidian convention) keeps this
+# and future specialist agents' raw data visually separate from Eldar's
+# actual notes; specialist-agents/movies/ leaves room for medical/legal/
+# etc. to each get their own sibling folder the same way later.
 #
 # ONE-TIME SETUP before the first `kubectl apply` of this file: the
-# hostPath below expects the DIRECTORY to already exist on aibox (root-
-# owned, needs sudo -- eldar is not srv-writable), with the seed file
-# inside it:
-#   sudo mkdir -p /srv/aibox/movies-mcp
-#   sudo tee /srv/aibox/movies-mcp/watch-history.yaml > /dev/null <<'EOF'
+# hostPath below expects the DIRECTORY to already exist on aibox, with
+# the seed file inside it. No sudo needed this time -- unlike /srv/aibox,
+# the vault is eldar-owned:
+#   mkdir -p /data/obsidian_vault/_system/specialist-agents/movies
+#   cat > /data/obsidian_vault/_system/specialist-agents/movies/watch-history.yaml <<'EOF'
 #   interests: []
 #   completed: []
 #   on_hold: []
@@ -57,7 +74,10 @@
 #   anticipated: []
 #   EOF
 # After that, the pod owns it -- don't overwrite it by hand again except
-# to fix a typo.
+# to fix a typo. If migrating from the old /srv/aibox/movies-mcp location
+# and it already has real (non-seed) data, copy THAT file's content
+# instead of the empty seed above, then it's safe to remove the old
+# /srv/aibox/movies-mcp directory.
 #
 # ALSO NOTE: the eventual plan is for scripts/gmail_sync.py in the n8n
 # pod to ALSO write into this same directory (k8s/n8n/n8n-deployment.yaml
@@ -134,7 +154,7 @@ spec:
         # the old type: File had.
         - name: watch-history
           hostPath:
-            path: /srv/aibox/movies-mcp
+            path: /data/obsidian_vault/_system/specialist-agents/movies
             type: Directory
   selector:
     matchLabels:
