@@ -249,6 +249,17 @@ data:
     # reachable from media-augment-mcp's. Same 900s timeout as media-gen
     # for the same reason (multi-minute generation, possibly a colder
     # model load given Qwen-Image-2.1's larger ~16GB footprint).
+    # movies (added 2026-09-27, first of the "specialist agent" family --
+    # movies/medical/legal/... -- see apps/movies-mcp/server.py's
+    # top-of-file comment for the full design). One tool: ask_movies.
+    # Unlike every other *-mcp entry above, this one carries no local
+    # GPU state and needs no /shared-output or PVC plumbing -- its
+    # persistence lives entirely in Honcho (k8s/p2/honcho.yaml), which
+    # this pod calls directly. 120s is generous for what's normally a
+    # couple of quick HTTP round-trips (Honcho recall + one LiteLLM
+    # call + Honcho save), well under media-gen's multi-minute renders,
+    # with real margin over LiteLLM's own 90s per-call timeout in case
+    # the "auto" router falls back to a slower/cloud model.
     mcp_servers:
       media-gen:
         url: "http://media-gen-mcp.ai-mcp.svc.cluster.local:8000/mcp"
@@ -259,6 +270,9 @@ data:
       vault:
         url: "http://vault-mcp.ai-mcp.svc.cluster.local:8000/mcp"
         timeout: 180
+      movies:
+        url: "http://movies-mcp.ai-mcp.svc.cluster.local:8000/mcp"
+        timeout: 120
 
     # P6 roadmap ("Specialized + family agents", see /areas/ai-box-k3s.md):
     # settled this session (2026-09-17) on a simpler design than originally
