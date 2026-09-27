@@ -25,30 +25,52 @@
 # Eldar's watched" file the update_watch_history tool edits (see
 # server.py's WATCH HISTORY comment). Honcho's dialectic recall isn't a
 # good fit for that -- it's a short, exact list needing precise lookups,
-# not fuzzy semantic search -- so it's a plain file instead, same
-# hostPath-single-file pattern as the other *-mcp services that hold
-# local state.
+# not fuzzy semantic search -- so it's a plain file instead.
+#
+# MOUNTS THE DIRECTORY, NOT THE FILE (fixed 2026-09-27, real production
+# bug): originally this mounted the single file directly (hostPath
+# type: File at /app/watch-history.yaml). That's broken by design for
+# ANYTHING that writes the file atomically -- server.py's
+# _save_watch_history() writes a temp file next to it then
+# os.replace()'s it into place, and you cannot rename() onto an actively
+# bind-mounted file: confirmed live as `OSError: [Errno 16] Device or
+# resource busy`, on every single write, regardless of which model or
+# tool called it (this looked at first like the same "model fabricates
+# tool success" bug media-gen-mcp hit -- it wasn't; Hermes really was
+# calling the tool, the write itself was silently failing every time).
+# Fix: mount the PARENT DIRECTORY (/srv/aibox/movies-mcp) at /app/data
+# instead, and point WATCH_HISTORY_PATH at a file inside it
+# (/app/data/watch-history.yaml) -- now the temp file and the real file
+# both live inside the same bind-mounted directory, so the rename is a
+# normal same-filesystem operation and actually succeeds.
 #
 # ONE-TIME SETUP before the first `kubectl apply` of this file: the
-# hostPath below expects the file to already exist on aibox, so seed it
-# once from the repo's copy:
-#   mkdir -p /srv/aibox/movies-mcp
-#   cp ~/repos/aibox-platform/apps/movies-mcp/watch-history.yaml /srv/aibox/movies-mcp/watch-history.yaml
-# After that, the pod owns it -- don't overwrite it by re-copying the
-# repo's seed copy over it again; that seed is intentionally left to go
-# stale (see watch-history.yaml's own top comment).
+# hostPath below expects the DIRECTORY to already exist on aibox (root-
+# owned, needs sudo -- eldar is not srv-writable), with the seed file
+# inside it:
+#   sudo mkdir -p /srv/aibox/movies-mcp
+#   sudo tee /srv/aibox/movies-mcp/watch-history.yaml > /dev/null <<'EOF'
+#   interests: []
+#   completed: []
+#   on_hold: []
+#   suggested_not_yet_watched: []
+#   anticipated: []
+#   EOF
+# After that, the pod owns it -- don't overwrite it by hand again except
+# to fix a typo.
 #
-# ALSO NOTE: as of 2026-09-27 that same hostPath file is ALSO written by
-# scripts/gmail_sync.py running in the n8n pod (k8s/n8n/n8n-deployment.yaml
-# gets its own mount of the identical host path) -- see that script's
-# MOVIE-topic comment. Two pods, one file, both on aibox's single node.
+# ALSO NOTE: the eventual plan is for scripts/gmail_sync.py in the n8n
+# pod to ALSO write into this same directory (k8s/n8n/n8n-deployment.yaml
+# would get its own mount of the same host path) -- NOT actually wired
+# up yet as of this fix (checked n8n-deployment.yaml directly, it's still
+# a "future" placeholder there), so no two-pod concurrency to worry about
+# for now. When that does get built, mount the SAME directory there too
+# (not the single file), for the same reason as above.
 #
 # tmdb-secret (added 2026-09-27, check_anticipated tool): NOT defined here,
 # same convention as litellm-secret -- created directly on the cluster,
-# never committed to git (see k8s/secrets/README.md). Eldar needs a free
-# API key from themoviedb.org/settings/api (manual signup, can't be done
-# on his behalf) first, then:
-#   kubectl create secret generic tmdb-secret -n ai-mcp --from-literal=api_key=<the key>
+# never committed to git (see k8s/secrets/README.md). Already created on
+# the cluster (kubectl get secret tmdb-secret -n ai-mcp to confirm).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -89,6 +111,11 @@ spec:
                 secretKeyRef:
                   name: tmdb-secret
                   key: api_key
+            # ADDED with the directory-mount fix -- overrides server.py's
+            # own default of /app/watch-history.yaml (which no longer
+            # exists directly; the mount is now the directory below).
+            - name: WATCH_HISTORY_PATH
+              value: "/app/data/watch-history.yaml"
           resources:
             requests:
               cpu: "50m"
@@ -98,15 +125,17 @@ spec:
               memory: "256Mi"
           volumeMounts:
             - name: watch-history
-              mountPath: /app/watch-history.yaml
+              mountPath: /app/data
       volumes:
-        # single-file hostPath -- requires the file to already exist on
-        # the node (type: File fails fast if it doesn't), see the
-        # ONE-TIME SETUP comment above.
+        # DIRECTORY hostPath now, not a single file -- see the top-of-file
+        # "MOUNTS THE DIRECTORY, NOT THE FILE" comment for why. type:
+        # Directory (not DirectoryOrCreate) so this still fails fast if
+        # the ONE-TIME SETUP above wasn't done, same fail-fast intent as
+        # the old type: File had.
         - name: watch-history
           hostPath:
-            path: /srv/aibox/movies-mcp/watch-history.yaml
-            type: File
+            path: /srv/aibox/movies-mcp
+            type: Directory
   selector:
     matchLabels:
       app: movies-mcp
