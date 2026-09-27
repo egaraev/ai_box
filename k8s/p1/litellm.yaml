@@ -942,6 +942,41 @@ data:
         "investigate this", "look into this", "dig into this",
         "find out why", "figure out why",
         "help me design", "help me plan", "help me architect",
+        # ADDED 2026-09-27 (Eldar's request), REPLACES the blanket
+        # "any non-ASCII message -> reliable model" rule that used to
+        # live in _wants_reliable_for_script below (see that function's
+        # own comment -- kept in place, just no longer called from
+        # async_pre_call_hook, see the removal note at the old call
+        # site). That blanket rule forced EVERY Russian message,
+        # including plain "спасибо", to the expensive 27B model, which
+        # meant maintaining an ever-growing curated list of Russian
+        # casual phrases just to get ordinary small talk back onto the
+        # fast model -- Eldar's call: not worth it. Replaced with an
+        # explicit opt-in instead: say "expert" (or the Russian
+        # loanword "эксперт") anywhere in the message, same mechanism as
+        # every other entry in this list, in English or Russian.
+        #
+        # IMPORTANT TRADE-OFF, on purpose, documented for future
+        # reference: a Russian message that does NOT contain this
+        # keyword no longer gets any deterministic backstop at all (none
+        # of the English-only trigger lists in this file can ever match
+        # Cyrillic text) -- it falls straight through to arch-router-
+        # 1.5b's own semantic judgment, same as any English message
+        # that isn't caught by a fast path. That's the exact classifier
+        # behavior already confirmed unreliable earlier the same day for
+        # a real movie-related Russian request (routed to the weak
+        # model instead of calling the TMDB tool). Eldar's explicit
+        # choice is to accept that risk for casual/ambiguous Russian
+        # messages and use "expert"/"эксперт" deliberately whenever he
+        # wants the reliability guarantee -- e.g. movie/watch-history
+        # updates, TMDB lookups, anything that actually needs a tool
+        # call. Deliberately a single bare word here (unlike the
+        # multi-word-phrase discipline the rest of this list follows,
+        # see the 2026-09-13 note above) -- "expert"/"эксперт" aren't
+        # words that show up incidentally in ordinary chat the way
+        # "plan"/"design" do, so the over-triggering risk that
+        # discipline exists to avoid doesn't really apply here.
+        "expert", "эксперт",
     )
 
 
@@ -991,6 +1026,17 @@ data:
     # message straight to the reliable model, unconditionally, no keyword
     # judgment needed -- also naturally covers Georgian/Azerbaijani/
     # Armenian and anything else outside plain ASCII, not just Cyrillic.
+    #
+    # NO LONGER CALLED as of 2026-09-27, same day (Eldar's explicit
+    # request) -- see the removal note in async_pre_call_hook where this
+    # used to be invoked, right after the _wants_casual check. Left
+    # defined (unused) rather than deleted because its scanning-fix
+    # comment below documents a real, independently-confirmed bug
+    # pattern (Hermes stacking tool-artifact role="user" messages) that
+    # every other _wants_* check in this file shares and was fixed for
+    # the same day -- useful reference even though this specific
+    # function isn't wired in anymore. If the blanket-reliability
+    # approach is ever wanted back, this is ready to re-add to the hook.
     def _wants_reliable_for_script(messages):
         # FIXED 2026-09-27, same day, confirmed live: this originally
         # stopped at the FIRST role="user" message scanning backward
@@ -1508,20 +1554,9 @@ data:
             # ping always goes straight to "casual", no classifier judgment
             # call. See CASUAL_TRIGGERS above for why this exists (the
             # "Alive?" -> reasoning finding) and why it's a WHOLE-message
-            # match rather than substring.
-            #
-            # MOVED 2026-09-27 (Eldar's request) to run BEFORE the
-            # non-ASCII script check below: CASUAL_TRIGGERS now also has
-            # a curated Russian section (see its own comment), and
-            # without this reordering the non-ASCII check below would
-            # always catch a Russian "спасибо" first and force it to the
-            # reliable model, since it never got a chance to be
-            # recognized as casual. Moving this earlier only changes
-            # anything for messages that are an EXACT whole-message
-            # match against CASUAL_TRIGGERS -- which can't simultaneously
-            # match DEEP_REASONING_TRIGGERS (substring) or the tool-use
-            # checks below (verb+context), so this reorder doesn't change
-            # behavior for anything that isn't casual chit-chat.
+            # match rather than substring. CASUAL_TRIGGERS also has a
+            # curated Russian section as of 2026-09-27, so this catches
+            # common Russian small talk too, not just English.
             if _wants_casual(messages):
                 data["model"] = ROUTE_TO_MODEL["casual"]
                 logger.info(
@@ -1530,19 +1565,25 @@ data:
                 )
                 return data
 
-            # Deterministic fast path: non-ASCII script (Russian, etc.) --
-            # see _wants_reliable_for_script's own comment for why this
-            # exists. Checked before the English-only trigger lists below
-            # since none of those could ever fire on non-Latin text anyway.
-            # (Casual Russian small talk is now caught by _wants_casual
-            # above, before it ever reaches here.)
-            if _wants_reliable_for_script(messages):
-                data["model"] = ROUTE_TO_MODEL["reasoning"]
-                logger.info(
-                    "auto -> reasoning (non-ASCII script) -> %s",
-                    data["model"],
-                )
-                return data
+            # REMOVED 2026-09-27 (Eldar's explicit request), same day it
+            # was added: this used to be
+            #   if _wants_reliable_for_script(messages): ... return data
+            # -- a blanket "any non-ASCII message forces the reliable
+            # model" rule. _wants_reliable_for_script is still defined
+            # below (its comment documents the real tool-artifact-
+            # stacking bug this file's other _wants_* checks all share,
+            # still useful history), it's just no longer called here.
+            # Reason: it meant every Russian message, including plain
+            # small talk, paid for the expensive model, and required an
+            # ever-growing curated Russian CASUAL_TRIGGERS list just to
+            # claw ordinary chit-chat back onto the fast path -- not
+            # worth the upkeep. Replaced with an explicit opt-in keyword
+            # instead: "expert"/"эксперт", added to DEEP_REASONING_TRIGGERS
+            # above (see its own comment for the full trade-off this
+            # accepts -- a Russian message that doesn't use the keyword
+            # now has no deterministic backstop and depends on
+            # arch-router-1.5b's own judgment, same as any English "other"
+            # message).
 
             # Deterministic fast path, same idea as the checks above: any
             # request that plausibly needs one of Hermes's real tools
