@@ -1314,6 +1314,39 @@ data:
         # bot/identity chit-chat
         "who are you", "what are you", "are you a bot", "are you human",
         "are you real", "are you an ai",
+        # ADDED 2026-09-27 (Eldar's request): _wants_reliable_for_script
+        # above routes EVERY non-ASCII message straight to the reliable
+        # model unconditionally, with no casual/small-talk exception --
+        # so a plain "спасибо" was burning the slow 27B model the same
+        # as a real Russian request. Checked before the non-ASCII
+        # deterministic fast path (see the call-order comment below) so
+        # these hit "casual" first instead. Same WHOLE-MESSAGE-match
+        # rule as the English list above -- a curated list of fixed
+        # greeting/farewell/thanks/status phrases, not conjugated verbs,
+        # so the "Russian verb endings change with tense/person" problem
+        # _wants_reliable_for_script's own comment raises (about
+        # e.g. смотрю/посмотрел/досмотрел for "watch") doesn't apply
+        # here -- these are short fixed expressions people don't
+        # conjugate. Not meant to be exhaustive, just the common cases;
+        # anything else in Russian still correctly falls through to the
+        # reliable model.
+        # status / aliveness pings
+        "ты тут", "ты здесь", "але", "алло", "тест", "проверка",
+        # greetings
+        "привет", "приветик", "здравствуй", "здравствуйте", "хай",
+        "доброе утро", "добрый день", "добрый вечер", "доброй ночи",
+        # farewells
+        "пока", "до свидания", "увидимся", "счастливо", "до встречи",
+        "спокойной ночи",
+        # thanks / acknowledgment
+        "спасибо", "спасибо большое", "благодарю", "пожалуйста",
+        "ок", "окей", "хорошо", "отлично", "супер", "класс", "понял",
+        "поняла", "понятно", "ладно",
+        # how-are-you small talk
+        "как дела", "как ты", "как жизнь", "все хорошо", "всё хорошо",
+        "нормально",
+        # bot/identity chit-chat
+        "кто ты", "что ты", "ты бот", "ты робот", "ты настоящий",
     )
 
 
@@ -1448,10 +1481,39 @@ data:
                 )
                 return data
 
+            # Deterministic fast path, same idea as the checks above: a
+            # message that's nothing but a greeting/farewell/thanks/status-
+            # ping always goes straight to "casual", no classifier judgment
+            # call. See CASUAL_TRIGGERS above for why this exists (the
+            # "Alive?" -> reasoning finding) and why it's a WHOLE-message
+            # match rather than substring.
+            #
+            # MOVED 2026-09-27 (Eldar's request) to run BEFORE the
+            # non-ASCII script check below: CASUAL_TRIGGERS now also has
+            # a curated Russian section (see its own comment), and
+            # without this reordering the non-ASCII check below would
+            # always catch a Russian "спасибо" first and force it to the
+            # reliable model, since it never got a chance to be
+            # recognized as casual. Moving this earlier only changes
+            # anything for messages that are an EXACT whole-message
+            # match against CASUAL_TRIGGERS -- which can't simultaneously
+            # match DEEP_REASONING_TRIGGERS (substring) or the tool-use
+            # checks below (verb+context), so this reorder doesn't change
+            # behavior for anything that isn't casual chit-chat.
+            if _wants_casual(messages):
+                data["model"] = ROUTE_TO_MODEL["casual"]
+                logger.info(
+                    "auto -> casual (greeting/ping keyword) -> %s",
+                    data["model"],
+                )
+                return data
+
             # Deterministic fast path: non-ASCII script (Russian, etc.) --
             # see _wants_reliable_for_script's own comment for why this
             # exists. Checked before the English-only trigger lists below
             # since none of those could ever fire on non-Latin text anyway.
+            # (Casual Russian small talk is now caught by _wants_casual
+            # above, before it ever reaches here.)
             if _wants_reliable_for_script(messages):
                 data["model"] = ROUTE_TO_MODEL["reasoning"]
                 logger.info(
@@ -1471,20 +1533,6 @@ data:
                 data["model"] = ROUTE_TO_MODEL["reasoning"]
                 logger.info(
                     "auto -> reasoning (tool-use keyword) -> %s",
-                    data["model"],
-                )
-                return data
-
-            # Deterministic fast path, same idea as the checks above: a
-            # message that's nothing but a greeting/farewell/thanks/status-
-            # ping always goes straight to "casual", no classifier judgment
-            # call. See CASUAL_TRIGGERS above for why this exists (the
-            # "Alive?" -> reasoning finding) and why it's a WHOLE-message
-            # match rather than substring.
-            if _wants_casual(messages):
-                data["model"] = ROUTE_TO_MODEL["casual"]
-                logger.info(
-                    "auto -> casual (greeting/ping keyword) -> %s",
                     data["model"],
                 )
                 return data
