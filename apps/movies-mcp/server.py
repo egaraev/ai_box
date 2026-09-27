@@ -57,6 +57,7 @@ show both v2 and v3 surfaces and didn't fully agree with each other:
 """
 import logging
 import os
+import re
 
 import httpx
 import yaml
@@ -83,13 +84,28 @@ HONCHO_HUMAN_PEER = "eldar-movies"
 HONCHO_AGENT_PEER = "movies-agent"
 
 WATCH_HISTORY_PATH = os.environ.get("WATCH_HISTORY_PATH", "/app/watch-history.yaml")
-# the four lists a title can live in at once (mutually exclusive -- adding
-# a title to one removes it from the others). "interests" is a separate
-# freeform list, not managed by the update logic below.
+# all four lists a title can appear in. "interests" is a separate freeform
+# list, not managed by the update logic below.
 STATUS_LISTS = ("completed", "on_hold", "suggested_not_yet_watched", "anticipated")
+# these three ARE mutually exclusive -- a title is either finished, paused,
+# or queued, never more than one at once. "anticipated" is deliberately NOT
+# in this group -- see _apply_watch_history_update's comment for why.
+PROGRESS_LISTS = ("completed", "on_hold", "suggested_not_yet_watched")
 
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
 TMDB_URL = "https://api.themoviedb.org/3"
+
+# strips a trailing "season 3" / "s3" / "part 2" so the same show doesn't
+# end up as two different-looking titles -- confirmed live 2026-09-27:
+# "Silo season 3" (completed) and "Silo" (anticipated) were treated as
+# unrelated entries because matching was exact-string. Applied once, in
+# _apply_watch_history_update, so both comparison and what actually gets
+# stored use the same clean title.
+SEASON_SUFFIX_RE = re.compile(r"\s+(season\s*\d+|s\d+|part\s*\d+)$", re.IGNORECASE)
+
+
+def _normalize_title(title):
+    return SEASON_SUFFIX_RE.sub("", title.strip()).strip()
 
 # The model is told to use one of the exact STATUS_LISTS words, but confirmed
 # live 2026-09-27 (Fringe update) that it sometimes substitutes a natural
@@ -124,12 +140,12 @@ If a block called RECALLED CONTEXT is included, it's what Honcho (this tool's me
 
 You do not have live internet access for most questions -- if something depends on very recent release dates or showtimes, say so plainly rather than guessing. (A separate tool handles live TMDB lookups for anticipated titles -- you don't need to guess at those either.)
 
-First, decide: does this message describe a CHANGE to the watch history (something watched, dropped, stopped mid-way, or newly anticipated) -- or is it a question / recommendation request? "I finished X, loved it", "mark X as watched", "I stopped watching X at season 2", "I'm waiting for the next season of X" are changes. "What should I watch", "what happens in the finale of X", "any good sci-fi lately" are not.
+First, decide: does this message describe a CHANGE to the watch history (something watched, dropped, stopped mid-way, or newly anticipated) -- or is it a question / recommendation request? "I finished X, loved it", "mark X as watched", "I stopped watching X at season 2", "I'm waiting for the next season of X" are changes. "What should I watch", "what happens in the finale of X", "any good sci-fi lately" are not. A message can describe two changes at once ("I finished season 3, waiting for season 4") -- "anticipated" is independent of completed/on_hold/suggested_not_yet_watched (finishing what's out now doesn't cancel anticipating what's next), but you can only record ONE status per reply. If a message clearly describes both, record the progress change (completed/on_hold/suggested_not_yet_watched) this time and mention in ANSWER that it'll need to be told separately to also mark it anticipated.
 
 Always reply in EXACTLY this format, one field per line, nothing before or after it:
 ANSWER: <your natural, conversational answer, a few sentences unless more is clearly wanted>
 UPDATE: yes or no
-TITLE: <the exact title, or none if UPDATE is no>
+TITLE: <the bare show/movie title only -- no "season 3" or episode numbers appended, those go in NOTE or STOPPED_AT instead -- or none if UPDATE is no>
 STATUS: must be exactly one of these four words -- completed, on_hold, suggested_not_yet_watched, anticipated -- or none. Use on_hold for anything dropped, stopped, paused, or quit -- not a different word.
 LIKED: <yes, no, or unknown>
 STOPPED_AT: <where he stopped, e.g. "season 2 episode 4" -- or none>
@@ -263,18 +279,30 @@ def _watch_history_text(data):
     return "\n".join(lines) if lines else "(empty -- nothing recorded yet)"
 
 
-def _remove_title_everywhere(data, title):
-    # drops any existing entry for this title (case-insensitive) from all
-    # four status lists first, so e.g. moving a title from "suggested" to
-    # "completed" doesn't leave a stale duplicate behind in "suggested"
-    title_lower = title.strip().lower()
-    for key in STATUS_LISTS:
-        data[key] = [item for item in data[key] if item.get("title", "").strip().lower() != title_lower]
+def _remove_from_progress_lists(data, title_norm):
+    # the three PROGRESS_LISTS are mutually exclusive -- moving a title to
+    # one drops any stale copy from the other two
+    for key in PROGRESS_LISTS:
+        data[key] = [item for item in data[key] if _normalize_title(item.get("title", "")).lower() != title_norm.lower()]
+
+
+def _remove_from_anticipated(data, title_norm):
+    data["anticipated"] = [item for item in data["anticipated"] if _normalize_title(item.get("title", "")).lower() != title_norm.lower()]
 
 
 def _apply_watch_history_update(data, title, status, liked, stopped_at, reason, note):
-    _remove_title_everywhere(data, title)
-    entry = {"title": title}
+    # confirmed live 2026-09-27: completing what's out now and still
+    # anticipating the next season are both true at once for the same
+    # show -- so a progress update (completed/on_hold/suggested) only
+    # dedupes against the OTHER progress statuses, never touches
+    # anticipated, and vice versa. Cross-clearing them was the original
+    # bug (see PROGRESS_LISTS' own comment).
+    title_norm = _normalize_title(title)
+    if status == "anticipated":
+        _remove_from_anticipated(data, title_norm)
+    else:
+        _remove_from_progress_lists(data, title_norm)
+    entry = {"title": title_norm}
     if liked is not None:
         entry["liked"] = liked
     if stopped_at:
@@ -452,12 +480,13 @@ async def ask_movies(question: str, ctx: Context) -> str:
 
         answer = result["answer"]
         if result["update"] and result["title"] and result["status"]:
+            title_norm = _normalize_title(result["title"])
             _apply_watch_history_update(
                 watch_history, result["title"], result["status"],
                 result["liked"], result["stopped_at"], result["reason"], result["note"],
             )
-            logger.info("watch history updated: %s -> %s", result["title"], result["status"])
-            answer += f"\n\n(saved: {result['title']} -> {result['status']})"
+            logger.info("watch history updated: %s -> %s", title_norm, result["status"])
+            answer += f"\n\n(saved: {title_norm} -> {result['status']})"
         elif result["update"]:
             # model said this was a change but didn't give a usable title/status --
             # log it instead of silently dropping what might be a real change
@@ -491,7 +520,8 @@ async def check_anticipated(title: str = None, ctx: Context = None) -> str:
 
     async with httpx.AsyncClient() as client:
         if title:
-            match = next((e for e in anticipated if e.get("title", "").strip().lower() == title.strip().lower()), None)
+            title_norm = _normalize_title(title)
+            match = next((e for e in anticipated if _normalize_title(e.get("title", "")).lower() == title_norm.lower()), None)
             if match:
                 before = dict(match)
                 line = await _check_one_anticipated(client, match)
