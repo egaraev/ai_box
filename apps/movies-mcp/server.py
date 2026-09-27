@@ -91,6 +91,26 @@ STATUS_LISTS = ("completed", "on_hold", "suggested_not_yet_watched", "anticipate
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
 TMDB_URL = "https://api.themoviedb.org/3"
 
+# The model is told to use one of the exact STATUS_LISTS words, but confirmed
+# live 2026-09-27 (Fringe update) that it sometimes substitutes a natural
+# synonym instead ("dropped" instead of "on_hold") -- that silently failed
+# the old strict-match parsing (status came back None, update got dropped
+# with no confirmation). Normalize instead of trusting the model to always
+# hit the exact enum string.
+STATUS_SYNONYMS = {
+    "completed": "completed", "watched": "completed", "finished": "completed", "done": "completed",
+    "on_hold": "on_hold", "onhold": "on_hold", "hold": "on_hold", "dropped": "on_hold",
+    "stopped": "on_hold", "paused": "on_hold", "quit": "on_hold", "abandoned": "on_hold", "gave_up": "on_hold",
+    "suggested_not_yet_watched": "suggested_not_yet_watched", "suggested": "suggested_not_yet_watched",
+    "recommended": "suggested_not_yet_watched", "to_watch": "suggested_not_yet_watched",
+    "anticipated": "anticipated", "waiting": "anticipated", "upcoming": "anticipated", "anticipating": "anticipated",
+}
+
+
+def _normalize_status(value):
+    key = value.strip().lower().replace(" ", "_").replace("-", "_")
+    return STATUS_SYNONYMS.get(key)
+
 # The model is told to always answer in this exact ANSWER/UPDATE/... line
 # format instead of JSON -- small local models (this runs on LiteLLM's
 # "auto" route, which can land on an 8B model) are unreliable at strict
@@ -110,7 +130,7 @@ Always reply in EXACTLY this format, one field per line, nothing before or after
 ANSWER: <your natural, conversational answer, a few sentences unless more is clearly wanted>
 UPDATE: yes or no
 TITLE: <the exact title, or none if UPDATE is no>
-STATUS: <one of completed, on_hold, suggested_not_yet_watched, anticipated -- or none>
+STATUS: must be exactly one of these four words -- completed, on_hold, suggested_not_yet_watched, anticipated -- or none. Use on_hold for anything dropped, stopped, paused, or quit -- not a different word.
 LIKED: <yes, no, or unknown>
 STOPPED_AT: <where he stopped, e.g. "season 2 episode 4" -- or none>
 REASON: <why he stopped/dropped it, if he said -- or none>
@@ -290,7 +310,7 @@ def _parse_llm_response(raw):
         elif key == "TITLE":
             fields["title"] = none_or(value)
         elif key == "STATUS":
-            fields["status"] = value.lower() if value.lower() in STATUS_LISTS else None
+            fields["status"] = _normalize_status(value)
         elif key == "LIKED":
             fields["liked"] = True if value.lower().startswith("y") else False if value.lower().startswith("n") else None
         elif key == "STOPPED_AT":
