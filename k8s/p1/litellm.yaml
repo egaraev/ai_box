@@ -1033,7 +1033,20 @@ data:
         "update the watch history", "watch history", "movie info",
         "update movie info", "add to anticipated", "anticipated list",
         "waiting for the next season", "waiting for a new season",
-        "new season of", "next season of", "is back yet", "any update on",
+        "new season of", "next season of",
+        # FIXED 2026-09-27: the old "is back yet" phrase could never
+        # actually match real usage -- confirmed live, "Is Silo back yet?"
+        # went to the weak model 4 times running while "Any update on
+        # Silo?" (right below it in this same list) worked immediately on
+        # the same request. Root cause: the title sits BETWEEN "is" and
+        # "back" in how people actually phrase it ("Is Silo back yet"),
+        # so a contiguous fixed phrase spanning "is"..."back" can never
+        # match no matter how it's worded -- only the TAIL "back yet" is
+        # reliably contiguous regardless of where the title falls. "out
+        # yet" catches the other common way to ask ("is it out yet",
+        # "season 4 out yet") -- narrower than a bare "is out"/"back"
+        # would be, to keep the false-positive rate low.
+        "back yet", "out yet", "any update on",
         "what am i waiting on", "recommend a movie", "recommend a show",
         "recommend something to watch", "what should i watch",
         "movie recommendation",
