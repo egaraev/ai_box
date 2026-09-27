@@ -1039,6 +1039,33 @@ data:
         "movie recommendation",
     )
 
+    # ADDED 2026-09-27, second real miss on top of the MOVIE_TRIGGERS fix
+    # above, same day: "Update info about series Silo, i completed season
+    # 3, because waiting for last 4-th season in 2027" matched NONE of the
+    # fixed phrases above (no "next season of", no "i stopped", typos like
+    # "stoped" break exact matches too) -- confirmed live via movies-mcp's
+    # own logs showing ask_movies was never even called, while Hermes
+    # confidently claimed it saved the change three times in a row on the
+    # weak casual model. Exact same root cause the media-gen verb+noun fix
+    # was built for (see MEDIA_ACTION_VERBS/MEDIA_NOUNS above) -- a fixed
+    # phrase list can't keep up with real phrasing variance. Can't reuse
+    # that verb+noun shape directly though: the "noun" here would have to
+    # be the show's own title, which is unbounded and can't be enumerated
+    # -- so this pairs a change-verb anywhere with a generic movie-domain
+    # CONTEXT word anywhere instead of a specific title. A false positive
+    # here just routes an unrelated message to the slower, more careful
+    # model -- same safe failure direction as every other trigger list in
+    # this file (see TOOL_META_TRIGGERS' own comment on this trade-off).
+    MOVIE_CHANGE_VERBS = (
+        "completed", "finished", "watched", "dropped", "stopped", "quit",
+        "gave up", "give up", "mark as", "mark it", "mark this", "update",
+        "waiting for", "anticipating", "rewatched", "rewatch",
+    )
+    MOVIE_CONTEXT_WORDS = (
+        "movie", "movies", "series", "show", "shows", "season", "episode",
+        "watch history", "watchlist", "anticipated",
+    )
+
     # explicit tool function names, in case Hermes's own narration or a
     # pasted error message ends up in the latest user turn
     TOOL_NAME_TRIGGERS = (
@@ -1089,6 +1116,18 @@ data:
                 if has_verb and has_noun:
                     logger.info(
                         "tool-use media verb+noun matched in: %r",
+                        content[:200],
+                    )
+                    return True
+                # movies: change-verb ANYWHERE + movie-context-word ANYWHERE
+                # -- same idea as the media check above, see MOVIE_CHANGE_VERBS'
+                # own comment for why this exists alongside the fixed-phrase
+                # MOVIE_TRIGGERS list rather than replacing it.
+                has_movie_verb = any(v in lowered for v in MOVIE_CHANGE_VERBS)
+                has_movie_context = any(w in lowered for w in MOVIE_CONTEXT_WORDS)
+                if has_movie_verb and has_movie_context:
+                    logger.info(
+                        "tool-use movie verb+context matched in: %r",
                         content[:200],
                     )
                     return True
