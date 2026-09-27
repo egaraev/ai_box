@@ -944,6 +944,39 @@ data:
         return False
 
 
+    # ADDED 2026-09-27 (Eldar's own finding, same day as the movies-mcp
+    # incidents above): every trigger list in this file -- MOVIE_TRIGGERS,
+    # MOVIE_CHANGE_VERBS, VAULT_TRIGGERS, MEDIA_ACTION_VERBS, all of it --
+    # is English-only literal substring matching. A message in Russian (or
+    # any other non-Latin script) can never match ANY of them, so it falls
+    # straight through to arch-router-1.5b's own judgment with ZERO
+    # deterministic backstop -- the entire reliability layer this file
+    # exists for simply doesn't apply. Translating every list wouldn't
+    # really fix it either: Russian verb endings change with tense/person
+    # (смотрю/посмотрел/досмотрел are all different strings for "watch"),
+    # so literal substring matching would be even less reliable there than
+    # it already is in English. Cheapest real fix: route any non-ASCII
+    # message straight to the reliable model, unconditionally, no keyword
+    # judgment needed -- also naturally covers Georgian/Azerbaijani/
+    # Armenian and anything else outside plain ASCII, not just Cyrillic.
+    def _wants_reliable_for_script(messages):
+        for m in reversed(messages):
+            if m.get("role") != "user":
+                continue
+            content = m.get("content")
+            if isinstance(content, str):
+                content = _strip_memory_context(content)
+                if content.strip() and not content.isascii():
+                    logger.info(
+                        "non-ASCII script detected, forcing reliable model: %r",
+                        content[:200],
+                    )
+                    return True
+            # only the latest user turn counts -- stop here either way
+            return False
+        return False
+
+
     # ADDED 2026-09-24, real production bug (Eldar's report: "with music it
     # is constantly failing... generate the same kind of music... Did you
     # call the tool?" repeated across a whole Telegram thread). Root-caused
@@ -1359,6 +1392,18 @@ data:
                 data["model"] = ROUTE_TO_MODEL["reasoning"]
                 logger.info(
                     "auto -> reasoning (explicit deep-thought keyword) -> %s",
+                    data["model"],
+                )
+                return data
+
+            # Deterministic fast path: non-ASCII script (Russian, etc.) --
+            # see _wants_reliable_for_script's own comment for why this
+            # exists. Checked before the English-only trigger lists below
+            # since none of those could ever fire on non-Latin text anyway.
+            if _wants_reliable_for_script(messages):
+                data["model"] = ROUTE_TO_MODEL["reasoning"]
+                logger.info(
+                    "auto -> reasoning (non-ASCII script) -> %s",
                     data["model"],
                 )
                 return data
