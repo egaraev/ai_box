@@ -1056,14 +1056,27 @@ data:
     # here just routes an unrelated message to the slower, more careful
     # model -- same safe failure direction as every other trigger list in
     # this file (see TOOL_META_TRIGGERS' own comment on this trade-off).
+    # WIDENED 2026-09-27, third real miss the same day: "check in tmdb, we
+    # have api key there" and "so use it and tell me when Silo 4th season
+    # is expected" both got the weak model too (auto -> other three times
+    # running) -- neither is a CHANGE ("finished"/"dropped"/etc weren't
+    # said), they're LOOKUP follow-ups in an already-movie-flavored thread,
+    # and the weak model didn't call check_anticipated at all -- it
+    # fabricated a specific, plausible-sounding release date instead
+    # (confirmed: the real anticipated entry still has no tmdb_id cached,
+    # proving no TMDB lookup ever actually happened). Added lookup-intent
+    # verbs alongside the change ones, and "tmdb" itself as a context word
+    # -- naming the API directly is about as unambiguous a movie-domain
+    # signal as exists, essentially zero false-positive risk.
     MOVIE_CHANGE_VERBS = (
         "completed", "finished", "watched", "dropped", "stopped", "quit",
         "gave up", "give up", "mark as", "mark it", "mark this", "update",
         "waiting for", "anticipating", "rewatched", "rewatch",
+        "check", "look up", "tell me when",
     )
     MOVIE_CONTEXT_WORDS = (
         "movie", "movies", "series", "show", "shows", "season", "episode",
-        "watch history", "watchlist", "anticipated",
+        "watch history", "watchlist", "anticipated", "tmdb",
     )
 
     # explicit tool function names, in case Hermes's own narration or a
