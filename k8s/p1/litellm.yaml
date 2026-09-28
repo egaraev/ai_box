@@ -23,31 +23,40 @@
 # qwopus-general 2026-09-10, then REVERTED back to qwen3.8-27b-Expert-Vision
 # the same week after qwopus performed badly in practice -- qwopus-general's
 # model_list entry itself removed 2026-09-13 once confirmed genuinely
-# unused, no lingering reference kept). Five real destinations -- vision
+# unused, no lingering reference kept). Four real destinations -- vision
 # (deterministic, image attached) -> qwen3.8-27b-Expert-Vision, medical ->
-# medgemma-1.5-4b, casual (quick/easy/regular messages, plus a deterministic
-# CASUAL_TRIGGERS keyword fast-path added 2026-09-13 for greetings/pings --
-# see that section further down) -> hermes3-llama-3.1-8b, other
-# (low-confidence classification that doesn't fit any other route, FIXED
-# 2026-09-13 -- used to silently share "reasoning"'s target, see the
-# ROUTE_TO_MODEL comment on that entry) -> also hermes3-llama-3.1-8b,
-# reasoning (the true default/catch-all) -> qwen3.8-27b-Expert. Eldar's own
-# call: the 27B model already covers most things on its own, so
-# "casual"/"medical"/"other" only need to catch the cases genuinely better
-# served by a smaller/specialist model, not become the common path --
-# "reasoning" stays the safe default whenever the classifier is unsure.
-# Growing this list further (coder, cloud fallback -- once those GGUF files
-# land on aibox and get roster entries in llama-swap-configmap.yaml) is a
-# pure data change in custom_router_hook.py, no new plumbing.
+# llama3.1-aloe-beta-8b, and casual/other/reasoning (quick/easy messages,
+# tool-use, and genuinely hard requests alike) all -> qwen3.8-27b-Expert.
 #
-# DEPENDENCY: hermes3-llama-3.1-8b and medgemma-1.5-4b's GGUF files must
-# actually be on aibox (see the "ACTIVATED 2026-09-07" comments in
-# llama-swap-configmap.yaml for the download commands) before this file is
-# deployed -- otherwise the classifier can pick a route whose backing
-# llama-swap model doesn't exist, and that request fails with a real
-# user-facing error instead of falling back gracefully (the hook's error
-# handling only covers the *classifier* call failing, not the *routed-to*
-# model being unavailable).
+# COLLAPSED CASUAL/OTHER ONTO REASONING'S MODEL, 2026-09-28 (Eldar's call,
+# retiring hermes3-llama-3.1-8b from routing): casual/other used to point at
+# hermes3-llama-3.1-8b, a separate small model kept resident alongside
+# qwen3.8-27b-Expert on the same GPU (see llama-swap-configmap.yaml -- both
+# pinned to the one RTX 5070 Ti). Three problems with that, all raised by
+# Eldar directly: (1) every route switch between the two models costs real
+# swap time (measured ~10s hermes->qwen, ~2.5s qwen->hermes, since only one
+# can be GPU-resident at a time); (2) hermes3-llama-3.1-8b was repeatedly
+# unreliable at tool-calling -- see the TOOL_USE_TRIGGERS/MOVIE_TRIGGERS
+# comments below for the real fabricated-tool-result incidents that caused;
+# (3) it doubled the config surface (two models' worth of trigger lists,
+# quirks, comments) for a distinction that no longer earns its keep. Fix:
+# every route now resolves to the SAME model, qwen3.8-27b-Expert, and what
+# used to be "which model" is now "how hard should this one model think" --
+# a per-request chat_template_kwargs.enable_thinking toggle (Qwen3's
+# standard thinking on/off switch, confirmed overridable per-request, not
+# just at llama-swap launch time) replaces model selection for that
+# decision. See _set_thinking() below and each of its call sites for the
+# actual on/off policy. hermes3-llama-3.1-8b's model_list entry is REMOVED
+# below; its llama-swap-configmap.yaml entry is left in place, dormant, so
+# the GPU-tuning work on it isn't lost if it's ever wanted again.
+#
+# DEPENDENCY: llama3.1-aloe-beta-8b's GGUF file must actually be on aibox
+# (see the "ACTIVATED 2026-09-07" comments in llama-swap-configmap.yaml for
+# the download commands) before this file is deployed -- otherwise the
+# classifier can pick a route whose backing llama-swap model doesn't exist,
+# and that request fails with a real user-facing error instead of falling
+# back gracefully (the hook's error handling only covers the *classifier*
+# call failing, not the *routed-to* model being unavailable).
 #
 # AUTH: general_settings.master_key is set (from the litellm-secret Secret,
 # created directly on the cluster -- see k8s/secrets/README.md, never
@@ -283,31 +292,18 @@ data:
           model: openai/nomic-embed-text-v1.5
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
-      - model_name: hermes3-llama-3.1-8b
-        # SWAPPED IN 2026-09-09, replacing llama-3.1-8b as the "casual"
-        # route destination -- llama-3.1-8b's own tool-calling format
-        # (Meta's python_tag/ipython builtin-tool syntax) doesn't match
-        # the <tool_call>{json}</tool_call> convention Hermes Agent's
-        # "peg-native" grammar expects, and it was reliably mangling
-        # Hermes's `clarify` tool's array-shaped `questions` param on
-        # ordinary casual chat (confirmed live via hermes-agent + litellm
-        # logs -- "OpenAIException - The model produced output that does
-        # not match the expected peg-native format"). NousResearch's own
-        # Hermes-3 fine-tune of the same Llama-3.1-8B base is the direct
-        # lineage match for that convention. See
-        # k8s/p1/llama-swap-configmap.yaml's hermes3-llama-3.1-8b entry
-        # for the actual server command and the real download URL.
-        # llama-3.1-8b's and qwen3-8b's model entries were kept unwired for a
-        # while in case either was wanted again -- REMOVED 2026-09-16
-        # (Eldar's cleanup call, neither ever got used again). Restorable
-        # from git history (see k8s/p1/llama-swap-configmap.yaml) if either
-        # is actually wanted later; the GGUF files themselves are untouched
-        # on disk.
-        litellm_params:
-          model: openai/hermes3-llama-3.1-8b
-          api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
-          api_key: "none"
-          stream_timeout: 60
+      # hermes3-llama-3.1-8b's model_list entry RETIRED 2026-09-28 (Eldar's
+      # call) -- see the top-of-file "COLLAPSED CASUAL/OTHER ONTO REASONING'S
+      # MODEL" comment for the full reasoning. It was swapped in 2026-09-09
+      # as the "casual" route destination (llama-3.1-8b's tool-calling
+      # format didn't match Hermes Agent's expected grammar), but repeatedly
+      # proved unreliable at actually invoking tools instead of fabricating
+      # results (see TOOL_USE_TRIGGERS' own comment below), and kept a
+      # second model GPU-resident alongside qwen3.8-27b-Expert on the same
+      # card purely for speed, which cost real swap time on every route
+      # switch. Its llama-swap-configmap.yaml entry (and GPU tuning) is left
+      # in place, just unreferenced from here -- restorable by re-adding
+      # this model_list entry if it's ever wanted again.
       - model_name: llama3.1-aloe-beta-8b
         # REPLACES medgemma-1.5-4b as the "medical" route backend, 2026-09-16
         # (Eldar's call). See the long comment above llama3.1-aloe-beta-8b
@@ -480,7 +476,6 @@ data:
       # fallbacks:
       #   - qwen3.8-27b-Expert: ["openrouter-fallback"]
       #   - qwen3.8-27b-Expert-Vision: ["openrouter-fallback"]
-      #   - hermes3-llama-3.1-8b: ["openrouter-fallback"]
       #   - llama3.1-aloe-beta-8b: ["openrouter-fallback"]
 
     general_settings:
@@ -653,11 +648,14 @@ data:
             # to mean just greetings/small talk, so most everyday traffic
             # (general discussion, language practice, quick searches) fell
             # through to "reasoning" -> the 27B model -> a real 30-50s wait
-            # for stuff that didn't need it. hermes3-llama-3.1-8b is fast
-            # AND (since the 2026-09-09 swap) follows Hermes's tool-call
-            # format correctly, so it's fine for tool-using casual requests
-            # too, not just plain text. Goal: make this the everyday
+            # for stuff that didn't need it. Goal: make this the everyday
             # workhorse route, reasoning the exception -- not the reverse.
+            # CHANGED 2026-09-28: "casual" now resolves to the SAME model as
+            # "reasoning" (qwen3.8-27b-Expert), just with thinking disabled
+            # per-request -- see the top-of-file "COLLAPSED CASUAL/OTHER
+            # ONTO REASONING'S MODEL" comment. This route's classification
+            # still matters (it picks the thinking-off fast path), it just
+            # no longer also picks a different, weaker model.
             "name": "casual",
             "description": (
                 "Everyday conversational traffic that doesn't need deep "
@@ -712,6 +710,16 @@ data:
         },
     ]
 
+    # CHANGED 2026-09-28 (Eldar's call): "casual"/"reasoning"/"other" all
+    # collapsed onto the SAME model, qwen3.8-27b-Expert -- see the
+    # top-of-file "COLLAPSED CASUAL/OTHER ONTO REASONING'S MODEL" comment
+    # for the full reasoning (hermes3-llama-3.1-8b retired from routing:
+    # GPU swap cost between two resident models, unreliable tool-calling,
+    # doubled config surface). What used to be a MODEL choice for these
+    # three routes is now a THINKING choice instead -- see _set_thinking()
+    # and its call sites in async_pre_call_hook below for the actual
+    # on/off policy per route. "vision"/"medical" are unaffected, still
+    # genuinely different specialist models.
     ROUTE_TO_MODEL = {
         # "vision" briefly CHANGED 2026-09-10: qwen3.8-27b-Expert-Vision ->
         # qwopus-general, then REVERTED back the same week after qwopus
@@ -720,29 +728,9 @@ data:
         # top-of-file ROUTES comment for the full history.
         "vision": "qwen3.8-27b-Expert-Vision",
         "medical": "llama3.1-aloe-beta-8b",  # CHANGED 2026-09-16: medgemma-1.5-4b retired (broken), see llama-swap-configmap.yaml for full history
-        # "casual" CHANGED 2026-09-09: llama-3.1-8b -> hermes3-llama-3.1-8b
-        # (see the litellm_params comment on the hermes3-llama-3.1-8b
-        # model_list entry above for why). Previously changed 2026-09-08:
-        # qwen3-8b -> llama-3.1-8b, for an unrelated context-length reason.
-        "casual": "hermes3-llama-3.1-8b",
+        "casual": "qwen3.8-27b-Expert",
         "reasoning": "qwen3.8-27b-Expert",
-        # "other" CHANGED 2026-09-13 (Eldar's own finding, confirmed via
-        # 6h of real routing logs): arch-router answers "other" whenever a
-        # request doesn't confidently fit vision/medical/casual/reasoning
-        # -- in practice this was firing mostly on trivial exchanges
-        # ("Alive?", "Its fixed", short Honcho test pings) and, notably,
-        # Hermes's own internal "review this conversation, consider saving
-        # to memory" housekeeping prompt, which routes through this same
-        # "auto" endpoint on every turn. None of that needed the 27B
-        # model. Was qwen3.8-27b-Expert (same as "reasoning") -- that made
-        # every low-confidence classification silently expensive/slow
-        # instead of defaulting to fast. Trade-off accepted knowingly: a
-        # genuinely complex request the classifier ISN'T confident enough
-        # to call "reasoning" now gets the fast model's answer instead of
-        # the careful one, where before it accidentally got the careful
-        # one. Revisit if that trade-off starts showing up as a real
-        # quality problem, not just a hunch.
-        "other": "hermes3-llama-3.1-8b",
+        "other": "qwen3.8-27b-Expert",
     }
 
     SYSTEM_PROMPT = """You are a helpful assistant designed to find the best suited route.
@@ -817,6 +805,24 @@ data:
     def _strip_memory_context(text):
         idx = text.find(MEMORY_CONTEXT_MARKER)
         return text if idx == -1 else text[:idx]
+
+
+    # ADDED 2026-09-28, part of collapsing casual/reasoning/other onto one
+    # model (see top-of-file "COLLAPSED CASUAL/OTHER ONTO REASONING'S MODEL"
+    # comment) -- now that all three routes can land on the SAME model,
+    # qwen3.8-27b-Expert, what used to be a model choice is a thinking
+    # choice instead. chat_template_kwargs is LiteLLM's pass-through for
+    # extra OpenAI-chat-completions fields the backend understands;
+    # enable_thinking is Qwen3's own standard convention for toggling its
+    # <think>...</think> reasoning block on/off PER REQUEST, confirmed live
+    # to override llama-swap's launch-time --reasoning-effort default
+    # (xhigh) either way, and confirmed thinking-off still selects tools
+    # correctly, just faster (~10-25x on trivial prompts in local
+    # benchmarking) with no measured loss of tool-calling reliability.
+    # sends this payload field (merged into the outgoing chat completion):
+    #   {"chat_template_kwargs": {"enable_thinking": False}}
+    def _set_thinking(data, enabled):
+        data.setdefault("chat_template_kwargs", {})["enable_thinking"] = enabled
 
 
     def _has_image(messages):
@@ -1591,10 +1597,17 @@ data:
             # an explicit "think deeply" / "be thorough" / "step by step"
             # style instruction always goes to the 27B model, no classifier
             # judgment call involved. See DEEP_REASONING_TRIGGERS above.
+            # Thinking explicitly ON here (2026-09-28) -- this is the one
+            # route whose whole point is "think carefully", so it must not
+            # silently inherit whatever thinking-off default some earlier
+            # code path left behind. Explicit, not just relying on
+            # llama-swap's own --reasoning-effort xhigh launch default, so
+            # this stays correct even if that launch flag ever changes.
             if _wants_deep_reasoning(messages):
                 data["model"] = ROUTE_TO_MODEL["reasoning"]
+                _set_thinking(data, True)
                 logger.info(
-                    "auto -> reasoning (explicit deep-thought keyword) -> %s",
+                    "auto -> reasoning (explicit deep-thought keyword) -> %s (thinking on)",
                     data["model"],
                 )
                 return data
@@ -1607,10 +1620,16 @@ data:
             # match rather than substring. CASUAL_TRIGGERS also has a
             # curated Russian section as of 2026-09-27, so this catches
             # common Russian small talk too, not just English.
+            # Thinking explicitly OFF here (2026-09-28) -- "casual" is
+            # exactly the case a thinking budget is wasted on (greetings,
+            # small talk, one-line lookups), and disabling it is what makes
+            # collapsing onto qwen3.8-27b-Expert (see top-of-file comment)
+            # actually fast instead of just simpler.
             if _wants_casual(messages):
                 data["model"] = ROUTE_TO_MODEL["casual"]
+                _set_thinking(data, False)
                 logger.info(
-                    "auto -> casual (greeting/ping keyword) -> %s",
+                    "auto -> casual (greeting/ping keyword) -> %s (thinking off)",
                     data["model"],
                 )
                 return data
@@ -1640,12 +1659,21 @@ data:
             # (media generation/editing, vault search/ingest) goes straight
             # to the 27B model, no classifier judgment call involved -- see
             # TOOL_USE_TRIGGERS above for the real production bug this
-            # fixes (hermes3-llama-3.1-8b, the "other"/"casual" route
-            # model, fabricating tool results instead of calling the tool).
+            # fixes (hermes3-llama-3.1-8b, back when it was still the
+            # "other"/"casual" route model, fabricating tool results
+            # instead of calling the tool -- retired from routing entirely
+            # as of 2026-09-28, see top-of-file comment).
+            # Thinking explicitly ON here (2026-09-28, Eldar's explicit
+            # call -- tested and decided without further benchmarking):
+            # tool selection stayed reliable with thinking off in local
+            # testing, but Eldar chose to keep thinking on for anything
+            # that's actually going to call a tool, prioritizing tool-call
+            # correctness over the extra latency here specifically.
             if _wants_tool_use(messages):
                 data["model"] = ROUTE_TO_MODEL["reasoning"]
+                _set_thinking(data, True)
                 logger.info(
-                    "auto -> reasoning (tool-use keyword) -> %s",
+                    "auto -> reasoning (tool-use keyword) -> %s (thinking on)",
                     data["model"],
                 )
                 return data
@@ -1792,6 +1820,22 @@ data:
                 route = "other"
 
             data["model"] = ROUTE_TO_MODEL.get(route, ROUTE_TO_MODEL["other"])
+            # ADDED 2026-09-28: "casual"/"other"/"reasoning" all resolve to
+            # the SAME model now (see top-of-file "COLLAPSED CASUAL/OTHER
+            # ONTO REASONING'S MODEL" comment) -- thinking is what actually
+            # distinguishes them at this point, not model choice. Same
+            # policy as the deterministic fast paths above: "reasoning"
+            # (classifier confident this is genuinely hard) gets thinking
+            # on; "casual"/"other" (classifier thinks it's easy, or isn't
+            # confident either way) get thinking off, same fast-by-default
+            # trade-off the "other" ROUTE_TO_MODEL comment already accepted
+            # historically. "vision"/"medical" untouched -- different
+            # specialist models, the thinking toggle isn't part of their
+            # story.
+            if route == "reasoning":
+                _set_thinking(data, True)
+            elif route in ("casual", "other"):
+                _set_thinking(data, False)
             # Success case, logged at INFO specifically so it's visible via
             # `kubectl logs -n ai-models -l app=litellm` -- otherwise the
             # only visible signal a caller gets back is the literal string
