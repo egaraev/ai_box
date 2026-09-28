@@ -10,6 +10,37 @@
 # this session. Consider pinning to whatever `minio/minio:RELEASE.<date>`
 # is current before/at first real deploy.
 #
+# SWITCHED TO CHAINGUARD, 2026-09-28 (real production outage -- ArgoCD stuck
+# on "Progressing", langfuse-minio pod ImagePullBackOff for 4 days straight):
+# quay.io -- the previous fix below, RE-FIXED twice already after Docker Hub
+# deleted MinIO's images entirely -- itself stopped allowing ANONYMOUS pulls
+# of quay.io/minio/minio and quay.io/minio/mc on 2026-09-24 (confirmed via
+# multiple independent real reports of the same failure the same week, e.g.
+# github.com/iossifovlab/gain#1706, github.com/Popsink/kodansu#583 -- "401"/
+# "unauthorized" on pull, not a transient blip). No pinned tag fixes this --
+# it's the whole repository that's gated now, every tag. Fix: Chainguard
+# publishes free, anonymously-pullable mirrors of the real upstream MinIO
+# binaries (same source, not a reimplementation) -- cgr.dev/chainguard/minio
+# for the server, cgr.dev/chainguard/minio-client for the `mc` CLI used by
+# the bucket-creation Job below. VERIFIED live on aibox before this change
+# (Eldar, 2026-09-28): both images pull anonymously with plain `docker
+# pull`. Real gotcha found the same way: chainguard/minio-client has NO
+# /bin/sh (`docker run --entrypoint /bin/sh ... ` fails "no such file or
+# directory") -- confirmed live, not assumed -- so the bucket-creation Job's
+# old shell-script command had to be restructured without a shell; see its
+# own comment below. Both Chainguard images run as non-root UID 65532 (their
+# own spec page confirms this) -- the OLD quay.io image's UID on
+# langfuse-minio-data's existing PVC content is unconfirmed, so an
+# initContainer below chowns /data to 65532:65532 before minio starts,
+# rather than risk a permission-denied crash loop on top of everything else.
+# Trade-off accepted knowingly, same one quay.io/minio/minio's own README
+# now documents: Chainguard's free minio/minio-client images are frozen at
+# whatever MinIO last open-sourced (no future security patches) -- fine for
+# a single-user home LangFuse blob store, revisit if that ever stops being
+# true (SeaweedFS/Garage/RustFS are the longer-term alternatives people are
+# moving to, per the same research, if Chainguard's free tier ever closes
+# too).
+#
 # Credentials: new `langfuse-minio-secret` (namespace ai-observe),
 # MINIO_ROOT_USER/MINIO_ROOT_PASSWORD -- the standard minio image's own env
 # vars. See k8s/secrets/README.md for the kubectl command.
@@ -43,6 +74,20 @@ spec:
       labels:
         app: langfuse-minio
     spec:
+      # ADDED 2026-09-28, alongside the Chainguard image switch (see
+      # top-of-file comment): chowns /data to 65532:65532 (Chainguard's
+      # minio image's own non-root UID) before minio starts, in case the
+      # PVC's existing content is owned by whatever UID the old quay.io
+      # image ran as -- runs as root specifically to be ALLOWED to chown,
+      # same busybox-initContainer pattern already used in
+      # k8s/p3/hermes-agent.yaml for its own seed-file init step.
+      initContainers:
+        - name: fix-data-ownership
+          image: busybox:1.36
+          command: ["chown", "-R", "65532:65532", "/data"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
       containers:
         - name: minio
           # FIXED 2026-09-17, first real deploy: minio/minio:latest on
@@ -62,7 +107,11 @@ spec:
           # platform-oss#97) -- much higher confidence, but still watch
           # `kubectl describe pod` on first real deploy rather than
           # assuming.
-          image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+          # RE-FIXED AGAIN 2026-09-28: quay.io itself stopped allowing
+          # anonymous pulls of this whole repository -- see top-of-file
+          # comment for the full story. cgr.dev/chainguard/minio confirmed
+          # pullable live on aibox before this change.
+          image: cgr.dev/chainguard/minio:latest
           args: ["server", "/data", "--console-address", ":9001"]
           ports:
             - containerPort: 9000
@@ -129,26 +178,32 @@ spec:
   template:
     spec:
       restartPolicy: OnFailure
+      # RESTRUCTURED 2026-09-28, same Chainguard switch as the minio
+      # container above (see top-of-file comment for why quay.io/minio/mc
+      # had to go) -- cgr.dev/chainguard/minio-client has NO /bin/sh
+      # (confirmed live: `docker run --entrypoint /bin/sh ...` fails "no
+      # such file or directory"), so the old single-container shell script
+      # (mc alias set + two mc mb calls, chained with &&/;) can't run as-is.
+      # Fix: MC_HOST_<alias> is mc's own documented env-var mechanism for
+      # defining an alias without `mc alias set` at all (MinIO's own docs:
+      # "Use this setting to add a temporary alias to use for mc commands
+      # ... for use with scripting") -- URL embeds the credentials
+      # directly (http://user:pass@host:port), so no shell step is needed
+      # to wire the alias together first. The image's own ENTRYPOINT is
+      # already /usr/bin/mc (confirmed via Chainguard's own image spec),
+      # so each container's `args` is just the mc subcommand itself.
+      # Two containers instead of one shell script with two `mc mb` calls,
+      # since `mc mb`'s own usage only ever documents ONE bucket target
+      # per invocation -- not verified that multiple targets in one call
+      # works, so this doesn't guess. A Job pod only reports Complete once
+      # EVERY container in it exits 0, so this is equivalent to the old
+      # sequential script, just as two independent, order-independent
+      # steps instead of one shell pipeline -- still idempotent
+      # (--ignore-existing), still safe to `kubectl apply -f` repeatedly.
       containers:
-        - name: mc
-          # Same Docker-Hub-removal fix as the minio container above.
-          # FIRST guessed tag here (RELEASE.2024-08-17T01-24-54Z) also
-          # confirmed NOT to exist on quay.io ("not found" on pull, real
-          # cluster error) -- replaced with a tag from a source that
-          # explicitly verified it by pulling and digest-checking it
-          # (github.com/MarkAC007/scf-controls-platform-oss#97), same as
-          # the minio image above. mc and minio are versioned/released
-          # independently by MinIO, so these two tags are intentionally
-          # NOT the same date -- that's expected, not a mismatch.
-          image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -e
-              mc alias set langfuse-minio http://langfuse-minio.ai-observe.svc.cluster.local:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
-              mc mb --ignore-existing langfuse-minio/langfuse-events
-              mc mb --ignore-existing langfuse-minio/langfuse-media
+        - name: mc-events
+          image: cgr.dev/chainguard/minio-client:latest
+          args: ["mb", "--ignore-existing", "langfuseminio/langfuse-events"]
           env:
             - name: MINIO_ROOT_USER
               valueFrom:
@@ -160,3 +215,21 @@ spec:
                 secretKeyRef:
                   name: langfuse-minio-secret
                   key: MINIO_ROOT_PASSWORD
+            - name: MC_HOST_langfuseminio
+              value: "http://$(MINIO_ROOT_USER):$(MINIO_ROOT_PASSWORD)@langfuse-minio.ai-observe.svc.cluster.local:9000"
+        - name: mc-media
+          image: cgr.dev/chainguard/minio-client:latest
+          args: ["mb", "--ignore-existing", "langfuseminio/langfuse-media"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-minio-secret
+                  key: MINIO_ROOT_PASSWORD
+            - name: MC_HOST_langfuseminio
+              value: "http://$(MINIO_ROOT_USER):$(MINIO_ROOT_PASSWORD)@langfuse-minio.ai-observe.svc.cluster.local:9000"
