@@ -846,7 +846,30 @@ data:
         # see qwen3.8-27b-Expert's own comment above for the full reasoning.
         env:
           - "CUDA_VISIBLE_DEVICES=GPU-832b5f69-26d2-3908-7838-831fc0b98a17"    # 5070 Ti
-        ttl: 300
+        # ttl 300 -> 60, 2026-09-28 (Eldar's call): this model is no longer
+        # in chat routing at all (see litellm.yaml's ROUTE_TO_MODEL/
+        # model_list comments -- CHAT ROUTING VS DIRECT-CALL split), only
+        # called directly by scripts/telegram_sync.py + gmail_sync.py, which
+        # run once an hour via n8n's Schedule Trigger. No reason to hold
+        # this resident on the shared 5070 Ti (evicting qwen3.8-27b-Expert,
+        # the actual chat model) for 5 whole minutes after that hourly burst
+        # of SAVE/SKIP + tag-generation calls finishes -- it won't be called
+        # again for ~59 more minutes either way. 60s picked as a middle
+        # ground: comfortably covers the gaps between consecutive calls
+        # WITHIN one sync run (each item -- is_relevant() then possibly
+        # _llm_generate() -- involves real note-writing/vault I/O between
+        # LLM calls, not just back-to-back requests), while freeing the GPU
+        # slot roughly 5x sooner than before once the run actually finishes.
+        # NOT YET VERIFIED live: watch `kubectl logs -n ai-models -l
+        # app=llama-swap` (or the /logs/stream/upstream endpoint, see
+        # aibox-config-restart-verify) during a real scheduled sync run --
+        # if 60s turns out too short and this evicts+reloads MID-run (visible
+        # as repeated "evict=[hermes3-llama-3.1-8b]" swap log lines within a
+        # single run instead of just once at the start), raise it. Same
+        # discipline as the stream_timeout 20->60 lesson in litellm.yaml --
+        # don't assume a tightened timing value is safe, confirm it against
+        # real traffic.
+        ttl: 60
 
       # ── REPLACED 2026-09-16 (Eldar's call): medgemma-1.5-4b retired from
       # the "medical" route. Real production testing exposed it as
