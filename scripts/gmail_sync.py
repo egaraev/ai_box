@@ -682,9 +682,24 @@ def sync(vault_root, query, since="", dry_run=False):
         target_dir = vault_root / folder
         note_path  = target_dir / filename
 
-        if not dry_run and note_path.exists():
-            print(f"  ⚠ already exists (skipping): {folder}/{filename}")
-            mark_synced(msg_id)
+        # FIXED 2026-09-28: this used to be `if not dry_run and
+        # note_path.exists()`, which meant a --dry-run preview NEVER checked
+        # whether the note already existed at all -- it always fell through
+        # to "(dry-run) would create", even for a message that had already
+        # been synced and written for real. Found live: a --dry-run run
+        # confidently claimed it "would create" two notes that had already
+        # existed in the vault (and in Qdrant) for days, which looked
+        # exactly like a real missing-sync bug and cost a long investigation
+        # before the dry-run report itself turned out to be the thing lying.
+        # Real (non-dry-run) mode was never affected -- its own skip+
+        # mark_synced+continue behavior is unchanged below, just no longer
+        # gated behind `not dry_run` for the existence check itself.
+        if note_path.exists():
+            if dry_run:
+                print(f"  (dry-run) already exists, would skip: {folder}/{filename}")
+            else:
+                print(f"  ⚠ already exists (skipping): {folder}/{filename}")
+                mark_synced(msg_id)
             continue
 
         # OCR'd attachment text becomes the body when the email itself has
