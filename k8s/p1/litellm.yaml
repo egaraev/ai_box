@@ -46,9 +46,18 @@
 # standard thinking on/off switch, confirmed overridable per-request, not
 # just at llama-swap launch time) replaces model selection for that
 # decision. See _set_thinking() below and each of its call sites for the
-# actual on/off policy. hermes3-llama-3.1-8b's model_list entry is REMOVED
-# below; its llama-swap-configmap.yaml entry is left in place, dormant, so
-# the GPU-tuning work on it isn't lost if it's ever wanted again.
+# actual on/off policy. RETIRED FROM CHAT ROUTING ONLY, NOT UNDEPLOYED:
+# hermes3-llama-3.1-8b is retired from ROUTE_TO_MODEL (no "auto" chat
+# request ever resolves to it anymore), but its model_list entry below is
+# KEPT, not removed -- corrected same day, after Eldar caught an early draft
+# of this change that removed it outright: scripts/telegram_sync.py and
+# scripts/gmail_sync.py both call it DIRECTLY by model name
+# (TAG_MODEL = "hermes3-llama-3.1-8b"), bypassing "auto"/arch-router
+# entirely, for lightweight background tasks (SAVE/SKIP relevance
+# filtering, short tag/title generation) -- see each script's own top
+# comment for why that direct-call pattern is deliberate, not a workaround.
+# Removing the model_list entry would have broken both scripts outright.
+# Its llama-swap-configmap.yaml entry was never touched either way.
 #
 # DEPENDENCY: llama3.1-aloe-beta-8b's GGUF file must actually be on aibox
 # (see the "ACTIVATED 2026-09-07" comments in llama-swap-configmap.yaml for
@@ -292,18 +301,26 @@ data:
           model: openai/nomic-embed-text-v1.5
           api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
           api_key: "none"
-      # hermes3-llama-3.1-8b's model_list entry RETIRED 2026-09-28 (Eldar's
-      # call) -- see the top-of-file "COLLAPSED CASUAL/OTHER ONTO REASONING'S
-      # MODEL" comment for the full reasoning. It was swapped in 2026-09-09
-      # as the "casual" route destination (llama-3.1-8b's tool-calling
-      # format didn't match Hermes Agent's expected grammar), but repeatedly
-      # proved unreliable at actually invoking tools instead of fabricating
-      # results (see TOOL_USE_TRIGGERS' own comment below), and kept a
-      # second model GPU-resident alongside qwen3.8-27b-Expert on the same
-      # card purely for speed, which cost real swap time on every route
-      # switch. Its llama-swap-configmap.yaml entry (and GPU tuning) is left
-      # in place, just unreferenced from here -- restorable by re-adding
-      # this model_list entry if it's ever wanted again.
+      # hermes3-llama-3.1-8b -- RETIRED FROM CHAT ROUTING 2026-09-28 (Eldar's
+      # call), but this model_list entry is KEPT, not removed -- see the
+      # top-of-file "COLLAPSED CASUAL/OTHER ONTO REASONING'S MODEL" comment
+      # for the full reasoning on why it left ROUTE_TO_MODEL (swap cost
+      # between two GPU-resident models, unreliable tool-calling, doubled
+      # config surface -- see TOOL_USE_TRIGGERS' own comment below for the
+      # real fabricated-tool-result incidents that caused). No "auto" chat
+      # request can reach it anymore. It stays here specifically because
+      # scripts/telegram_sync.py and scripts/gmail_sync.py both call it
+      # DIRECTLY by model name (TAG_MODEL = "hermes3-llama-3.1-8b"),
+      # bypassing "auto"/arch-router entirely, for lightweight background
+      # tasks (SAVE/SKIP relevance filtering, short tag/title generation) --
+      # see each script's own top comment for why that direct-call pattern
+      # is deliberate. Delete this entry and both scripts break outright.
+      - model_name: hermes3-llama-3.1-8b
+        litellm_params:
+          model: openai/hermes3-llama-3.1-8b
+          api_base: http://llama-swap.ai-models.svc.cluster.local:8080/v1
+          api_key: "none"
+          stream_timeout: 60
       - model_name: llama3.1-aloe-beta-8b
         # REPLACES medgemma-1.5-4b as the "medical" route backend, 2026-09-16
         # (Eldar's call). See the long comment above llama3.1-aloe-beta-8b
@@ -713,13 +730,17 @@ data:
     # CHANGED 2026-09-28 (Eldar's call): "casual"/"reasoning"/"other" all
     # collapsed onto the SAME model, qwen3.8-27b-Expert -- see the
     # top-of-file "COLLAPSED CASUAL/OTHER ONTO REASONING'S MODEL" comment
-    # for the full reasoning (hermes3-llama-3.1-8b retired from routing:
-    # GPU swap cost between two resident models, unreliable tool-calling,
-    # doubled config surface). What used to be a MODEL choice for these
-    # three routes is now a THINKING choice instead -- see _set_thinking()
-    # and its call sites in async_pre_call_hook below for the actual
-    # on/off policy per route. "vision"/"medical" are unaffected, still
-    # genuinely different specialist models.
+    # for the full reasoning (hermes3-llama-3.1-8b retired from CHAT
+    # ROUTING: GPU swap cost between two resident models, unreliable
+    # tool-calling, doubled config surface). What used to be a MODEL choice
+    # for these three routes is now a THINKING choice instead -- see
+    # _set_thinking() and its call sites in async_pre_call_hook below for
+    # the actual on/off policy per route. "vision"/"medical" are unaffected,
+    # still genuinely different specialist models. Note hermes3-llama-3.1-8b
+    # is retired from THIS dict only, not undeployed -- its model_list entry
+    # above is kept because scripts/telegram_sync.py and
+    # scripts/gmail_sync.py still call it directly by name, outside this
+    # routing hook entirely.
     ROUTE_TO_MODEL = {
         # "vision" briefly CHANGED 2026-09-10: qwen3.8-27b-Expert-Vision ->
         # qwopus-general, then REVERTED back the same week after qwopus
@@ -1661,8 +1682,10 @@ data:
             # TOOL_USE_TRIGGERS above for the real production bug this
             # fixes (hermes3-llama-3.1-8b, back when it was still the
             # "other"/"casual" route model, fabricating tool results
-            # instead of calling the tool -- retired from routing entirely
-            # as of 2026-09-28, see top-of-file comment).
+            # instead of calling the tool -- retired from CHAT ROUTING
+            # entirely as of 2026-09-28, though still deployed for
+            # scripts/telegram_sync.py + gmail_sync.py's own direct calls,
+            # see top-of-file comment).
             # Thinking explicitly ON here (2026-09-28, Eldar's explicit
             # call -- tested and decided without further benchmarking):
             # tool selection stayed reliable with thinking off in local
