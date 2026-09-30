@@ -357,7 +357,17 @@ def _vision_request(prompt, image_bytes, mime_type, max_tokens=2000, label="visi
             print(f"    ⚠ {label} failed: HTTP {r.status_code} -- {r.text[:500]}")
             return ""
 
-        content = r.json()["choices"][0]["message"]["content"].strip()
+        # same <think>...</think> stripping _llm_generate already does for
+        # the text route below -- added 2026-09-30 alongside raising
+        # recognize_movie_title's own token budget: never actually needed
+        # before (every existing caller here got by fine at the old, tight
+        # budgets that apparently never left room for a visible think block
+        # in the response), but now that recognize_movie_title has enough
+        # budget to let the model finish thinking AND answer, a raw
+        # unstripped block could otherwise leak into the recognized title,
+        # or into an OCR'd note's saved text.
+        raw = r.json()["choices"][0]["message"]["content"]
+        content = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         if not content:
             print(f"    ⚠ {label} returned an empty response (model: {VISION_MODEL})")
         return content
@@ -385,7 +395,18 @@ def recognize_movie_title(image_bytes, mime_type):
         "nothing else -- no year, no quotes, no explanation. "
         "If you cannot confidently identify a specific title, reply with exactly: UNKNOWN"
     )
-    return _vision_request(prompt, image_bytes, mime_type, max_tokens=40, label="movie title recognition")
+    # max_tokens bumped from 40 to 2000, 2026-09-30: confirmed live this was
+    # the actual failure -- HTTP 200, empty content, no error anywhere,
+    # exactly the same signature as decide_movie_status's own bug (see its
+    # own comment). VISION_MODEL is the same Qwen3.8-27B-Expert family as
+    # REASONING_MODEL's target, so the same enable_thinking budget trap
+    # applies here: 40 tokens is enough to open a <think> block and nowhere
+    # near enough to close it and still write a title. _vision_request
+    # doesn't strip <think> tags the way _llm_generate does (never needed
+    # to, until now) -- ocr_image's own 2000-token budget is proven safe
+    # here already, so reuse it rather than guess a smaller number that
+    # might still be short.
+    return _vision_request(prompt, image_bytes, mime_type, max_tokens=2000, label="movie title recognition")
 
 
 # Asks the LLM for 2-5 short topic tags -- freeform, no fixed vocabulary
