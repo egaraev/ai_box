@@ -445,15 +445,32 @@ def generate_title(text, topic_word):
 # is bare (no title after it) but the body has text, before falling back to
 # the image. Same short-extraction shape as generate_title above but asking
 # for a title FROM the text rather than a title FOR it.
-def extract_movie_title_from_text(text):
+# Returns a LIST of titles, not a single one -- confirmed live 2026-09-30:
+# Eldar's own real usage is to list several titles in one email body (e.g.
+# names of movies image recognition couldn't identify from a separate
+# batch), same "more than one per email" shape the image branch already
+# handles in process_movie_email. An earlier single-title version of this
+# ("what single movie title is this about") is exactly why that real email
+# came back empty -- not a call failure, just a prompt asking a genuinely
+# different question than what the body contained. Empty list means none
+# found, same as the old "UNKNOWN" case.
+def extract_movie_titles_from_text(text):
     prompt = (
-        "What single movie or TV show title is this email about? Reply with ONLY "
-        "the title itself, nothing else -- no year, no quotes, no explanation. "
-        "If no specific title is clearly mentioned, reply with exactly: UNKNOWN\n\n"
-        f"Email text:\n{text[:800]}\n\nTitle:"
+        "List every distinct movie or TV show title mentioned in this email, one per "
+        "line, nothing else -- no year, no quotes, no numbering, no bullets, no "
+        "explanation. If none are clearly mentioned, reply with exactly: NONE\n\n"
+        f"Email text:\n{text[:800]}\n\nTitles:"
     )
-    raw = _llm_generate(prompt, num_predict=20)
-    return raw.strip().strip('"').strip("'")
+    raw = _llm_generate(prompt, num_predict=200, label="movie title extraction (body)")
+    if not raw or raw.strip().upper() == "NONE":
+        return []
+    titles = []
+    for line in raw.splitlines():
+        line = line.strip().strip('"').strip("'")
+        line = re.sub(r"^[-*\d.)\s]+", "", line).strip()   # strip stray "1." / "-" / "*" prefixes
+        if line and line.upper() != "NONE":
+            titles.append(line)
+    return titles
 
 
 # Derives a clean human-readable title from the email.
@@ -695,21 +712,36 @@ def process_movie_email(subject, body, images, dry_run):
         candidate = re.sub(r"^MOVIE\s+", "", candidate, flags=re.IGNORECASE).strip()
         source = "subject"
 
-    if not candidate and body.strip():
-        if dry_run:
-            print("    (dry-run) would extract a movie title from the email body")
-            return 0
-        extracted = extract_movie_title_from_text(body)
-        if extracted and extracted.upper() != "UNKNOWN":
-            candidate, source = extracted, "body"
-
-    # subject or body gave a candidate -- that's ONE title for this email,
-    # same as always.
+    # subject gave a candidate -- that's exactly ONE title for this email.
     if candidate:
         if candidate.upper() == "UNKNOWN":
             print(f"  ⚠ could not determine a movie/show title -- skipping: {subject[:60]}")
             return 0
         return 1 if _handle_movie_candidate(candidate, source, dry_run) else 0
+
+    if body.strip():
+        if dry_run:
+            print("    (dry-run) would extract movie title(s) from the email body")
+            return 0
+        # body can list SEVERAL titles (confirmed live 2026-09-30, see
+        # extract_movie_titles_from_text's own comment) -- same "every one
+        # gets its own dedup+write, not just the first" treatment as the
+        # image branch below, including within-email dedup. If nothing
+        # comes back, fall through to images rather than giving up --
+        # unchanged from the original single-title behavior.
+        body_titles = extract_movie_titles_from_text(body)
+        if body_titles:
+            seen_this_email = set()
+            added = 0
+            for body_title in body_titles:
+                title_norm = normalize_movie_title(body_title)
+                if title_norm.lower() in seen_this_email:
+                    continue
+                seen_this_email.add(title_norm.lower())
+                if _handle_movie_candidate(body_title, "body", dry_run):
+                    added += 1
+            return added
+        print("  ⚠ could not identify any movie/show titles in the email body")
 
     if not images:
         print(f"  ⚠ could not determine a movie/show title -- skipping: {subject[:60]}")
