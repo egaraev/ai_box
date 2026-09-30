@@ -218,9 +218,21 @@ REASONING_MODEL = "auto"
 # word anywhere in the subject) would still find the message while this
 # function silently failed to recognize it. Added 2026-09-30 after "some
 # mails are added and some are not".
+#
+# Shared with process_movie_email -- that function does its OWN topic-word
+# stripping on the subject to pull out the actual title, using the same
+# leading-prefix assumption, so it needs this same Fwd:/Re:/FW: strip or a
+# replied-to "Re: Watch "Title" on YouTube" gets the candidate title
+# extraction wrong even once detect_topic() correctly recognizes the topic
+# (confirmed live 2026-09-30 -- detect_topic matched fine, but the title
+# that got sent to the dedup reasoning call still had "Re: Watch \"" stuck
+# on the front, because only detect_topic had this strip, not the actual
+# parsing in process_movie_email).
+def strip_reply_prefix(subject):
+    return re.sub(r"^(?:(?:Fwd?|Re)\s*:\s*)+", "", subject.strip(), flags=re.IGNORECASE)
+
 def detect_topic(subject):
-    upper = subject.strip().upper()
-    upper = re.sub(r"^(?:(?:FWD?|RE)\s*:\s*)+", "", upper)
+    upper = strip_reply_prefix(subject).upper()
     for word, folder in TOPICS.items():
         if upper.startswith(word):
             return word, folder
@@ -314,7 +326,17 @@ def _llm_generate(prompt, num_predict=80, model=None, timeout=30, label="LLM cal
             return ""
 
         raw = r.json()["choices"][0]["message"]["content"]
-        return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        stripped = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        # HTTP 200, valid content, but nothing left after removing the
+        # <think> block -- the model spent its entire num_predict budget
+        # thinking and never got to write an actual answer. Same failure
+        # class as the empty-content bug fixed 2026-09-30 (see
+        # decide_movie_status's num_predict comment), just for whatever
+        # budget is still too small for THIS particular prompt -- print it
+        # so it's never silent again, instead of the caller just seeing "".
+        if raw.strip() and not stripped:
+            print(f"    ⚠ {label}: model used its whole {num_predict}-token budget on <think>...</think> and never answered -- raw reply was {len(raw)} chars")
+        return stripped
 
     return ""
 
@@ -743,7 +765,13 @@ def _handle_movie_candidate(candidate, source, dry_run, link=None):
 # comment), which needs both a prefix AND a suffix stripped, not just a
 # prefix, so it gets its own branch below rather than reusing MOVIE's regex.
 def process_movie_email(subject, body, images, dry_run, topic="MOVIE"):
-    stripped_subject = subject.strip()
+    # same Fwd:/Re:/FW: strip detect_topic() uses to recognize the topic in
+    # the first place -- without it a replied-to share email gets its topic
+    # correctly detected but the candidate-title regexes below (which also
+    # assume the topic word is the very first thing in the subject) leave
+    # the "Re: " stuck on the front of the extracted title. See
+    # strip_reply_prefix's own comment.
+    stripped_subject = strip_reply_prefix(subject)
 
     # whatever link is in the body (if any) rides along with every title
     # this email adds, however that title was found -- see
