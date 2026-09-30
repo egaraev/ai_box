@@ -254,24 +254,48 @@ def get_gmail_service():
 # model defaults to TAG_MODEL (every existing caller's fast/mechanical use
 # case) -- pass model=REASONING_MODEL for a call that needs real judgment
 # instead (added 2026-09-30 for the MOVIE-topic dedup decision below).
-def _llm_generate(prompt, num_predict=80, model=None):
+#
+# timeout/label added 2026-09-30, same day: every existing caller here sends
+# a short prompt (a subject line, an 800-char excerpt) so the original flat
+# 30s/no-retry was fine, but decide_movie_status's prompt includes the WHOLE
+# watch history (confirmed live: ~26k chars / ~6.4k tokens with Eldar's real
+# history) -- that's a lot for a local model to chew through, especially
+# cold, and 30s silently wasn't enough on the first live test (empty "" came
+# back, which decide_movie_status could only report as "unparseable reply",
+# not the real cause). Longer default timeout plus the same one-retry-on-
+# cold-model pattern _vision_request already uses below, and -- the actual
+# fix for the silent-failure problem -- print WHY on any failure instead of
+# swallowing it, exactly like _vision_request already does.
+def _llm_generate(prompt, num_predict=80, model=None, timeout=30, label="LLM call"):
     import requests
-    try:
-        r = requests.post(
-            f"{LITELLM_URL}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"},
-            json={
-                "model": model or TAG_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0,
-                "max_tokens": num_predict,
-            },
-            timeout=30,
-        )
+    import time
+    payload = {
+        "model": model or TAG_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": num_predict,
+    }
+    headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
+    for attempt in range(2):
+        try:
+            r = requests.post(f"{LITELLM_URL}/v1/chat/completions", headers=headers, json=payload, timeout=timeout)
+        except Exception as exc:   # connection refused/timeout -- print it, don't just return ""
+            print(f"    ⚠ {label} failed: {exc}")
+            return ""
+
+        if r.status_code in (502, 503) and attempt == 0:
+            print(f"    ⚠ {label} got HTTP {r.status_code} (model likely still cold-loading) -- retrying once in 10s")
+            time.sleep(10)
+            continue
+
+        if r.status_code != 200:
+            print(f"    ⚠ {label} failed: HTTP {r.status_code} -- {r.text[:500]}")
+            return ""
+
         raw = r.json()["choices"][0]["message"]["content"]
         return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-    except Exception:
-        return ""
+
+    return ""
 
 
 # sends this to LiteLLM's vision-capable model (same route/prompt vault-mcp's
@@ -556,7 +580,7 @@ def decide_movie_status(title, watch_history_text):
         "MATCHED_TITLE: <the existing entry it matches, exactly as listed above -- or none>\n"
         "REASON: <one short sentence>"
     )
-    raw = _llm_generate(prompt, num_predict=150, model=REASONING_MODEL)
+    raw = _llm_generate(prompt, num_predict=150, model=REASONING_MODEL, timeout=90, label="movie dedup reasoning call")
 
     result = {"decision": None, "matched_title": None, "reason": None}
     for line in raw.splitlines():
