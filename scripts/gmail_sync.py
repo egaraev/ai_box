@@ -650,38 +650,12 @@ def decide_movie_status(title, watch_history_text):
 # candidate title cascades: subject (free via the topic-prefix strip) -> body
 # (LLM extraction) -> image (vision recognition) -- first one that produces
 # something usable wins. Returns True if a title was actually added.
-def process_movie_email(subject, body, images, dry_run):
-    bare_subject = re.fullmatch(r"MOVIE\s*[-–—:]?\s*", subject.strip(), re.IGNORECASE)
-
-    candidate = ""
-    source = ""
-    if not bare_subject:
-        candidate = re.sub(r"^MOVIE\s*[-–—:]\s*", "", subject.strip(), flags=re.IGNORECASE).strip()
-        candidate = re.sub(r"^MOVIE\s+", "", candidate, flags=re.IGNORECASE).strip()
-        source = "subject"
-
-    if not candidate and body.strip():
-        if dry_run:
-            print("    (dry-run) would extract a movie title from the email body")
-            return False
-        extracted = extract_movie_title_from_text(body)
-        if extracted and extracted.upper() != "UNKNOWN":
-            candidate, source = extracted, "body"
-
-    if not candidate and images:
-        if dry_run:
-            print(f"    (dry-run) would recognize a movie title from {len(images)} image attachment(s)")
-            return False
-        for filename, mime_type, data in images:
-            recognized = recognize_movie_title(data, mime_type)
-            if recognized and recognized.upper() != "UNKNOWN":
-                candidate, source = recognized, f"image ({filename})"
-                break
-
-    if not candidate or candidate.upper() == "UNKNOWN":
-        print(f"  ⚠ could not determine a movie/show title -- skipping: {subject[:60]}")
-        return False
-
+# handles ONE already-extracted candidate title end to end: normalize,
+# dedup-reason against the current watch history, write if NEW. Split out
+# of process_movie_email 2026-09-30 so the image branch below can call it
+# once per attachment instead of stopping at the first hit (see that
+# branch's own comment). Returns True if it actually wrote something.
+def _handle_movie_candidate(candidate, source, dry_run):
     title_norm = normalize_movie_title(candidate)
     print(f"  🎬 candidate title (from {source}): {title_norm!r}")
 
@@ -705,6 +679,73 @@ def process_movie_email(subject, body, images, dry_run):
     save_movie_watch_history(watch_history)
     print(f"    ✓ added to suggested_not_yet_watched: {title_norm}  ({decision['reason']})")
     return True
+
+
+# candidate title cascades: subject (free via the topic-prefix strip) -> body
+# (LLM extraction) -> image (vision recognition). Returns the number of
+# titles actually written (0 if none) -- NOT a bool, see the image branch
+# below for why: sync() adds this straight onto movies_added.
+def process_movie_email(subject, body, images, dry_run):
+    bare_subject = re.fullmatch(r"MOVIE\s*[-–—:]?\s*", subject.strip(), re.IGNORECASE)
+
+    candidate = ""
+    source = ""
+    if not bare_subject:
+        candidate = re.sub(r"^MOVIE\s*[-–—:]\s*", "", subject.strip(), flags=re.IGNORECASE).strip()
+        candidate = re.sub(r"^MOVIE\s+", "", candidate, flags=re.IGNORECASE).strip()
+        source = "subject"
+
+    if not candidate and body.strip():
+        if dry_run:
+            print("    (dry-run) would extract a movie title from the email body")
+            return 0
+        extracted = extract_movie_title_from_text(body)
+        if extracted and extracted.upper() != "UNKNOWN":
+            candidate, source = extracted, "body"
+
+    # subject or body gave a candidate -- that's ONE title for this email,
+    # same as always.
+    if candidate:
+        if candidate.upper() == "UNKNOWN":
+            print(f"  ⚠ could not determine a movie/show title -- skipping: {subject[:60]}")
+            return 0
+        return 1 if _handle_movie_candidate(candidate, source, dry_run) else 0
+
+    if not images:
+        print(f"  ⚠ could not determine a movie/show title -- skipping: {subject[:60]}")
+        return 0
+
+    if dry_run:
+        print(f"    (dry-run) would recognize a movie title from {len(images)} image attachment(s)")
+        return 0
+
+    # No text candidate, so every image is a SEPARATE poster/screenshot,
+    # not alternate photos of the same one -- confirmed live 2026-09-30
+    # ("what if i send few pictures?"). The original version looped only
+    # to find one usable title and broke on the first hit, silently
+    # dropping every image after it -- a real email with 3 different movie
+    # posters in one bare-subject email would have added only 1. Now every
+    # image gets recognized and run through the full dedup+write pipeline
+    # on its own, so N posters can add up to N titles. seen_this_email
+    # still dedupes within the SAME email (two photos of the same poster,
+    # or the model recognizing the same title from two attachments) --
+    # decide_movie_status's own cross-email dedup handles everything
+    # already in the watch history, this only guards against this one
+    # email writing the same title twice.
+    seen_this_email = set()
+    added = 0
+    for filename, mime_type, data in images:
+        recognized = recognize_movie_title(data, mime_type)
+        if not recognized or recognized.upper() == "UNKNOWN":
+            print(f"  ⚠ could not identify a movie/show title in image: {filename}")
+            continue
+        title_norm = normalize_movie_title(recognized)
+        if title_norm.lower() in seen_this_email:
+            continue
+        seen_this_email.add(title_norm.lower())
+        if _handle_movie_candidate(recognized, f"image ({filename})", dry_run):
+            added += 1
+    return added
 
 
 # ── state ────────────────────────────────────────────────────────────────────
@@ -1022,8 +1063,10 @@ def sync(vault_root, query, since="", dry_run=False):
         # would otherwise kill the most common movie email before it ever
         # reached this branch. Confirmed happening in practice 2026-09-30.
         if topic == "MOVIE":
-            if process_movie_email(subject, body, images, dry_run):
-                movies_added += 1
+            # process_movie_email returns a COUNT now, not a bool -- one
+            # email can add more than one title (multiple image
+            # attachments, see that function's own comment).
+            movies_added += process_movie_email(subject, body, images, dry_run)
             mark_synced(msg_id)
             continue
 
