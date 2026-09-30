@@ -942,18 +942,25 @@ def sync(vault_root, query, since="", dry_run=False):
         body   = get_body(msg)
         images = get_image_attachments(service, msg_id, msg.get("payload", {}))
 
-        if not body and not images:
-            print(f"  ⚠ no body, no image attachments -- skipping: {subject[:60]}")
-            mark_synced(msg_id)
-            continue
-
         # MOVIE topic doesn't write a vault note at all -- see header
-        # comment -- so it branches off here, before any of the
-        # note/filename logic below, and is done with this message either
-        # way once process_movie_email returns.
+        # comment -- so it branches off here, before the generic "no body,
+        # no image" skip below and before any of the note/filename logic
+        # further down, and is done with this message either way once
+        # process_movie_email returns. Deliberately ahead of that generic
+        # skip (not after it, as this was first written) -- unlike every
+        # note-writing topic, a bare "Movie: <title>" subject with no body
+        # and no attachment is the NORMAL case here, the title comes free
+        # from the subject alone (see process_movie_email), so that check
+        # would otherwise kill the most common movie email before it ever
+        # reached this branch. Confirmed happening in practice 2026-09-30.
         if topic == "MOVIE":
             if process_movie_email(subject, body, images, dry_run):
                 movies_added += 1
+            mark_synced(msg_id)
+            continue
+
+        if not body and not images:
+            print(f"  ⚠ no body, no image attachments -- skipping: {subject[:60]}")
             mark_synced(msg_id)
             continue
 
