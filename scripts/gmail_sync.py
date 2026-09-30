@@ -30,6 +30,42 @@
 # otherwise, and an Obsidian embed link (![[Attachments/...]]) always goes
 # in either way so the original image stays one click away.
 #
+# MOVIE topic (added 2026-09-30): a subject/body/image movie-wishlist
+# pipeline, separate from the note-writing topics above -- a "Movie: ..."
+# (or bare "Movie" + a poster/screenshot attachment) email writes straight
+# into Eldar's movies watch-history.yaml instead of creating a vault note.
+# Title comes from the subject (clean_title's existing prefix-stripping
+# already does this for free), the body (a short LLM extraction call) if
+# the subject is bare, or the image (a new vision call, recognize_movie_
+# title, prompted for a title rather than ocr_image's verbatim transcript)
+# if there's no usable text at all.
+#
+# Deliberately NOT a blind append: Eldar was explicit he doesn't want this
+# silently writing duplicates, and a plain normalized-string dedup check
+# would miss real duplicates anyway (e.g. "Skyfall" vs. his existing "007:
+# Координаты «Скайфолл»" entry -- same film, different language). So the
+# extracted title plus the full current watch-history (same text shape
+# movies-mcp's own _watch_history_text builds, mirrored locally below) goes
+# to one more LLM call -- routed to LiteLLM's "auto" model, not the small
+# fast TAG_MODEL below, since this needs real cross-lingual/fuzzy-match
+# judgment, not a cheap tag pick -- which decides NEW vs. already-seen/
+# already-listed. Only NEW gets written, always into
+# suggested_not_yet_watched (never wishlist -- that stays reserved for
+# something Eldar tells the movies agent directly, see
+# apps/movies-mcp/server.py's own STATUS_LISTS comment). Any parse failure
+# or LLM-call failure is treated as "don't write" -- fails safe, on
+# purpose: a missed add just means re-sending the email, a wrongly-added
+# title is the worse mistake here.
+#
+# Reads and writes apps/movies-mcp/server.py's own watch-history.yaml
+# directly (MOVIE_WATCH_HISTORY_PATH below) -- both pods mount the same
+# /data/obsidian_vault hostPath, and movies-mcp only exposes ask_movies/
+# check_anticipated as MCP tools over streamable-http, not a plain REST
+# endpoint this script could call with `requests`. Small local copy of
+# server.py's own normalize/list/write logic, same self-contained-script
+# convention as everywhere else in this repo (see vault_merge_duplicates.
+# py's own comment on why nothing here is a shared import).
+#
 # Tracks synced message IDs in a local state file so re-running only
 # processes new mail. Standalone for now (same as vault_sync.py) -- runs via
 # the N8N Code node, see aibox-ingestion-pipeline.json.
@@ -61,6 +97,7 @@ import sys
 from datetime import datetime, timezone
 from email.header import decode_header
 from pathlib import Path
+import yaml   # already a scripts/.venv dep (vault_sync.py uses it too) -- movie watch-history read/write below
 
 # ── paths / config ──────────────────────────────────────────────────────────
 
@@ -112,6 +149,11 @@ TOPICS = {
     "TRANSPORT": "Transport",
     "TRAVELS": "Travels",
     "EDUCATION": "Education",
+    # Not a note-writing topic like the others -- see the MOVIE-topic header
+    # comment above. "Movies" here only feeds DEFAULT_QUERY's Gmail search;
+    # sync() special-cases this topic before it ever reaches the folder/
+    # note-writing code path below.
+    "MOVIE": "Movies",
 }
 
 DEFAULT_QUERY = "from:me subject:(" + " OR ".join(TOPICS) + ")"
@@ -143,6 +185,13 @@ TAG_MODEL = "hermes3-llama-3.1-8b"
 # image-in-chat path already use (custom_router_hook.py's _has_image check) --
 # verbatim transcription of a photographed note/document, not a scene caption.
 VISION_MODEL = "qwen3.8-27b-Expert-Vision"
+# Added 2026-09-30 for the MOVIE-topic dedup decision (see header comment) --
+# deliberately "auto" (LiteLLM's own router/cloud-fallback), NOT TAG_MODEL:
+# Eldar's own call -- hermes3-llama-3.1-8b is too weak for the cross-lingual/
+# fuzzy-match judgment this needs ("Skyfall" == his existing "007:
+# Координаты «Скайфолл»" entry), unlike the short mechanical tag/title picks
+# TAG_MODEL is used for elsewhere in this file.
+REASONING_MODEL = "auto"
 
 # ── topic detection ──────────────────────────────────────────────────────────
 
@@ -202,14 +251,17 @@ def get_gmail_service():
 # sends this to LiteLLM's OpenAI-compatible chat endpoint:
 #   {"model": "hermes3-llama-3.1-8b", "messages": [{"role": "user", "content": "..."}], ...}
 # returns e.g. {"choices": [{"message": {"content": "..."}}]}
-def _llm_generate(prompt, num_predict=80):
+# model defaults to TAG_MODEL (every existing caller's fast/mechanical use
+# case) -- pass model=REASONING_MODEL for a call that needs real judgment
+# instead (added 2026-09-30 for the MOVIE-topic dedup decision below).
+def _llm_generate(prompt, num_predict=80, model=None):
     import requests
     try:
         r = requests.post(
             f"{LITELLM_URL}/v1/chat/completions",
             headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"},
             json={
-                "model": TAG_MODEL,
+                "model": model or TAG_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0,
                 "max_tokens": num_predict,
@@ -229,18 +281,17 @@ def _llm_generate(prompt, num_predict=80):
 #    "content": [{"type": "text", "text": "..."}, {"type": "image_url",
 #    "image_url": {"url": "data:image/jpeg;base64,..."}}]}], "max_tokens": 2000}
 # returns the usual OpenAI chat shape: {"choices": [{"message": {"content": "..."}}]}
-# Returns "" (never raises) on failure -- a bad OCR call shouldn't drop the
+# Returns "" (never raises) on failure -- a bad vision call shouldn't drop the
 # whole email, the attachment itself still gets saved either way.
-def ocr_image(image_bytes, mime_type):
+#
+# Shared by ocr_image (verbatim transcription) and recognize_movie_title
+# (added 2026-09-30, asks for just a title instead) -- same model/retry/error
+# handling either way, only the prompt and label differ, so this holds the
+# common HTTP part and each caller below supplies its own prompt.
+def _vision_request(prompt, image_bytes, mime_type, max_tokens=2000, label="vision call"):
     import base64
     import requests
     b64 = base64.b64encode(image_bytes).decode("ascii")
-    prompt = (
-        "Transcribe ALL visible text in this image, verbatim and in full, exactly as written "
-        "(keep the original language -- don't translate it). Preserve line breaks and structure "
-        "(headings, lists, tables) as plain text where it's clear. If there is little or no text, "
-        "instead describe what the image shows in one or two sentences."
-    )
     payload = {
         "model": VISION_MODEL,
         "messages": [{
@@ -250,7 +301,7 @@ def ocr_image(image_bytes, mime_type):
                 {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
             ],
         }],
-        "max_tokens": 2000,
+        "max_tokens": max_tokens,
     }
     headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
 
@@ -266,11 +317,11 @@ def ocr_image(image_bytes, mime_type):
         try:
             r = requests.post(f"{LITELLM_URL}/v1/chat/completions", headers=headers, json=payload, timeout=90)
         except Exception as exc:   # connection refused/timeout -- LiteLLM itself unreachable, retrying won't help
-            print(f"    ⚠ image OCR failed: {exc}")
+            print(f"    ⚠ {label} failed: {exc}")
             return ""
 
         if r.status_code in (502, 503) and attempt == 0:
-            print(f"    ⚠ image OCR got HTTP {r.status_code} (model likely still cold-loading) -- retrying once in 10s")
+            print(f"    ⚠ {label} got HTTP {r.status_code} (model likely still cold-loading) -- retrying once in 10s")
             time.sleep(10)
             continue
 
@@ -279,15 +330,38 @@ def ocr_image(image_bytes, mime_type):
         # only way to tell "wrong model name" from "vision route down" from
         # "image too large" apart, and the previous version threw it away
         if r.status_code != 200:
-            print(f"    ⚠ image OCR failed: HTTP {r.status_code} -- {r.text[:500]}")
+            print(f"    ⚠ {label} failed: HTTP {r.status_code} -- {r.text[:500]}")
             return ""
 
         content = r.json()["choices"][0]["message"]["content"].strip()
         if not content:
-            print(f"    ⚠ image OCR returned an empty response (model: {VISION_MODEL})")
+            print(f"    ⚠ {label} returned an empty response (model: {VISION_MODEL})")
         return content
 
     return ""
+
+
+def ocr_image(image_bytes, mime_type):
+    prompt = (
+        "Transcribe ALL visible text in this image, verbatim and in full, exactly as written "
+        "(keep the original language -- don't translate it). Preserve line breaks and structure "
+        "(headings, lists, tables) as plain text where it's clear. If there is little or no text, "
+        "instead describe what the image shows in one or two sentences."
+    )
+    return _vision_request(prompt, image_bytes, mime_type, max_tokens=2000, label="image OCR")
+
+
+# Added 2026-09-30 for the MOVIE topic -- unlike ocr_image (verbatim
+# transcription), this asks the vision model to identify a movie/show title
+# directly from a poster, streaming-site card, or screenshot.
+def recognize_movie_title(image_bytes, mime_type):
+    prompt = (
+        "This image is a movie or TV show poster, streaming-site card, or screenshot. "
+        "Identify the movie or show title it shows. Reply with ONLY the title itself, "
+        "nothing else -- no year, no quotes, no explanation. "
+        "If you cannot confidently identify a specific title, reply with exactly: UNKNOWN"
+    )
+    return _vision_request(prompt, image_bytes, mime_type, max_tokens=40, label="movie title recognition")
 
 
 # Asks the LLM for 2-5 short topic tags -- freeform, no fixed vocabulary
@@ -317,6 +391,21 @@ def generate_title(text, topic_word):
         f"Write a short, specific title (3-8 words, plain text, no quotes, no "
         f"markdown) for this {topic_word} note, based on its content:\n\n"
         f"{text[:800]}\n\nTitle:"
+    )
+    raw = _llm_generate(prompt, num_predict=20)
+    return raw.strip().strip('"').strip("'")
+
+
+# Added 2026-09-30 for the MOVIE topic -- used when a "Movie" email's subject
+# is bare (no title after it) but the body has text, before falling back to
+# the image. Same short-extraction shape as generate_title above but asking
+# for a title FROM the text rather than a title FOR it.
+def extract_movie_title_from_text(text):
+    prompt = (
+        "What single movie or TV show title is this email about? Reply with ONLY "
+        "the title itself, nothing else -- no year, no quotes, no explanation. "
+        "If no specific title is clearly mentioned, reply with exactly: UNKNOWN\n\n"
+        f"Email text:\n{text[:800]}\n\nTitle:"
     )
     raw = _llm_generate(prompt, num_predict=20)
     return raw.strip().strip('"').strip("'")
@@ -360,6 +449,194 @@ def clean_title(subject, body, topic_word, dry_run=False):
     title = re.sub(rf"^{topic_word}\s+", "", title, flags=re.IGNORECASE).strip()
 
     return title or subject.strip()
+
+
+# ── movie wishlist pipeline (MOVIE topic, added 2026-09-30) ──────────────────
+# See the MOVIE-topic header comment at the top of this file for the full
+# design. This block is a self-contained mirror of apps/movies-mcp/server.py's
+# own watch-history schema/logic -- same convention as everywhere else in this
+# repo (see vault_merge_duplicates.py's own comment on why nothing here is a
+# shared import across the two separate deployables).
+
+MOVIE_WATCH_HISTORY_PATH = DEFAULT_VAULT_ROOT / "_system" / "specialist-agents" / "movies" / "watch-history.yaml"
+# mirrors server.py's own STATUS_LISTS/PROGRESS_LISTS -- see that file's own
+# comment for why wishlist is in PROGRESS_LISTS and anticipated isn't
+MOVIE_STATUS_LISTS = ("completed", "on_hold", "suggested_not_yet_watched", "wishlist", "anticipated")
+MOVIE_PROGRESS_LISTS = ("completed", "on_hold", "suggested_not_yet_watched", "wishlist")
+
+# mirrors server.py's own SEASON_SUFFIX_RE -- strips a trailing "season 3" /
+# "s3" / "part 2" so e.g. "Silo season 3" and "Silo" match as the same title
+MOVIE_SEASON_SUFFIX_RE = re.compile(r"\s+(season\s*\d+|s\d+|part\s*\d+)$", re.IGNORECASE)
+
+
+def normalize_movie_title(title):
+    return MOVIE_SEASON_SUFFIX_RE.sub("", title.strip()).strip()
+
+
+def load_movie_watch_history():
+    try:
+        with open(MOVIE_WATCH_HISTORY_PATH) as f:
+            data = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        data = {}
+    for key in ("interests",) + MOVIE_STATUS_LISTS:
+        data.setdefault(key, [])
+    return data
+
+
+# same atomic-write-then-rename pattern as server.py's own _save_watch_history,
+# plus chgrp_writable -- this script runs as root inside the n8n pod, so
+# without it the file would go root-owned and Eldar/Hermes/vault-mcp would
+# lose write access to it
+def save_movie_watch_history(data):
+    tmp_path = f"{MOVIE_WATCH_HISTORY_PATH}.tmp"
+    with open(tmp_path, "w") as f:
+        yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
+    os.replace(tmp_path, MOVIE_WATCH_HISTORY_PATH)
+    chgrp_writable(MOVIE_WATCH_HISTORY_PATH)
+
+
+# mirrors server.py's own _watch_history_text -- same short plain-text shape,
+# fed to decide_movie_status below so the reasoning model sees the exact same
+# view of the watch history the movies agent itself would
+def movie_watch_history_text(data):
+    lines = []
+    if data["completed"]:
+        parts = []
+        for item in data["completed"]:
+            title = item.get("title", "?")
+            if item.get("liked") is True:
+                parts.append(f"{title} (liked)")
+            elif item.get("liked") is False:
+                parts.append(f"{title} (didn't like)")
+            else:
+                parts.append(title)
+        lines.append("COMPLETED: " + "; ".join(parts))
+    if data["on_hold"]:
+        parts = []
+        for item in data["on_hold"]:
+            bit = item.get("title", "?")
+            extra = [item[k] for k in ("stopped_at", "reason") if item.get(k)]
+            if extra:
+                bit += f" ({', '.join(extra)})"
+            parts.append(bit)
+        lines.append("ON HOLD: " + "; ".join(parts))
+    if data["suggested_not_yet_watched"]:
+        lines.append("SUGGESTED: " + "; ".join(item.get("title", "?") for item in data["suggested_not_yet_watched"]))
+    if data["wishlist"]:
+        lines.append("WISHLIST: " + "; ".join(item.get("title", "?") for item in data["wishlist"]))
+    if data["anticipated"]:
+        lines.append("ANTICIPATED: " + "; ".join(item.get("title", "?") for item in data["anticipated"]))
+    return "\n".join(lines) if lines else "(empty -- nothing recorded yet)"
+
+
+def remove_from_movie_progress_lists(data, title_norm):
+    for key in MOVIE_PROGRESS_LISTS:
+        data[key] = [item for item in data[key]
+                     if normalize_movie_title(item.get("title", "")).lower() != title_norm.lower()]
+
+
+# the actual dedup-reasoning call -- see the MOVIE-topic header comment for
+# why this goes to REASONING_MODEL ("auto") instead of the fast TAG_MODEL.
+# fails safe: any parse failure or call failure below comes back as
+# ALREADY_LISTED, never NEW, so a broken reasoning call just means a missed
+# add (re-sendable) rather than a wrongly-added title.
+def decide_movie_status(title, watch_history_text):
+    prompt = (
+        "You are checking Eldar's personal movie/show watch-history database for one title.\n\n"
+        f"CURRENT WATCH HISTORY:\n{watch_history_text}\n\n"
+        f"CANDIDATE TITLE (just arrived by email -- possibly in a different language, or a "
+        f"stylized/translated form of something already listed): {title}\n\n"
+        "Decide whether this candidate is something Eldar has ALREADY dealt with in some form "
+        "(watched, on hold, already suggested, already wishlisted, or already anticipated -- "
+        "including under a differently-worded or translated title, e.g. \"Skyfall\" and "
+        "\"007: Координаты «Скайфолл»\" are the SAME film), or whether it's genuinely NEW.\n\n"
+        "Reply in EXACTLY this format, one field per line, nothing else:\n"
+        "DECISION: NEW, ALREADY_SEEN, or ALREADY_LISTED\n"
+        "MATCHED_TITLE: <the existing entry it matches, exactly as listed above -- or none>\n"
+        "REASON: <one short sentence>"
+    )
+    raw = _llm_generate(prompt, num_predict=150, model=REASONING_MODEL)
+
+    result = {"decision": None, "matched_title": None, "reason": None}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip().upper()
+        value = value.strip()
+        if key == "DECISION" and value.upper() in ("NEW", "ALREADY_SEEN", "ALREADY_LISTED"):
+            result["decision"] = value.upper()
+        elif key == "MATCHED_TITLE":
+            result["matched_title"] = None if value.lower() == "none" else value
+        elif key == "REASON":
+            result["reason"] = value
+
+    if result["decision"] is None:
+        result["decision"] = "ALREADY_LISTED"
+        result["reason"] = result["reason"] or "reasoning call failed or returned an unparseable reply -- not writing"
+    return result
+
+
+# candidate title cascades: subject (free via the topic-prefix strip) -> body
+# (LLM extraction) -> image (vision recognition) -- first one that produces
+# something usable wins. Returns True if a title was actually added.
+def process_movie_email(subject, body, images, dry_run):
+    bare_subject = re.fullmatch(r"MOVIE\s*[-–—:]?\s*", subject.strip(), re.IGNORECASE)
+
+    candidate = ""
+    source = ""
+    if not bare_subject:
+        candidate = re.sub(r"^MOVIE\s*[-–—:]\s*", "", subject.strip(), flags=re.IGNORECASE).strip()
+        candidate = re.sub(r"^MOVIE\s+", "", candidate, flags=re.IGNORECASE).strip()
+        source = "subject"
+
+    if not candidate and body.strip():
+        if dry_run:
+            print("    (dry-run) would extract a movie title from the email body")
+            return False
+        extracted = extract_movie_title_from_text(body)
+        if extracted and extracted.upper() != "UNKNOWN":
+            candidate, source = extracted, "body"
+
+    if not candidate and images:
+        if dry_run:
+            print(f"    (dry-run) would recognize a movie title from {len(images)} image attachment(s)")
+            return False
+        for filename, mime_type, data in images:
+            recognized = recognize_movie_title(data, mime_type)
+            if recognized and recognized.upper() != "UNKNOWN":
+                candidate, source = recognized, f"image ({filename})"
+                break
+
+    if not candidate or candidate.upper() == "UNKNOWN":
+        print(f"  ⚠ could not determine a movie/show title -- skipping: {subject[:60]}")
+        return False
+
+    title_norm = normalize_movie_title(candidate)
+    print(f"  🎬 candidate title (from {source}): {title_norm!r}")
+
+    if dry_run:
+        print("    (dry-run) would ask the reasoning model whether this is new")
+        return False
+
+    watch_history = load_movie_watch_history()
+    decision = decide_movie_status(title_norm, movie_watch_history_text(watch_history))
+
+    if decision["decision"] != "NEW":
+        matched = f" ({decision['matched_title']})" if decision.get("matched_title") else ""
+        print(f"    already have it -- {decision['decision'].lower()}{matched}: {decision['reason']}")
+        return False
+
+    remove_from_movie_progress_lists(watch_history, title_norm)
+    watch_history["suggested_not_yet_watched"].append({
+        "title": title_norm,
+        "note": f"added via Gmail movie email, {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+    })
+    save_movie_watch_history(watch_history)
+    print(f"    ✓ added to suggested_not_yet_watched: {title_norm}  ({decision['reason']})")
+    return True
 
 
 # ── state ────────────────────────────────────────────────────────────────────
@@ -599,8 +876,10 @@ tags: [{tags_str}]
 # ── sync ─────────────────────────────────────────────────────────────────────
 
 # Fetches matching emails, creates a vault note (in the folder its subject's
-# topic word maps to) for any new topic-prefixed message, and records synced
-# IDs. Returns the number of notes created.
+# topic word maps to) for any new topic-prefixed message -- except MOVIE,
+# which updates watch-history.yaml instead of writing a note, see
+# process_movie_email -- and records synced IDs. Returns the number of
+# notes created (movies_added is logged separately, see the final print).
 def sync(vault_root, query, since="", dry_run=False):
     service    = get_gmail_service()
     synced_ids = load_state()
@@ -637,7 +916,8 @@ def sync(vault_root, query, since="", dry_run=False):
         if not dry_run:
             save_state(synced_ids)
 
-    created = 0
+    created      = 0
+    movies_added = 0
 
     for item in messages:
         msg_id = item["id"]
@@ -664,6 +944,16 @@ def sync(vault_root, query, since="", dry_run=False):
 
         if not body and not images:
             print(f"  ⚠ no body, no image attachments -- skipping: {subject[:60]}")
+            mark_synced(msg_id)
+            continue
+
+        # MOVIE topic doesn't write a vault note at all -- see header
+        # comment -- so it branches off here, before any of the
+        # note/filename logic below, and is done with this message either
+        # way once process_movie_email returns.
+        if topic == "MOVIE":
+            if process_movie_email(subject, body, images, dry_run):
+                movies_added += 1
             mark_synced(msg_id)
             continue
 
@@ -744,7 +1034,7 @@ def sync(vault_root, query, since="", dry_run=False):
 
         mark_synced(msg_id)
 
-    print(f"[gmail] done -- {created} new notes created")
+    print(f"[gmail] done -- {created} new notes created, {movies_added} movie(s) added to suggested_not_yet_watched")
     return created
 
 

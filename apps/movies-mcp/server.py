@@ -26,10 +26,23 @@ exists only so this still works if that's ever turned on.
 
 WATCH HISTORY (added 2026-09-27, replaces the earlier "not wired in
 yet" version of this file): a plain YAML file at WATCH_HISTORY_PATH
-(five lists: interests, completed, on_hold, suggested_not_yet_watched,
-anticipated), mounted from the Obsidian vault -- see
+(six lists: interests, completed, on_hold, suggested_not_yet_watched,
+wishlist, anticipated), mounted from the Obsidian vault -- see
 movies-mcp-deployment.yaml's own top comment for the hostPath history
-and the directory-vs-file mount bug that was fixed there. IMPORTANT
+and the directory-vs-file mount bug that was fixed there.
+
+wishlist (added 2026-09-30, alongside the Gmail movie-sync pipeline --
+see scripts/gmail_sync.py's own top comment): the split from
+suggested_not_yet_watched is deliberate and Eldar's own -- wishlist is
+for something HE decided he wants to see (told the agent directly, or
+planned himself), suggested_not_yet_watched is for candidates that
+came from somewhere else (the agent's own recommendation, or now, a
+"Movie: ..." email he sent himself). Both are in PROGRESS_LISTS (see
+below), so a title can be in at most one of the two, never both.
+gmail_sync.py's own dedup-reasoning step always targets
+suggested_not_yet_watched for genuinely new titles -- it never writes
+wishlist directly; that stays reserved for what Eldar tells the agent
+in conversation. IMPORTANT
 HISTORY: an earlier version of movies-mcp-deployment.yaml and Hermes's
 own SOUL.md were written assuming a SEPARATE update_watch_history tool
 already existed here -- it never did (confirmed 2026-09-27 via git log,
@@ -84,13 +97,14 @@ HONCHO_HUMAN_PEER = "eldar-movies"
 HONCHO_AGENT_PEER = "movies-agent"
 
 WATCH_HISTORY_PATH = os.environ.get("WATCH_HISTORY_PATH", "/app/watch-history.yaml")
-# all four lists a title can appear in. "interests" is a separate freeform
+# all five lists a title can appear in. "interests" is a separate freeform
 # list, not managed by the update logic below.
-STATUS_LISTS = ("completed", "on_hold", "suggested_not_yet_watched", "anticipated")
-# these three ARE mutually exclusive -- a title is either finished, paused,
-# or queued, never more than one at once. "anticipated" is deliberately NOT
-# in this group -- see _apply_watch_history_update's comment for why.
-PROGRESS_LISTS = ("completed", "on_hold", "suggested_not_yet_watched")
+STATUS_LISTS = ("completed", "on_hold", "suggested_not_yet_watched", "wishlist", "anticipated")
+# these four ARE mutually exclusive -- a title is finished, paused, queued
+# (suggested to Eldar), or wishlisted (Eldar's own pick), never more than
+# one of those four at once. "anticipated" is deliberately NOT in this
+# group -- see _apply_watch_history_update's comment for why.
+PROGRESS_LISTS = ("completed", "on_hold", "suggested_not_yet_watched", "wishlist")
 
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
 TMDB_URL = "https://api.themoviedb.org/3"
@@ -119,6 +133,12 @@ STATUS_SYNONYMS = {
     "stopped": "on_hold", "paused": "on_hold", "quit": "on_hold", "abandoned": "on_hold", "gave_up": "on_hold",
     "suggested_not_yet_watched": "suggested_not_yet_watched", "suggested": "suggested_not_yet_watched",
     "recommended": "suggested_not_yet_watched", "to_watch": "suggested_not_yet_watched",
+    # "wishlist" is Eldar's own pick (told the agent directly), as opposed to
+    # suggested_not_yet_watched which is for something suggested TO him (by
+    # the agent, or by gmail_sync.py's movie-email pipeline) -- see
+    # STATUS_LISTS' own comment for the distinction.
+    "wishlist": "wishlist", "wish_list": "wishlist", "want_to_watch": "wishlist",
+    "wanted": "wishlist", "planned": "wishlist", "plan_to_watch": "wishlist",
     "anticipated": "anticipated", "waiting": "anticipated", "upcoming": "anticipated", "anticipating": "anticipated",
 }
 
@@ -134,19 +154,19 @@ def _normalize_status(value):
 # just splits on lines rather than needing a real JSON parser.
 SYSTEM_PROMPT = """You are the movies specialist inside Eldar's personal assistant setup. You answer questions about films and shows -- recommendations, new releases, what to watch, plot/cast questions -- AND you record changes to Eldar's watch history when he mentions one.
 
-CURRENT WATCH HISTORY is included below -- what Eldar has already completed, put on hold, been suggested, or is anticipating.
+CURRENT WATCH HISTORY is included below -- what Eldar has already completed, put on hold, been suggested, wishlisted himself, or is anticipating.
 
 If a block called RECALLED CONTEXT is included, it's what Honcho (this tool's memory layer) remembers from earlier conversations with Eldar about movies -- his stated preferences, what you already recommended, what he said he watched or liked. Use it naturally, instead of asking Eldar to repeat himself.
 
 You do not have live internet access for most questions -- if something depends on very recent release dates or showtimes, say so plainly rather than guessing. (A separate tool handles live TMDB lookups for anticipated titles -- you don't need to guess at those either.)
 
-First, decide: does this message describe a CHANGE to the watch history (something watched, dropped, stopped mid-way, or newly anticipated) -- or is it a question / recommendation request? "I finished X, loved it", "mark X as watched", "I stopped watching X at season 2", "I'm waiting for the next season of X" are changes. "What should I watch", "what happens in the finale of X", "any good sci-fi lately" are not. A message can describe two changes at once ("I finished season 3, waiting for season 4") -- "anticipated" is independent of completed/on_hold/suggested_not_yet_watched (finishing what's out now doesn't cancel anticipating what's next), but you can only record ONE status per reply. If a message clearly describes both, record the progress change (completed/on_hold/suggested_not_yet_watched) this time and mention in ANSWER that it'll need to be told separately to also mark it anticipated.
+First, decide: does this message describe a CHANGE to the watch history (something watched, dropped, stopped mid-way, newly wanted, or newly anticipated) -- or is it a question / recommendation request? "I finished X, loved it", "mark X as watched", "I stopped watching X at season 2", "I'm waiting for the next season of X", "I want to watch X" are changes. "What should I watch", "what happens in the finale of X", "any good sci-fi lately" are not. A message can describe two changes at once ("I finished season 3, waiting for season 4") -- "anticipated" is independent of completed/on_hold/suggested_not_yet_watched/wishlist (finishing what's out now doesn't cancel anticipating what's next), but you can only record ONE status per reply. If a message clearly describes both, record the progress change (completed/on_hold/suggested_not_yet_watched/wishlist) this time and mention in ANSWER that it'll need to be told separately to also mark it anticipated.
 
 Always reply in EXACTLY this format, one field per line, nothing before or after it:
 ANSWER: <your natural, conversational answer, a few sentences unless more is clearly wanted>
 UPDATE: yes or no
 TITLE: <the bare show/movie title only -- no "season 3" or episode numbers appended, those go in NOTE or STOPPED_AT instead -- or none if UPDATE is no>
-STATUS: must be exactly one of these four words -- completed, on_hold, suggested_not_yet_watched, anticipated -- or none. Use on_hold for anything dropped, stopped, paused, or quit -- not a different word.
+STATUS: must be exactly one of these five words -- completed, on_hold, suggested_not_yet_watched, wishlist, anticipated -- or none. Use on_hold for anything dropped, stopped, paused, or quit -- not a different word. Use wishlist when ELDAR HIMSELF says he wants to watch something (his own pick, stated directly) -- use suggested_not_yet_watched only when YOU are the one recommending it to him in this reply, or when he mentions something suggested to him some other way (e.g. an email he sent himself about a movie).
 LIKED: <yes, no, or unknown>
 STOPPED_AT: <where he stopped, e.g. "season 2 episode 4" -- or none>
 REASON: <why he stopped/dropped it, if he said -- or none>
@@ -250,6 +270,7 @@ def _watch_history_text(data):
     #   COMPLETED: Dune Part Two (liked); Oppenheimer
     #   ON HOLD: The Bear (stopped at season 2 episode 3, got busy)
     #   SUGGESTED: Poor Things
+    #   WISHLIST: Severance
     #   ANTICIPATED: Silo
     lines = []
     if data["completed"]:
@@ -274,14 +295,16 @@ def _watch_history_text(data):
         lines.append("ON HOLD: " + "; ".join(parts))
     if data["suggested_not_yet_watched"]:
         lines.append("SUGGESTED: " + "; ".join(item.get("title", "?") for item in data["suggested_not_yet_watched"]))
+    if data["wishlist"]:
+        lines.append("WISHLIST: " + "; ".join(item.get("title", "?") for item in data["wishlist"]))
     if data["anticipated"]:
         lines.append("ANTICIPATED: " + "; ".join(item.get("title", "?") for item in data["anticipated"]))
     return "\n".join(lines) if lines else "(empty -- nothing recorded yet)"
 
 
 def _remove_from_progress_lists(data, title_norm):
-    # the three PROGRESS_LISTS are mutually exclusive -- moving a title to
-    # one drops any stale copy from the other two
+    # the four PROGRESS_LISTS are mutually exclusive -- moving a title to
+    # one drops any stale copy from the other three
     for key in PROGRESS_LISTS:
         data[key] = [item for item in data[key] if _normalize_title(item.get("title", "")).lower() != title_norm.lower()]
 
@@ -293,7 +316,7 @@ def _remove_from_anticipated(data, title_norm):
 def _apply_watch_history_update(data, title, status, liked, stopped_at, reason, note):
     # confirmed live 2026-09-27: completing what's out now and still
     # anticipating the next season are both true at once for the same
-    # show -- so a progress update (completed/on_hold/suggested) only
+    # show -- so a progress update (completed/on_hold/suggested/wishlist) only
     # dedupes against the OTHER progress statuses, never touches
     # anticipated, and vice versa. Cross-clearing them was the original
     # bug (see PROGRESS_LISTS' own comment).
