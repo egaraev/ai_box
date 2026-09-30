@@ -580,7 +580,20 @@ def decide_movie_status(title, watch_history_text):
         "MATCHED_TITLE: <the existing entry it matches, exactly as listed above -- or none>\n"
         "REASON: <one short sentence>"
     )
-    raw = _llm_generate(prompt, num_predict=150, model=REASONING_MODEL, timeout=90, label="movie dedup reasoning call")
+    # num_predict bumped from 150 to 2000, 2026-09-30: confirmed live this
+    # was the actual failure the whole time, not a network/parse problem --
+    # "auto" (see litellm.yaml's own comment on ROUTE_TO_MODEL) routes
+    # through a Qwen3 chat_template_kwargs.enable_thinking toggle, and
+    # _llm_generate's <think>...</think> stripping (pre-existing, not new)
+    # is proof this stack can return a whole reasoning block inline in
+    # content. 150 tokens is enough for the model to open a <think> block,
+    # reason a little, and close it -- and then it's already out of budget
+    # before writing a single word of the actual DECISION: answer, so what's
+    # left after stripping the think block is empty. No error anywhere:
+    # HTTP 200, valid JSON, "content" is just genuinely empty. 2000 mirrors
+    # ocr_image's own budget elsewhere in this file -- enough room for a
+    # real think block AND the three-line answer after it.
+    raw = _llm_generate(prompt, num_predict=2000, model=REASONING_MODEL, timeout=90, label="movie dedup reasoning call")
 
     result = {"decision": None, "matched_title": None, "reason": None}
     for line in raw.splitlines():
@@ -600,6 +613,16 @@ def decide_movie_status(title, watch_history_text):
     if result["decision"] is None:
         result["decision"] = "ALREADY_LISTED"
         result["reason"] = result["reason"] or "reasoning call failed or returned an unparseable reply -- not writing"
+        # _llm_generate already prints WHY on a network/HTTP failure (see its
+        # own label there) -- an empty raw here means that already happened
+        # and there's nothing more to add. But a non-empty raw that still
+        # didn't parse is a different, silent failure mode (confirmed live
+        # 2026-09-30: no HTTP/exception error at all, so the call succeeded,
+        # the model just didn't follow the DECISION:/MATCHED_TITLE:/REASON:
+        # format) -- print what it actually said, the only way to tell the
+        # two apart and see what needs fixing (prompt, model, parsing).
+        if raw:
+            print(f"    ⚠ movie dedup reasoning call returned unparseable content: {raw[:300]!r}")
     return result
 
 
