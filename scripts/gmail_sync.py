@@ -667,12 +667,26 @@ def decide_movie_status(title, watch_history_text):
 # candidate title cascades: subject (free via the topic-prefix strip) -> body
 # (LLM extraction) -> image (vision recognition) -- first one that produces
 # something usable wins. Returns True if a title was actually added.
+# grabs the first http(s) URL in the email body, if any -- added 2026-09-30
+# so a YouTube (or any other) link Eldar includes alongside a title gets
+# kept, not silently dropped. Simple by design: one link per email, whatever
+# it points to, no fetching or validation -- just carried through to the
+# note field so it's a click away later (see _handle_movie_candidate).
+def extract_url_from_text(text):
+    match = re.search(r"https?://\S+", text)
+    if not match:
+        return None
+    return match.group(0).rstrip(").,;!?\"'")   # trailing punctuation/closing paren, not part of the URL
+
+
 # handles ONE already-extracted candidate title end to end: normalize,
 # dedup-reason against the current watch history, write if NEW. Split out
 # of process_movie_email 2026-09-30 so the image branch below can call it
 # once per attachment instead of stopping at the first hit (see that
-# branch's own comment). Returns True if it actually wrote something.
-def _handle_movie_candidate(candidate, source, dry_run):
+# branch's own comment). link is optional -- see extract_url_from_text --
+# and just gets appended to the written note, not used for matching/dedup.
+# Returns True if it actually wrote something.
+def _handle_movie_candidate(candidate, source, dry_run, link=None):
     title_norm = normalize_movie_title(candidate)
     print(f"  🎬 candidate title (from {source}): {title_norm!r}")
 
@@ -688,11 +702,11 @@ def _handle_movie_candidate(candidate, source, dry_run):
         print(f"    already have it -- {decision['decision'].lower()}{matched}: {decision['reason']}")
         return False
 
+    note = f"added via Gmail movie email, {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+    if link:
+        note += f" -- {link}"
     remove_from_movie_progress_lists(watch_history, title_norm)
-    watch_history["suggested_not_yet_watched"].append({
-        "title": title_norm,
-        "note": f"added via Gmail movie email, {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
-    })
+    watch_history["suggested_not_yet_watched"].append({"title": title_norm, "note": note})
     save_movie_watch_history(watch_history)
     print(f"    ✓ added to suggested_not_yet_watched: {title_norm}  ({decision['reason']})")
     return True
@@ -704,6 +718,15 @@ def _handle_movie_candidate(candidate, source, dry_run):
 # below for why: sync() adds this straight onto movies_added.
 def process_movie_email(subject, body, images, dry_run):
     bare_subject = re.fullmatch(r"MOVIE\s*[-–—:]?\s*", subject.strip(), re.IGNORECASE)
+
+    # whatever link is in the body (if any) rides along with every title
+    # this email adds, however that title was found -- see
+    # extract_url_from_text's own comment. Confirmed live 2026-09-30:
+    # Eldar's own real usage is title in the subject, a YouTube link in the
+    # body -- that combo already worked for the title (body is only ever
+    # read for a TITLE when the subject is bare, so it was silently ignored
+    # otherwise), this just stops the link itself from being dropped.
+    link = extract_url_from_text(body) if body else None
 
     candidate = ""
     source = ""
@@ -717,7 +740,7 @@ def process_movie_email(subject, body, images, dry_run):
         if candidate.upper() == "UNKNOWN":
             print(f"  ⚠ could not determine a movie/show title -- skipping: {subject[:60]}")
             return 0
-        return 1 if _handle_movie_candidate(candidate, source, dry_run) else 0
+        return 1 if _handle_movie_candidate(candidate, source, dry_run, link=link) else 0
 
     if body.strip():
         if dry_run:
@@ -738,7 +761,7 @@ def process_movie_email(subject, body, images, dry_run):
                 if title_norm.lower() in seen_this_email:
                     continue
                 seen_this_email.add(title_norm.lower())
-                if _handle_movie_candidate(body_title, "body", dry_run):
+                if _handle_movie_candidate(body_title, "body", dry_run, link=link):
                     added += 1
             return added
         print("  ⚠ could not identify any movie/show titles in the email body")
@@ -775,7 +798,7 @@ def process_movie_email(subject, body, images, dry_run):
         if title_norm.lower() in seen_this_email:
             continue
         seen_this_email.add(title_norm.lower())
-        if _handle_movie_candidate(recognized, f"image ({filename})", dry_run):
+        if _handle_movie_candidate(recognized, f"image ({filename})", dry_run, link=link):
             added += 1
     return added
 
