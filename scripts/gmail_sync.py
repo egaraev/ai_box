@@ -210,9 +210,17 @@ REASONING_MODEL = "auto"
 
 # Which topic word (if any) this subject starts with -- decides the
 # destination folder. Returns (topic_word, folder) or (None, None) if the
-# subject doesn't start with any recognized topic.
+# subject doesn't start with any recognized topic. Strips a leading Fwd:/
+# Re:/FW: (possibly repeated, e.g. "Fwd: Re: Watch ... on YouTube") first --
+# without this, forwarding a YouTube share (instead of using YouTube's own
+# "share via email" button directly) would move the topic word off the
+# front of the subject and DEFAULT_QUERY's Gmail search (which matches the
+# word anywhere in the subject) would still find the message while this
+# function silently failed to recognize it. Added 2026-09-30 after "some
+# mails are added and some are not".
 def detect_topic(subject):
     upper = subject.strip().upper()
+    upper = re.sub(r"^(?:(?:FWD?|RE)\s*:\s*)+", "", upper)
     for word, folder in TOPICS.items():
         if upper.startswith(word):
             return word, folder
@@ -1125,6 +1133,21 @@ def sync(vault_root, query, since="", dry_run=False):
 
         topic, folder = detect_topic(subject)
         if not topic:
+            # The Gmail search matches a topic word ANYWHERE in the subject
+            # (DEFAULT_QUERY is subject:(MOVIE OR WATCH OR ...)), but
+            # detect_topic only recognizes one at the very START of the
+            # subject -- that gap is silent and by design for the ordinary
+            # topics (most non-matching search hits are irrelevant emails
+            # that happen to contain a topic word, e.g. "family" in an
+            # unrelated subject, and printing for every one of those would
+            # just be noise). But a movie/watch word specifically showing up
+            # ANYWHERE without matching at the start is exactly the "some
+            # mails are added and some are not" symptom -- likely cause is a
+            # forward/reply prefix or a subject shape we don't parse yet --
+            # so flag just that case. Added 2026-09-30.
+            upper_subject = subject.strip().upper()
+            if any(word in upper_subject for word in MOVIE_TOPICS):
+                print(f"  ⚠ subject contains a movie/watch word but not at the start -- not recognized, skipping: {subject[:80]}")
             mark_synced(msg_id)
             continue
 
