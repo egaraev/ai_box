@@ -722,23 +722,74 @@ def extract_url_from_text(text):
     return match.group(0).rstrip(").,;!?\"'")   # trailing punctuation/closing paren, not part of the URL
 
 
+# Pulls the 11-char video ID out of any common YouTube link shape --
+# youtu.be/<id>, youtube.com/watch?v=<id>, m.youtube.com/watch?v=<id>,
+# youtube.com/shorts/<id> -- so two links to the SAME upload compare equal
+# even with different hosts or share-tracking query junk (e.g. the "?is=..."
+# YouTube's own share button appends). Returns None if it's not a YouTube
+# link or the ID can't be found -- callers fall back to title-based dedup.
+def extract_youtube_video_id(url):
+    if not url:
+        return None
+    match = re.search(r"(?:youtu\.be/|youtube\.com/(?:watch\?v=|shorts/|embed/))([A-Za-z0-9_-]{11})", url)
+    return match.group(1) if match else None
+
+
+# Every YouTube video ID already sitting in watch_history, pulled out of
+# each entry's own note field (that's where _handle_movie_candidate appends
+# the link -- see below) -- {video_id: title}. Added 2026-09-30, Eldar's own
+# call: "LLM should check youtube link and if it is different from any
+# links in my file then should write it as unique movie. Relying on title
+# is not really reliable for youtube stuff." Confirmed live the same day --
+# the reasoning model flagged two DIFFERENT "StarCraft Full Movie" YouTube
+# uploads as duplicates of each other purely because of shared franchise
+# wording in the title, and separately the reasoning call itself kept
+# coming back empty. Comparing the actual video ID sidesteps both problems
+# at once for any candidate that has a YouTube link.
+def existing_youtube_video_ids(watch_history):
+    found = {}
+    for list_name in MOVIE_STATUS_LISTS:
+        for entry in watch_history.get(list_name, []):
+            video_id = extract_youtube_video_id(extract_url_from_text(entry.get("note", "") or ""))
+            if video_id:
+                found[video_id] = entry.get("title", "?")
+    return found
+
+
 # handles ONE already-extracted candidate title end to end: normalize,
 # dedup-reason against the current watch history, write if NEW. Split out
 # of process_movie_email 2026-09-30 so the image branch below can call it
 # once per attachment instead of stopping at the first hit (see that
-# branch's own comment). link is optional -- see extract_url_from_text --
-# and just gets appended to the written note, not used for matching/dedup.
+# branch's own comment). link is optional -- see extract_url_from_text.
 # Returns True if it actually wrote something.
 def _handle_movie_candidate(candidate, source, dry_run, link=None):
     title_norm = normalize_movie_title(candidate)
     print(f"  🎬 candidate title (from {source}): {title_norm!r}")
 
     if dry_run:
-        print("    (dry-run) would ask the reasoning model whether this is new")
+        print("    (dry-run) would check for a dup by link or ask the reasoning model")
         return False
 
     watch_history = load_movie_watch_history()
-    decision = decide_movie_status(title_norm, movie_watch_history_text(watch_history))
+
+    # link-based dedup takes priority over the title-reasoning call, and
+    # skips it entirely when it can decide on its own -- see
+    # existing_youtube_video_ids's own comment for why (title wording is
+    # NOT a reliable signal for "same YouTube upload", per Eldar
+    # 2026-09-30). A candidate whose link doesn't match anything already
+    # tracked is unique BY DEFINITION here, even if some other entry has a
+    # similar-sounding title -- so this also bypasses the (occasionally
+    # flaky) reasoning call for every YouTube-linked email, not just the
+    # ones that would have been wrongly flagged.
+    candidate_video_id = extract_youtube_video_id(link)
+    if candidate_video_id:
+        matched_title = existing_youtube_video_ids(watch_history).get(candidate_video_id)
+        if matched_title:
+            print(f"    already have it -- same youtube video already tracked ({matched_title})")
+            return False
+        decision = {"decision": "NEW", "matched_title": None, "reason": "youtube link doesn't match any link already tracked"}
+    else:
+        decision = decide_movie_status(title_norm, movie_watch_history_text(watch_history))
 
     if decision["decision"] != "NEW":
         matched = f" ({decision['matched_title']})" if decision.get("matched_title") else ""
