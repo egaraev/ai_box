@@ -154,7 +154,20 @@ TOPICS = {
     # sync() special-cases this topic before it ever reaches the folder/
     # note-writing code path below.
     "MOVIE": "Movies",
+    # WATCH added 2026-09-30: not something Eldar types himself -- YouTube's
+    # own "Share via email" feature always generates a subject shaped like
+    # 'Watch "Some Video" on YouTube' or 'Watch Some Video on YouTube', so
+    # forwarding a YouTube share lands here automatically. Same MOVIE-topic
+    # handling in sync() below (see MOVIE_TOPICS), just its own subject
+    # parsing in process_movie_email -- YouTube wraps the title in a fixed
+    # prefix AND suffix it generates, unlike MOVIE's user-typed
+    # leading-prefix-only convention.
+    "WATCH": "Movies",
 }
+
+# topics that route into process_movie_email instead of the note-writing
+# path below -- see MOVIE's own TOPICS comment above.
+MOVIE_TOPICS = ("MOVIE", "WATCH")
 
 DEFAULT_QUERY = "from:me subject:(" + " OR ".join(TOPICS) + ")"
 DEFAULT_SINCE = ""
@@ -715,9 +728,14 @@ def _handle_movie_candidate(candidate, source, dry_run, link=None):
 # candidate title cascades: subject (free via the topic-prefix strip) -> body
 # (LLM extraction) -> image (vision recognition). Returns the number of
 # titles actually written (0 if none) -- NOT a bool, see the image branch
-# below for why: sync() adds this straight onto movies_added.
-def process_movie_email(subject, body, images, dry_run):
-    bare_subject = re.fullmatch(r"MOVIE\s*[-–—:]?\s*", subject.strip(), re.IGNORECASE)
+# below for why: sync() adds this straight onto movies_added. topic picks
+# which subject convention to parse (see MOVIE_TOPICS) -- MOVIE is Eldar's
+# own "Movie: Title" prefix, WATCH is YouTube's own auto-generated 'Watch
+# "Title" on YouTube' wrapper (added 2026-09-30 -- see WATCH's own TOPICS
+# comment), which needs both a prefix AND a suffix stripped, not just a
+# prefix, so it gets its own branch below rather than reusing MOVIE's regex.
+def process_movie_email(subject, body, images, dry_run, topic="MOVIE"):
+    stripped_subject = subject.strip()
 
     # whatever link is in the body (if any) rides along with every title
     # this email adds, however that title was found -- see
@@ -730,10 +748,19 @@ def process_movie_email(subject, body, images, dry_run):
 
     candidate = ""
     source = ""
-    if not bare_subject:
-        candidate = re.sub(r"^MOVIE\s*[-–—:]\s*", "", subject.strip(), flags=re.IGNORECASE).strip()
-        candidate = re.sub(r"^MOVIE\s+", "", candidate, flags=re.IGNORECASE).strip()
-        source = "subject"
+    if topic == "WATCH":
+        bare_subject = re.fullmatch(r"Watch\s*(?:on\s+YouTube)?\s*", stripped_subject, re.IGNORECASE)
+        if not bare_subject:
+            candidate = re.sub(r"^Watch\s+", "", stripped_subject, flags=re.IGNORECASE)
+            candidate = re.sub(r"\s+on\s+YouTube\s*$", "", candidate, flags=re.IGNORECASE)
+            candidate = candidate.strip().strip("\"'").strip()
+            source = "subject"
+    else:
+        bare_subject = re.fullmatch(rf"{topic}\s*[-–—:]?\s*", stripped_subject, re.IGNORECASE)
+        if not bare_subject:
+            candidate = re.sub(rf"^{topic}\s*[-–—:]\s*", "", stripped_subject, flags=re.IGNORECASE).strip()
+            candidate = re.sub(rf"^{topic}\s+", "", candidate, flags=re.IGNORECASE).strip()
+            source = "subject"
 
     # subject gave a candidate -- that's exactly ONE title for this email.
     if candidate:
@@ -1117,11 +1144,13 @@ def sync(vault_root, query, since="", dry_run=False):
         # from the subject alone (see process_movie_email), so that check
         # would otherwise kill the most common movie email before it ever
         # reached this branch. Confirmed happening in practice 2026-09-30.
-        if topic == "MOVIE":
+        if topic in MOVIE_TOPICS:
             # process_movie_email returns a COUNT now, not a bool -- one
             # email can add more than one title (multiple image
-            # attachments, see that function's own comment).
-            movies_added += process_movie_email(subject, body, images, dry_run)
+            # attachments, see that function's own comment). WATCH is
+            # YouTube's own "Share via email" subject shape (Watch "<title>"
+            # on YouTube) -- see MOVIE_TOPICS and process_movie_email.
+            movies_added += process_movie_email(subject, body, images, dry_run, topic=topic)
             mark_synced(msg_id)
             continue
 
