@@ -361,6 +361,14 @@ data:
         litellm_params:
           model: openrouter/google/gemini-3.8-flash
           api_key: os.environ/OPENROUTER_API_KEY
+          # added 2026-10-01 -- see the big PROMPT CACHING comment below
+          # (near claude-opus-alias) for why this is unverified specifically
+          # for Gemini, unlike the Opus entry it was copied from.
+          cache_control_injection_points:
+            - location: message
+              role: system
+            - location: message
+              index: -1
 
       # Deliberate-use cloud aliases -- see the top-of-file "CLOUD ALIASES
       # FOR DELIBERATE USE" comment for the full story (model choice,
@@ -389,9 +397,33 @@ data:
       # everything through the most-recent turn as cacheable, so the NEXT
       # call in the same tool loop -- which only appends one more message --
       # gets a cache hit on everything before it, instead of repricing the
-      # whole conversation again). NOT wired onto gpt-sol-alias below: OpenAI
-      # caches automatically server-side for prompts over ~1024 tokens, no
-      # cache_control markers needed, so this would be a no-op there.
+      # whole conversation again). Originally wired onto claude-opus-alias
+      # only -- gpt-sol-alias was skipped because OpenAI caches automatically
+      # server-side for prompts over ~1024 tokens (no cache_control markers
+      # needed, so this field is a no-op there), and openrouter-fallback
+      # wasn't touched at all yet.
+      # BROADENED 2026-10-01 (Eldar's explicit call): wired onto every
+      # OpenRouter model_list entry below by default, not just Opus --
+      # consistency over per-model cherry-picking, even into entries where
+      # it's expected to no-op. cache_control_injection_points is part of
+      # ANTHROPIC's own Messages API spec (ephemeral cache_control
+      # breakpoints) -- LiteLLM documents it applying to OpenRouter's Claude
+      # routes specifically. What actually happens for the other two
+      # providers once this field reaches OpenRouter is UNVERIFIED, not
+      # assumed safe:
+      #   - gpt-sol-alias (OpenAI): still expected to no-op, per the
+      #     auto-caching reasoning above -- harmless either way, OpenAI's own
+      #     caching already covers it.
+      #   - openrouter-fallback (Google Gemini): Gemini's REAL caching
+      #     mechanism is architecturally different -- explicit CachedContent
+      #     resources created via a separate API call with their own TTL, not
+      #     inline per-message breakpoints -- so there's a real chance
+      #     OpenRouter/LiteLLM either silently drops this field for Gemini or
+      #     it does nothing server-side, not just "unverified but probably
+      #     works" like Opus. Check cache_read_input_tokens (or its Gemini
+      #     equivalent, if any even gets returned) in the next real multi-
+      #     call gemini-3.8-flash session before trusting this one actually
+      #     caches anything -- don't assume parity with the Opus entry below.
       # UNVERIFIED against this deployment's real traffic (the exact
       # location/role/index keys below are corroborated across three
       # separate LiteLLM GitHub PRs/issues, not read off one single
@@ -415,6 +447,15 @@ data:
         litellm_params:
           model: openrouter/openai/gpt-5.6-sol
           api_key: os.environ/OPENROUTER_API_KEY
+          # added 2026-10-01 for consistency across every OpenRouter entry --
+          # expected to no-op, see this block's own comment above
+          # (claude-opus-alias) for why: OpenAI already auto-caches
+          # server-side, no cache_control marker needed.
+          cache_control_injection_points:
+            - location: message
+              role: system
+            - location: message
+              index: -1
 
     litellm_settings:
       # OBSERVABILITY STACK, 2026-09-17 (see k8s/p8/ -- Prometheus/Grafana/
