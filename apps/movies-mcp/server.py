@@ -69,6 +69,21 @@ Fixed by looking up the existing entry first and carrying its fields
 forward when the new message doesn't restate them -- see
 _apply_watch_history_update's own comment.
 
+LIKED, take two (also 2026-10-01, same day): removed earlier in this
+same session because the original field was ambiguous -- it looked like
+a sentiment rating ("loved it") but Eldar had actually been using it to
+mean something closer to "want to watch/rewatch", a leftover from the
+old source-site import method, with no real use in this tool. Eldar then
+gave it an actual, deliberate meaning: a real favorites marker, used so
+the agent can lean on it as a taste signal for recommendations, and
+handed over a list of ~490 titles to mark that way (see the "Marvel
+universe", "Форсаж all movies" etc. franchise sweeps in the commit that
+did this -- those are substring matches against the completed list, not
+hand-picked one by one). So LIKED is back, but it means this now: a
+title the model should treat as evidence of what Eldar actually enjoys,
+not just a label to store. See SYSTEM_PROMPT's own LIKED line and the
+RECALLED CONTEXT paragraph above it.
+
 check_anticipated (also added 2026-09-27, also never existed before
 despite TMDB_API_KEY already being wired into the Deployment): live
 TMDB lookups for "is X back yet" style questions about anything on the
@@ -176,9 +191,9 @@ def _normalize_status(value):
 # just splits on lines rather than needing a real JSON parser.
 SYSTEM_PROMPT = """You are the movies specialist inside Eldar's personal assistant setup. You answer questions about films and shows -- recommendations, new releases, what to watch, plot/cast questions -- AND you record changes to Eldar's watch history when he mentions one.
 
-CURRENT WATCH HISTORY is included below -- what Eldar has already completed, put on hold, been suggested, wishlisted himself, or is anticipating.
+CURRENT WATCH HISTORY is included below -- what Eldar has already completed, put on hold, been suggested, wishlisted himself, or is anticipating. Completed titles marked "(liked)" are ones Eldar specifically told the agent he loved -- treat these as real signal about his taste (genres, franchises, tone, directors/actors he gravitates to) and actively use them when he asks for a recommendation, not just as a label sitting in the list. If several liked titles share something (same franchise, same genre, same kind of tone), it's fair to name that pattern and recommend accordingly.
 
-If a block called RECALLED CONTEXT is included, it's what Honcho (this tool's memory layer) remembers from earlier conversations with Eldar about movies -- his stated preferences, what you already recommended, what he said he watched. Use it naturally, instead of asking Eldar to repeat himself.
+If a block called RECALLED CONTEXT is included, it's what Honcho (this tool's memory layer) remembers from earlier conversations with Eldar about movies -- his stated preferences, what you already recommended, what he said he watched or liked. Use it naturally, instead of asking Eldar to repeat himself.
 
 You do not have live internet access for most questions -- if something depends on very recent release dates or showtimes, say so plainly rather than guessing. (A separate tool handles live TMDB lookups for anticipated titles -- you don't need to guess at those either.)
 
@@ -189,6 +204,7 @@ ANSWER: <your natural, conversational answer, a few sentences unless more is cle
 UPDATE: yes or no
 TITLE: <the bare show/movie title only -- no "season 3" or episode numbers appended, those go in NOTE or STOPPED_AT instead -- or none if UPDATE is no>
 STATUS: must be exactly one of these six words -- completed, on_hold, suggested_not_yet_watched, wishlist, anticipated, remove -- or none. Use on_hold for anything dropped, stopped, paused, or quit -- not a different word. Use wishlist when ELDAR HIMSELF says he wants to watch something (his own pick, stated directly) -- use suggested_not_yet_watched only when YOU are the one recommending it to him in this reply, or when he mentions something suggested to him some other way (e.g. an email he sent himself about a movie). Use remove when Eldar wants a title taken off his list(s) ENTIRELY -- added by mistake, a duplicate, or he just doesn't want it tracked anymore -- not for pausing or changing status (that's on_hold/wishlist/etc, the title stays recorded).
+LIKED: yes if Eldar said he loved/really liked it ("loved it", "one of my favorites", "really enjoyed it") -- this is a real signal used later for recommendations, not a throwaway label, so only say yes when he's actually expressing that, not just finishing something neutrally. no if he said he disliked it. unknown if he didn't say either way, or if this reply isn't recording completed/anything that had an opinion attached (e.g. a plain status move like "put X on hold" with no liked/disliked said).
 STOPPED_AT: <where he stopped, e.g. "season 2 episode 4" -- or none>
 REASON: <why he stopped/dropped it, if he said -- or none>
 NOTE: <any other detail worth keeping, e.g. a season/episode he just watched ("through season 2") for a title that's already recorded -- or none>"""
@@ -288,14 +304,18 @@ def _save_watch_history(data):
 def _watch_history_text(data):
     # turns the loaded dict into a short plain-text block for the LLM
     # prompt, e.g.:
-    #   COMPLETED: Dune Part Two; Oppenheimer
+    #   COMPLETED: Dune Part Two (liked); Oppenheimer
     #   ON HOLD: The Bear (stopped at season 2 episode 3, got busy)
     #   SUGGESTED: Poor Things
     #   WISHLIST: Severance
     #   ANTICIPATED: Silo
     lines = []
     if data["completed"]:
-        lines.append("COMPLETED: " + "; ".join(item.get("title", "?") for item in data["completed"]))
+        parts = []
+        for item in data["completed"]:
+            title = item.get("title", "?")
+            parts.append(f"{title} (liked)" if item.get("liked") is True else title)
+        lines.append("COMPLETED: " + "; ".join(parts))
     if data["on_hold"]:
         parts = []
         for item in data["on_hold"]:
@@ -350,7 +370,7 @@ def _find_existing_entry(data, title_norm):
     return None, None
 
 
-def _apply_watch_history_update(data, title, status, stopped_at, reason, note):
+def _apply_watch_history_update(data, title, status, liked, stopped_at, reason, note):
     # confirmed live 2026-09-27: completing what's out now and still
     # anticipating the next season are both true at once for the same
     # show -- so a progress update (completed/on_hold/suggested/wishlist) only
@@ -368,19 +388,10 @@ def _apply_watch_history_update(data, title, status, stopped_at, reason, note):
 
     # look up the existing entry BEFORE wiping it out below -- a later
     # message that only adds one new detail ("watched season 2") and
-    # doesn't restate everything would otherwise silently erase fields the
-    # earlier message already recorded (added 2026-10-01, same day as the
-    # "remove" fix above -- Eldar asked for exactly this: telling Hermes
-    # an update to an existing record should update it, not blank it out).
-    # NOTE: there used to be a "liked" field carried over here too, but
-    # Eldar clarified (2026-10-01) it never meant sentiment ("loved it") --
-    # it was a leftover marker from the old source-site import meaning
-    # "want to watch/rewatch", and he doesn't want it at all anymore. Gone
-    # from here, from the LLM prompt, and from the display text below.
-    # Pre-existing "liked" keys already in watch-history.yaml are just
-    # inert now -- nothing reads them, and the next time a title with one
-    # gets touched by an update, it drops silently since entry is rebuilt
-    # fresh each time.
+    # doesn't restate everything (LIKED comes back "unknown" when it isn't
+    # repeated) would otherwise silently erase fields the earlier message
+    # already recorded (added 2026-10-01, same day LIKED got its real
+    # meaning back -- see this file's top comment, "LIKED, take two")
     existing, existing_status = _find_existing_entry(data, title_norm)
 
     if status == "anticipated":
@@ -389,6 +400,12 @@ def _apply_watch_history_update(data, title, status, stopped_at, reason, note):
         _remove_from_progress_lists(data, title_norm)
 
     entry = {"title": title_norm}
+    # liked carries over regardless of status change -- "watched season 2"
+    # shouldn't erase "liked: true" recorded when season 1 was marked completed
+    if liked is not None:
+        entry["liked"] = liked
+    elif existing and existing.get("liked") is not None:
+        entry["liked"] = existing["liked"]
     # stopped_at/reason are on_hold-specific -- only carry them over on a
     # plain detail update (status unchanged), never across a real
     # transition like on_hold -> completed where they'd just be stale
@@ -422,7 +439,7 @@ def _parse_llm_response(raw):
     # model didn't follow the format (rather than guessing at fields from
     # free text).
     fields = {"answer": None, "update": False, "title": None, "status": None,
-              "stopped_at": None, "reason": None, "note": None}
+              "liked": None, "stopped_at": None, "reason": None, "note": None}
     for line in raw.splitlines():
         line = line.strip()
         if not line or ":" not in line:
@@ -439,6 +456,8 @@ def _parse_llm_response(raw):
             fields["title"] = none_or(value)
         elif key == "STATUS":
             fields["status"] = _normalize_status(value)
+        elif key == "LIKED":
+            fields["liked"] = True if value.lower().startswith("y") else False if value.lower().startswith("n") else None
         elif key == "STOPPED_AT":
             fields["stopped_at"] = none_or(value)
         elif key == "REASON":
@@ -457,7 +476,7 @@ async def _ask_llm(client, question, watch_history_text, recalled):
     #    {"role": "user", "content": "CURRENT WATCH HISTORY:\n...\n\nQUESTION:\nI stopped watching Foundation at season 2"}]}
     # returns e.g. {"choices": [{"message": {"content":
     #   "ANSWER: Got it, marked Foundation as on hold.\nUPDATE: yes\nTITLE: Foundation\n
-    #    STATUS: on_hold\nSTOPPED_AT: season 2\nREASON: none\nNOTE: none"}}]}
+    #    STATUS: on_hold\nLIKED: unknown\nSTOPPED_AT: season 2\nREASON: none\nNOTE: none"}}]}
     user_content = f"CURRENT WATCH HISTORY:\n{watch_history_text}\n\n"
     if recalled:
         user_content += f"RECALLED CONTEXT (from earlier conversations):\n{recalled}\n\n"
@@ -548,7 +567,9 @@ async def ask_movies(question: str, ctx: Context) -> str:
     questions -- and also records changes: something you finished,
     dropped, stopped mid-way, are now anticipating, or want removed
     entirely (added by mistake, duplicate, no longer want it tracked).
-    The tool itself decides which kind of message this is and saves a
+    Titles you say you loved get marked liked, which this tool then uses
+    as a taste signal for future recommendations -- not just stored. The
+    tool itself decides which kind of message this is and saves a
     change when one is described; you don't need a separate "update" or
     "delete" call. Remembers past conversations via Honcho, so you don't
     need to repeat context from an earlier chat.
@@ -582,7 +603,7 @@ async def ask_movies(question: str, ctx: Context) -> str:
             title_norm = _normalize_title(result["title"])
             found_or_saved = _apply_watch_history_update(
                 watch_history, result["title"], result["status"],
-                result["stopped_at"], result["reason"], result["note"],
+                result["liked"], result["stopped_at"], result["reason"], result["note"],
             )
             if result["status"] == "remove":
                 if found_or_saved:
