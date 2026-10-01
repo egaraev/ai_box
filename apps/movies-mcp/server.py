@@ -54,6 +54,21 @@ ever has one movie tool to pick, and the code -- not Hermes's own
 judgment -- decides whether a given question describes a change worth
 saving. See ask_movies's own comment for how.
 
+remove / update-in-place (added 2026-10-01): two real bugs found live the
+same day. First, there was no way to take a title off the list(s)
+entirely -- only to move it to a different status -- so asking Hermes to
+"remove" a title sent it in circles (see git log for that incident).
+STATUS now also accepts "remove" (see STATUS_SYNONYMS), which deletes the
+title from every list instead of filing it anywhere.
+Second, _apply_watch_history_update used to build a brand-new entry from
+scratch every time, so a later message that only adds one new detail
+("I watched season 2") and doesn't repeat everything else would silently
+wipe fields an earlier message already saved (LIKED comes back "unknown"
+when it isn't mentioned again, so "liked: true" from season 1 was lost).
+Fixed by looking up the existing entry first and carrying its fields
+forward when the new message doesn't restate them -- see
+_apply_watch_history_update's own comment.
+
 check_anticipated (also added 2026-09-27, also never existed before
 despite TMDB_API_KEY already being wired into the Deployment): live
 TMDB lookups for "is X back yet" style questions about anything on the
@@ -140,6 +155,13 @@ STATUS_SYNONYMS = {
     "wishlist": "wishlist", "wish_list": "wishlist", "want_to_watch": "wishlist",
     "wanted": "wishlist", "planned": "wishlist", "plan_to_watch": "wishlist",
     "anticipated": "anticipated", "waiting": "anticipated", "upcoming": "anticipated", "anticipating": "anticipated",
+    # "remove" isn't one of the five real lists -- it's a sentinel meaning
+    # "take this title off everything, don't file it anywhere else" (added
+    # 2026-10-01: Eldar asked to remove a title and there was no way to do
+    # that, only to move it to a different status). _apply_watch_history_update
+    # special-cases this value instead of appending to data["remove"].
+    "remove": "remove", "removed": "remove", "delete": "remove", "deleted": "remove",
+    "erase": "remove", "forget": "remove", "forget_it": "remove",
 }
 
 
@@ -160,17 +182,17 @@ If a block called RECALLED CONTEXT is included, it's what Honcho (this tool's me
 
 You do not have live internet access for most questions -- if something depends on very recent release dates or showtimes, say so plainly rather than guessing. (A separate tool handles live TMDB lookups for anticipated titles -- you don't need to guess at those either.)
 
-First, decide: does this message describe a CHANGE to the watch history (something watched, dropped, stopped mid-way, newly wanted, or newly anticipated) -- or is it a question / recommendation request? "I finished X, loved it", "mark X as watched", "I stopped watching X at season 2", "I'm waiting for the next season of X", "I want to watch X" are changes. "What should I watch", "what happens in the finale of X", "any good sci-fi lately" are not. A message can describe two changes at once ("I finished season 3, waiting for season 4") -- "anticipated" is independent of completed/on_hold/suggested_not_yet_watched/wishlist (finishing what's out now doesn't cancel anticipating what's next), but you can only record ONE status per reply. If a message clearly describes both, record the progress change (completed/on_hold/suggested_not_yet_watched/wishlist) this time and mention in ANSWER that it'll need to be told separately to also mark it anticipated.
+First, decide: does this message describe a CHANGE to the watch history (something watched, dropped, stopped mid-way, newly wanted, newly anticipated, or to be removed entirely) -- or is it a question / recommendation request? "I finished X, loved it", "mark X as watched", "I stopped watching X at season 2", "I'm waiting for the next season of X", "I want to watch X", "remove X from the list", "delete X, I added it by mistake" are changes. "What should I watch", "what happens in the finale of X", "any good sci-fi lately" are not. A message can describe two changes at once ("I finished season 3, waiting for season 4") -- "anticipated" is independent of completed/on_hold/suggested_not_yet_watched/wishlist (finishing what's out now doesn't cancel anticipating what's next), but you can only record ONE status per reply. If a message clearly describes both, record the progress change (completed/on_hold/suggested_not_yet_watched/wishlist) this time and mention in ANSWER that it'll need to be told separately to also mark it anticipated.
 
 Always reply in EXACTLY this format, one field per line, nothing before or after it:
 ANSWER: <your natural, conversational answer, a few sentences unless more is clearly wanted>
 UPDATE: yes or no
 TITLE: <the bare show/movie title only -- no "season 3" or episode numbers appended, those go in NOTE or STOPPED_AT instead -- or none if UPDATE is no>
-STATUS: must be exactly one of these five words -- completed, on_hold, suggested_not_yet_watched, wishlist, anticipated -- or none. Use on_hold for anything dropped, stopped, paused, or quit -- not a different word. Use wishlist when ELDAR HIMSELF says he wants to watch something (his own pick, stated directly) -- use suggested_not_yet_watched only when YOU are the one recommending it to him in this reply, or when he mentions something suggested to him some other way (e.g. an email he sent himself about a movie).
+STATUS: must be exactly one of these six words -- completed, on_hold, suggested_not_yet_watched, wishlist, anticipated, remove -- or none. Use on_hold for anything dropped, stopped, paused, or quit -- not a different word. Use wishlist when ELDAR HIMSELF says he wants to watch something (his own pick, stated directly) -- use suggested_not_yet_watched only when YOU are the one recommending it to him in this reply, or when he mentions something suggested to him some other way (e.g. an email he sent himself about a movie). Use remove when Eldar wants a title taken off his list(s) ENTIRELY -- added by mistake, a duplicate, or he just doesn't want it tracked anymore -- not for pausing or changing status (that's on_hold/wishlist/etc, the title stays recorded).
 LIKED: <yes, no, or unknown>
 STOPPED_AT: <where he stopped, e.g. "season 2 episode 4" -- or none>
 REASON: <why he stopped/dropped it, if he said -- or none>
-NOTE: <any other detail worth keeping -- or none>"""
+NOTE: <any other detail worth keeping, e.g. a season/episode he just watched ("through season 2") for a title that's already recorded -- or none>"""
 
 mcp = MCPServer("movies")
 
@@ -313,6 +335,31 @@ def _remove_from_anticipated(data, title_norm):
     data["anticipated"] = [item for item in data["anticipated"] if _normalize_title(item.get("title", "")).lower() != title_norm.lower()]
 
 
+def _remove_title_everywhere(data, title_norm):
+    # for an explicit "remove" request -- strips title_norm out of every
+    # list it could possibly be in (all five STATUS_LISTS), and reports
+    # whether anything was actually found/removed so the caller can tell
+    # Eldar when a title wasn't on any list in the first place
+    found = False
+    for key in STATUS_LISTS:
+        before = len(data[key])
+        data[key] = [item for item in data[key] if _normalize_title(item.get("title", "")).lower() != title_norm.lower()]
+        if len(data[key]) != before:
+            found = True
+    return found
+
+
+def _find_existing_entry(data, title_norm):
+    # searches every list a title could be in (added 2026-10-01, alongside
+    # the merge-on-update fix below) -- returns the entry dict plus which
+    # list it was found in, or (None, None) if it's nowhere yet
+    for key in STATUS_LISTS:
+        for item in data[key]:
+            if _normalize_title(item.get("title", "")).lower() == title_norm.lower():
+                return item, key
+    return None, None
+
+
 def _apply_watch_history_update(data, title, status, liked, stopped_at, reason, note):
     # confirmed live 2026-09-27: completing what's out now and still
     # anticipating the next season are both true at once for the same
@@ -320,22 +367,60 @@ def _apply_watch_history_update(data, title, status, liked, stopped_at, reason, 
     # dedupes against the OTHER progress statuses, never touches
     # anticipated, and vice versa. Cross-clearing them was the original
     # bug (see PROGRESS_LISTS' own comment).
+    #
+    # returns True if the title ended up recorded/removed as asked, False
+    # only for the "remove" case when the title wasn't found on any list
     title_norm = _normalize_title(title)
+    if status == "remove":
+        found = _remove_title_everywhere(data, title_norm)
+        _save_watch_history(data)
+        return found
+
+    # look up the existing entry BEFORE wiping it out below -- a later
+    # message that only adds one new detail ("watched season 2") and
+    # doesn't restate everything (LIKED comes back "unknown" since it
+    # wasn't mentioned again) would otherwise silently erase fields the
+    # earlier message already recorded (added 2026-10-01, same day as the
+    # "remove" fix above -- Eldar asked for exactly this: telling Hermes
+    # an update to an existing record should update it, not blank it out)
+    existing, existing_status = _find_existing_entry(data, title_norm)
+
     if status == "anticipated":
         _remove_from_anticipated(data, title_norm)
     else:
         _remove_from_progress_lists(data, title_norm)
+
     entry = {"title": title_norm}
+    # liked carries over regardless of status change -- "watched season 2"
+    # shouldn't erase "liked: true" recorded when season 1 was marked completed
     if liked is not None:
         entry["liked"] = liked
+    elif existing and existing.get("liked") is not None:
+        entry["liked"] = existing["liked"]
+    # stopped_at/reason are on_hold-specific -- only carry them over on a
+    # plain detail update (status unchanged), never across a real
+    # transition like on_hold -> completed where they'd just be stale
     if stopped_at:
         entry["stopped_at"] = stopped_at
+    elif existing_status == status and existing and existing.get("stopped_at"):
+        entry["stopped_at"] = existing["stopped_at"]
     if reason:
         entry["reason"] = reason
-    if note:
+    elif existing_status == status and existing and existing.get("reason"):
+        entry["reason"] = existing["reason"]
+    # note is general-purpose -- append the new detail onto the old one
+    # instead of overwriting, so "watched season 2" on top of an earlier
+    # "slow start" note keeps both instead of losing the first
+    if note and existing and existing.get("note"):
+        entry["note"] = f"{existing['note']}; {note}"
+    elif note:
         entry["note"] = note
+    elif existing and existing.get("note"):
+        entry["note"] = existing["note"]
+
     data[status].append(entry)
     _save_watch_history(data)
+    return True
 
 
 def _parse_llm_response(raw):
@@ -471,11 +556,12 @@ async def ask_movies(question: str, ctx: Context) -> str:
 
     Handles recommendations, new releases, what to watch, plot/cast
     questions -- and also records changes: something you finished,
-    dropped, stopped mid-way, or are now anticipating. The tool itself
-    decides which kind of message this is and saves a change when one is
-    described; you don't need a separate "update" call. Remembers past
-    conversations via Honcho, so you don't need to repeat context from an
-    earlier chat.
+    dropped, stopped mid-way, are now anticipating, or want removed
+    entirely (added by mistake, duplicate, no longer want it tracked).
+    The tool itself decides which kind of message this is and saves a
+    change when one is described; you don't need a separate "update" or
+    "delete" call. Remembers past conversations via Honcho, so you don't
+    need to repeat context from an earlier chat.
 
     For live release/season status on something you're anticipating
     ("is Silo back yet"), use check_anticipated instead -- this tool
@@ -504,12 +590,20 @@ async def ask_movies(question: str, ctx: Context) -> str:
         answer = result["answer"]
         if result["update"] and result["title"] and result["status"]:
             title_norm = _normalize_title(result["title"])
-            _apply_watch_history_update(
+            found_or_saved = _apply_watch_history_update(
                 watch_history, result["title"], result["status"],
                 result["liked"], result["stopped_at"], result["reason"], result["note"],
             )
-            logger.info("watch history updated: %s -> %s", title_norm, result["status"])
-            answer += f"\n\n(saved: {title_norm} -> {result['status']})"
+            if result["status"] == "remove":
+                if found_or_saved:
+                    logger.info("watch history entry removed: %s", title_norm)
+                    answer += f"\n\n(removed: {title_norm})"
+                else:
+                    logger.info("remove requested but title not found: %s", title_norm)
+                    answer += f"\n\n(couldn't find \"{title_norm}\" on any list -- nothing removed)"
+            else:
+                logger.info("watch history updated: %s -> %s", title_norm, result["status"])
+                answer += f"\n\n(saved: {title_norm} -> {result['status']})"
         elif result["update"]:
             # model said this was a change but didn't give a usable title/status --
             # log it instead of silently dropping what might be a real change
