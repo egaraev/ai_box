@@ -74,7 +74,7 @@ data:
     # One real structural difference from the Windows lab: there, model_list's
     # model_name values WERE the route names (cheap/code/vision/...). Here,
     # model_list's model_name values are the real model names (qwen3.8-27b-
-    # Expert, hermes3-llama-3.1-8b, ...) -- the route name -> model mapping
+    # Expert, llama3.1-aloe-beta-8b, ...) -- the route name -> model mapping
     # lives in custom_router_hook.py's ROUTE_TO_MODEL dict, which isn't
     # parseable from config.yaml. ROUTE_TABLE below is a hand-maintained mirror
     # of that dict -- update it by hand if custom_router_hook.py's routing
@@ -110,17 +110,23 @@ data:
     # Hand-maintained mirror of custom_router_hook.py's ROUTE_TO_MODEL -- see
     # header comment. Last checked against the live hook (the actual dict
     # literal, not the comments near it -- those were stale) 2026-09-13.
-    # UPDATED 2026-09-13: "other" used to be lumped in with "reasoning" as a
-    # shared default (both pointed at qwen3.8-27b-Expert) -- split out same
-    # day the ROUTE_TO_MODEL fix landed, since "other" now routes to the
-    # fast model instead (see custom_router_hook.py's own comment on that
-    # dict entry for why).
+    # UPDATED 2026-09-16: "medical" moved medgemma-1.5-4b -> llama3.1-aloe-
+    # beta-8b (medgemma never reliably stopped/answered -- see
+    # llama-swap-configmap.yaml for the full history).
+    # UPDATED 2026-09-28 (Eldar's call, retiring hermes3-llama-3.1-8b from
+    # routing entirely): "casual"/"other"/"reasoning" all resolve to the
+    # SAME model now, qwen3.8-27b-Expert -- what used to be a model choice
+    # (fast-but-unreliable hermes3-llama-3.1-8b vs the careful 27B model)
+    # is a per-request THINKING toggle instead (see custom_router_hook.py's
+    # own "COLLAPSED CASUAL/OTHER ONTO REASONING'S MODEL" comment for the
+    # full reasoning). Noted here rather than dropped silently since it's
+    # the one real behavioral difference left between these three rows.
     ROUTE_TABLE = [
         ("vision", "qwen3.8-27b-Expert-Vision"),
-        ("medical", "medgemma-1.5-4b"),
-        ("casual", "hermes3-llama-3.1-8b"),
-        ("other", "hermes3-llama-3.1-8b"),
-        ("reasoning (default)", "qwen3.8-27b-Expert"),
+        ("medical", "llama3.1-aloe-beta-8b"),
+        ("casual", "qwen3.8-27b-Expert (thinking off)"),
+        ("other", "qwen3.8-27b-Expert (thinking off)"),
+        ("reasoning (default)", "qwen3.8-27b-Expert (thinking on)"),
     ]
 
 
