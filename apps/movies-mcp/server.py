@@ -178,7 +178,7 @@ SYSTEM_PROMPT = """You are the movies specialist inside Eldar's personal assista
 
 CURRENT WATCH HISTORY is included below -- what Eldar has already completed, put on hold, been suggested, wishlisted himself, or is anticipating.
 
-If a block called RECALLED CONTEXT is included, it's what Honcho (this tool's memory layer) remembers from earlier conversations with Eldar about movies -- his stated preferences, what you already recommended, what he said he watched or liked. Use it naturally, instead of asking Eldar to repeat himself.
+If a block called RECALLED CONTEXT is included, it's what Honcho (this tool's memory layer) remembers from earlier conversations with Eldar about movies -- his stated preferences, what you already recommended, what he said he watched. Use it naturally, instead of asking Eldar to repeat himself.
 
 You do not have live internet access for most questions -- if something depends on very recent release dates or showtimes, say so plainly rather than guessing. (A separate tool handles live TMDB lookups for anticipated titles -- you don't need to guess at those either.)
 
@@ -189,7 +189,6 @@ ANSWER: <your natural, conversational answer, a few sentences unless more is cle
 UPDATE: yes or no
 TITLE: <the bare show/movie title only -- no "season 3" or episode numbers appended, those go in NOTE or STOPPED_AT instead -- or none if UPDATE is no>
 STATUS: must be exactly one of these six words -- completed, on_hold, suggested_not_yet_watched, wishlist, anticipated, remove -- or none. Use on_hold for anything dropped, stopped, paused, or quit -- not a different word. Use wishlist when ELDAR HIMSELF says he wants to watch something (his own pick, stated directly) -- use suggested_not_yet_watched only when YOU are the one recommending it to him in this reply, or when he mentions something suggested to him some other way (e.g. an email he sent himself about a movie). Use remove when Eldar wants a title taken off his list(s) ENTIRELY -- added by mistake, a duplicate, or he just doesn't want it tracked anymore -- not for pausing or changing status (that's on_hold/wishlist/etc, the title stays recorded).
-LIKED: <yes, no, or unknown>
 STOPPED_AT: <where he stopped, e.g. "season 2 episode 4" -- or none>
 REASON: <why he stopped/dropped it, if he said -- or none>
 NOTE: <any other detail worth keeping, e.g. a season/episode he just watched ("through season 2") for a title that's already recorded -- or none>"""
@@ -289,23 +288,14 @@ def _save_watch_history(data):
 def _watch_history_text(data):
     # turns the loaded dict into a short plain-text block for the LLM
     # prompt, e.g.:
-    #   COMPLETED: Dune Part Two (liked); Oppenheimer
+    #   COMPLETED: Dune Part Two; Oppenheimer
     #   ON HOLD: The Bear (stopped at season 2 episode 3, got busy)
     #   SUGGESTED: Poor Things
     #   WISHLIST: Severance
     #   ANTICIPATED: Silo
     lines = []
     if data["completed"]:
-        parts = []
-        for item in data["completed"]:
-            title = item.get("title", "?")
-            if item.get("liked") is True:
-                parts.append(f"{title} (liked)")
-            elif item.get("liked") is False:
-                parts.append(f"{title} (didn't like)")
-            else:
-                parts.append(title)
-        lines.append("COMPLETED: " + "; ".join(parts))
+        lines.append("COMPLETED: " + "; ".join(item.get("title", "?") for item in data["completed"]))
     if data["on_hold"]:
         parts = []
         for item in data["on_hold"]:
@@ -360,7 +350,7 @@ def _find_existing_entry(data, title_norm):
     return None, None
 
 
-def _apply_watch_history_update(data, title, status, liked, stopped_at, reason, note):
+def _apply_watch_history_update(data, title, status, stopped_at, reason, note):
     # confirmed live 2026-09-27: completing what's out now and still
     # anticipating the next season are both true at once for the same
     # show -- so a progress update (completed/on_hold/suggested/wishlist) only
@@ -378,11 +368,19 @@ def _apply_watch_history_update(data, title, status, liked, stopped_at, reason, 
 
     # look up the existing entry BEFORE wiping it out below -- a later
     # message that only adds one new detail ("watched season 2") and
-    # doesn't restate everything (LIKED comes back "unknown" since it
-    # wasn't mentioned again) would otherwise silently erase fields the
+    # doesn't restate everything would otherwise silently erase fields the
     # earlier message already recorded (added 2026-10-01, same day as the
     # "remove" fix above -- Eldar asked for exactly this: telling Hermes
-    # an update to an existing record should update it, not blank it out)
+    # an update to an existing record should update it, not blank it out).
+    # NOTE: there used to be a "liked" field carried over here too, but
+    # Eldar clarified (2026-10-01) it never meant sentiment ("loved it") --
+    # it was a leftover marker from the old source-site import meaning
+    # "want to watch/rewatch", and he doesn't want it at all anymore. Gone
+    # from here, from the LLM prompt, and from the display text below.
+    # Pre-existing "liked" keys already in watch-history.yaml are just
+    # inert now -- nothing reads them, and the next time a title with one
+    # gets touched by an update, it drops silently since entry is rebuilt
+    # fresh each time.
     existing, existing_status = _find_existing_entry(data, title_norm)
 
     if status == "anticipated":
@@ -391,12 +389,6 @@ def _apply_watch_history_update(data, title, status, liked, stopped_at, reason, 
         _remove_from_progress_lists(data, title_norm)
 
     entry = {"title": title_norm}
-    # liked carries over regardless of status change -- "watched season 2"
-    # shouldn't erase "liked: true" recorded when season 1 was marked completed
-    if liked is not None:
-        entry["liked"] = liked
-    elif existing and existing.get("liked") is not None:
-        entry["liked"] = existing["liked"]
     # stopped_at/reason are on_hold-specific -- only carry them over on a
     # plain detail update (status unchanged), never across a real
     # transition like on_hold -> completed where they'd just be stale
@@ -430,7 +422,7 @@ def _parse_llm_response(raw):
     # model didn't follow the format (rather than guessing at fields from
     # free text).
     fields = {"answer": None, "update": False, "title": None, "status": None,
-              "liked": None, "stopped_at": None, "reason": None, "note": None}
+              "stopped_at": None, "reason": None, "note": None}
     for line in raw.splitlines():
         line = line.strip()
         if not line or ":" not in line:
@@ -447,8 +439,6 @@ def _parse_llm_response(raw):
             fields["title"] = none_or(value)
         elif key == "STATUS":
             fields["status"] = _normalize_status(value)
-        elif key == "LIKED":
-            fields["liked"] = True if value.lower().startswith("y") else False if value.lower().startswith("n") else None
         elif key == "STOPPED_AT":
             fields["stopped_at"] = none_or(value)
         elif key == "REASON":
@@ -467,7 +457,7 @@ async def _ask_llm(client, question, watch_history_text, recalled):
     #    {"role": "user", "content": "CURRENT WATCH HISTORY:\n...\n\nQUESTION:\nI stopped watching Foundation at season 2"}]}
     # returns e.g. {"choices": [{"message": {"content":
     #   "ANSWER: Got it, marked Foundation as on hold.\nUPDATE: yes\nTITLE: Foundation\n
-    #    STATUS: on_hold\nLIKED: unknown\nSTOPPED_AT: season 2\nREASON: none\nNOTE: none"}}]}
+    #    STATUS: on_hold\nSTOPPED_AT: season 2\nREASON: none\nNOTE: none"}}]}
     user_content = f"CURRENT WATCH HISTORY:\n{watch_history_text}\n\n"
     if recalled:
         user_content += f"RECALLED CONTEXT (from earlier conversations):\n{recalled}\n\n"
@@ -592,7 +582,7 @@ async def ask_movies(question: str, ctx: Context) -> str:
             title_norm = _normalize_title(result["title"])
             found_or_saved = _apply_watch_history_update(
                 watch_history, result["title"], result["status"],
-                result["liked"], result["stopped_at"], result["reason"], result["note"],
+                result["stopped_at"], result["reason"], result["note"],
             )
             if result["status"] == "remove":
                 if found_or_saved:
