@@ -89,6 +89,31 @@ despite TMDB_API_KEY already being wired into the Deployment): live
 TMDB lookups for "is X back yet" style questions about anything on the
 anticipated list.
 
+BILINGUAL TITLES (added 2026-10-02, Eldar's request): every entry gets
+title_en + title_ru instead of a single "title" -- so neither this file
+nor hermes_voice.py's TTS pipeline ever has to translate a title again at
+reply/speech time. Resolved ONCE, the first time a title is ever recorded
+(_resolve_bilingual_title), via a real TMDB lookup by ID, not an LLM
+guessing a translation -- deliberately, because most of Eldar's existing
+Russian titles are distributor localizations with no literal relationship
+to the English title ("1+1" is the Russian release title for
+"Intouchables", nothing to do with the words themselves), and guessing
+from the words is exactly what produced the Man of Steel -> Iron Man /
+Terminator Salvation mistranslation bugs hermes_voice.py hit the same day.
+The local qwen3.8-27b-Expert model only gets asked as a last resort, when
+TMDB has no match at all, and that guess gets tagged "not confirmed via
+TMDB" in the entry's note so it's visible, not silently trusted. The
+~1268 pre-existing entries were backfilled once via migrate_bilingual_titles.py
+(same repo, run-once, see its own top comment) -- this file's own code
+only ever resolves a title the FIRST time it's recorded; a plain status
+update ("watched season 2") always reuses what's already stored, never
+re-resolves or touches it again. The extraction model's own job (TITLE:
+field in SYSTEM_PROMPT) is UNCHANGED by any of this -- still a single
+bare title in whichever language Eldar used, still whichever model
+LITELLM_MODEL/_wants_recommendation already picks; this only adds a
+deterministic Python step after that, same place _apply_watch_history_update
+already did its other post-processing.
+
 API SHAPE -- confirmed 2026-09-27 against aibox's actual running pod
 (GET /openapi.json on honcho-api), not just Honcho's hosted docs, which
 show both v2 and v3 surfaces and didn't fully agree with each other:
@@ -184,9 +209,47 @@ TMDB_URL = "https://api.themoviedb.org/3"
 # stored use the same clean title.
 SEASON_SUFFIX_RE = re.compile(r"\s+(season\s*\d+|s\d+|part\s*\d+)$", re.IGNORECASE)
 
+# BILINGUAL TITLES (added 2026-10-02, Eldar's request): every entry gets
+# title_en + title_ru instead of a single "title", resolved ONCE when a
+# title is first recorded and never touched again after that -- see
+# _resolve_bilingual_title's own comment for why this is TMDB-first, local-
+# model-as-last-resort, not the other way round. The old single "title"
+# field is still read as a fallback below (via _title_matches/_entry_label)
+# for anything that predates the one-time migrate_bilingual_titles.py run,
+# but nothing new is ever written with just "title" again.
+CYRILLIC_RE = re.compile(r"[а-яА-ЯёЁ]")
+# some entries were already hand-written as "Russian Title (English Title)"
+# (mostly the newer TV-show adds) -- split those for free instead of
+# spending a TMDB/model call on a title that's already bilingual
+BILINGUAL_PAREN_RE = re.compile(r"^(.+?)\s*\((.+)\)$")
+
 
 def _normalize_title(title):
     return SEASON_SUFFIX_RE.sub("", title.strip()).strip()
+
+
+def _title_matches(item, title_norm):
+    # compares against EVERY language stored on this entry -- title_norm
+    # might be in Russian or English depending on which one Eldar just said,
+    # and the entry carries both since the bilingual migration (falls back
+    # to the legacy single "title" field for anything not yet migrated)
+    norm_lower = title_norm.lower()
+    for candidate in (item.get("title_en"), item.get("title_ru"), item.get("title")):
+        if candidate and _normalize_title(candidate).lower() == norm_lower:
+            return True
+    return False
+
+
+def _entry_label(item):
+    # "English / Russian" when both are known and differ, so whichever
+    # language a reply is in, the right-language title is already sitting
+    # in the prompt -- this is the whole point of storing both up front
+    # instead of translating at reply time (see hermes_voice.py's
+    # localize_for_speech, which this is meant to make mostly unnecessary)
+    title_en, title_ru = item.get("title_en"), item.get("title_ru")
+    if title_en and title_ru and title_en != title_ru:
+        return f"{title_en} / {title_ru}"
+    return title_en or title_ru or item.get("title", "?")
 
 # The model is told to use one of the exact STATUS_LISTS words, but confirmed
 # live 2026-09-27 (Fringe update) that it sometimes substitutes a natural
@@ -228,7 +291,7 @@ def _normalize_status(value):
 # just splits on lines rather than needing a real JSON parser.
 SYSTEM_PROMPT = """You are the movies specialist inside Eldar's personal assistant setup. You answer questions about films and shows -- recommendations, new releases, what to watch, plot/cast questions -- AND you record changes to Eldar's watch history when he mentions one.
 
-CURRENT WATCH HISTORY is included below -- what Eldar has already completed, put on hold, been suggested, wishlisted himself, or is anticipating. Completed titles marked "(liked)" are ones Eldar specifically told the agent he loved -- treat these as real signal about his taste (genres, franchises, tone, directors/actors he gravitates to) and actively use them when he asks for a recommendation, not just as a label sitting in the list. If several liked titles share something (same franchise, same genre, same kind of tone), it's fair to name that pattern and recommend accordingly.
+CURRENT WATCH HISTORY is included below -- what Eldar has already completed, put on hold, been suggested, wishlisted himself, or is anticipating. Most titles are shown as "English Title / Russian Title" (added 2026-10-02, so neither you nor any other part of this pipeline ever has to translate a title again) -- when you write ANSWER, use whichever side matches the language you're replying in, instead of the other one or a literal translation of your own. Completed titles marked "(liked)" are ones Eldar specifically told the agent he loved -- treat these as real signal about his taste (genres, franchises, tone, directors/actors he gravitates to) and actively use them when he asks for a recommendation, not just as a label sitting in the list. If several liked titles share something (same franchise, same genre, same kind of tone), it's fair to name that pattern and recommend accordingly.
 
 If a block called RECALLED CONTEXT is included, it's what Honcho (this tool's memory layer) remembers from earlier conversations with Eldar about movies -- his stated preferences, what you already recommended, what he said he watched or liked. Use it naturally, instead of asking Eldar to repeat himself.
 
@@ -350,24 +413,24 @@ def _watch_history_text(data):
     if data["completed"]:
         parts = []
         for item in data["completed"]:
-            title = item.get("title", "?")
+            title = _entry_label(item)
             parts.append(f"{title} (liked)" if item.get("liked") is True else title)
         lines.append("COMPLETED: " + "; ".join(parts))
     if data["on_hold"]:
         parts = []
         for item in data["on_hold"]:
-            bit = item.get("title", "?")
+            bit = _entry_label(item)
             extra = [item[k] for k in ("stopped_at", "reason") if item.get(k)]
             if extra:
                 bit += f" ({', '.join(extra)})"
             parts.append(bit)
         lines.append("ON HOLD: " + "; ".join(parts))
     if data["suggested_not_yet_watched"]:
-        lines.append("SUGGESTED: " + "; ".join(item.get("title", "?") for item in data["suggested_not_yet_watched"]))
+        lines.append("SUGGESTED: " + "; ".join(_entry_label(item) for item in data["suggested_not_yet_watched"]))
     if data["wishlist"]:
-        lines.append("WISHLIST: " + "; ".join(item.get("title", "?") for item in data["wishlist"]))
+        lines.append("WISHLIST: " + "; ".join(_entry_label(item) for item in data["wishlist"]))
     if data["anticipated"]:
-        lines.append("ANTICIPATED: " + "; ".join(item.get("title", "?") for item in data["anticipated"]))
+        lines.append("ANTICIPATED: " + "; ".join(_entry_label(item) for item in data["anticipated"]))
     return "\n".join(lines) if lines else "(empty -- nothing recorded yet)"
 
 
@@ -375,11 +438,11 @@ def _remove_from_progress_lists(data, title_norm):
     # the four PROGRESS_LISTS are mutually exclusive -- moving a title to
     # one drops any stale copy from the other three
     for key in PROGRESS_LISTS:
-        data[key] = [item for item in data[key] if _normalize_title(item.get("title", "")).lower() != title_norm.lower()]
+        data[key] = [item for item in data[key] if not _title_matches(item, title_norm)]
 
 
 def _remove_from_anticipated(data, title_norm):
-    data["anticipated"] = [item for item in data["anticipated"] if _normalize_title(item.get("title", "")).lower() != title_norm.lower()]
+    data["anticipated"] = [item for item in data["anticipated"] if not _title_matches(item, title_norm)]
 
 
 def _remove_title_everywhere(data, title_norm):
@@ -390,7 +453,7 @@ def _remove_title_everywhere(data, title_norm):
     found = False
     for key in STATUS_LISTS:
         before = len(data[key])
-        data[key] = [item for item in data[key] if _normalize_title(item.get("title", "")).lower() != title_norm.lower()]
+        data[key] = [item for item in data[key] if not _title_matches(item, title_norm)]
         if len(data[key]) != before:
             found = True
     return found
@@ -402,12 +465,102 @@ def _find_existing_entry(data, title_norm):
     # list it was found in, or (None, None) if it's nowhere yet
     for key in STATUS_LISTS:
         for item in data[key]:
-            if _normalize_title(item.get("title", "")).lower() == title_norm.lower():
+            if _title_matches(item, title_norm):
                 return item, key
     return None, None
 
 
-def _apply_watch_history_update(data, title, status, liked, stopped_at, reason, note):
+async def _tmdb_localized_title(client, tmdb_id, media_type, language):
+    # GET https://api.themoviedb.org/3/movie/550?api_key=...&language=ru-RU
+    # returns e.g. {"title": "Бойцовский клуб", ...} -- TMDB falls back to
+    # the original title on its own when no translation is registered for
+    # that language, which just means title_ru below could come back equal
+    # to title_en -- not wrong, just not actually bilingual for that one.
+    path = "tv" if media_type == "tv" else "movie"
+    resp = await client.get(f"{TMDB_URL}/{path}/{tmdb_id}", params={"api_key": TMDB_API_KEY, "language": language}, timeout=15.0)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("title") or data.get("name")
+
+
+async def _translate_title_via_local_model(client, title, target_language):
+    # LAST RESORT ONLY -- called when TMDB has no match at all for a brand
+    # new title (see _resolve_bilingual_title). Direct call to the resident
+    # qwen3.8-27b-Expert, not litellm's "auto" classifier -- same reasoning
+    # as hermes_voice.py's LOCALIZE_MODEL: this is a one-line lookup, not a
+    # question, so skip the classifier round trip and force thinking off.
+    # Real risk, same one that caused the Man of Steel -> Iron Man bug: a
+    # model "translating" a title it doesn't actually know produces a
+    # confident wrong answer, not an error -- that's why the caller always
+    # tags whatever comes back here as unconfirmed rather than trusting it.
+    if not LITELLM_API_KEY:
+        return None
+    prompt = (f'Give the official {target_language}-language title for this movie or TV show: "{title}". '
+              f"Reply with ONLY the title, nothing else. If you don't actually know the official "
+              f"{target_language} title, reply with exactly: UNKNOWN")
+    payload = {
+        "model": "qwen3.8-27b-Expert",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    try:
+        resp = await client.post(
+            f"{LITELLM_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
+            json=payload,
+            timeout=20.0,
+        )
+        resp.raise_for_status()
+        result = resp.json()["choices"][0]["message"]["content"].strip()
+        return None if not result or result.upper() == "UNKNOWN" else result
+    except Exception as exc:  # noqa: BLE001 -- degrade to "couldn't translate", don't fail the save
+        logger.warning("local-model title translation failed for %r (%s): %s", title, target_language, exc)
+        return None
+
+
+async def _resolve_bilingual_title(client, title):
+    # called ONCE per title, only the first time it's ever recorded (see
+    # _apply_watch_history_update) -- returns (title_en, title_ru,
+    # confirmed). confirmed=False means at least one side came from the
+    # local-model fallback above rather than a real TMDB lookup, so the
+    # caller tags the saved entry for Eldar to spot-check later instead of
+    # silently trusting a guess.
+    already_split = BILINGUAL_PAREN_RE.match(title)
+    if already_split:
+        # the hand-written convention elsewhere in this file is
+        # "Russian (English)" -- group 1 is the Russian half
+        return already_split.group(2).strip(), already_split.group(1).strip(), True
+
+    try:
+        found = await _tmdb_search(client, title)
+    except Exception as exc:  # noqa: BLE001 -- fall through to the local-model path below
+        logger.warning("TMDB search failed for %r during bilingual resolve: %s", title, exc)
+        found = None
+
+    title_en = title_ru = None
+    if found:
+        title_en = found.get("title") or found.get("name")
+        try:
+            title_ru = await _tmdb_localized_title(client, found["id"], found.get("media_type", "movie"), "ru-RU")
+        except Exception as exc:  # noqa: BLE001 -- same, fall through
+            logger.warning("TMDB ru-RU detail lookup failed for %r: %s", title, exc)
+    if title_en and title_ru:
+        return title_en, title_ru, True
+
+    # TMDB came up short -- whichever language Eldar actually said is
+    # already known for certain; only the OTHER side needs a guess
+    is_cyrillic = bool(CYRILLIC_RE.search(title))
+    known_en = title_en or (title if not is_cyrillic else None)
+    known_ru = title_ru or (title if is_cyrillic else None)
+    if not known_en:
+        known_en = await _translate_title_via_local_model(client, title, "English") or title
+    if not known_ru:
+        known_ru = await _translate_title_via_local_model(client, title, "Russian") or title
+    return known_en, known_ru, False
+
+
+async def _apply_watch_history_update(client, data, title, status, liked, stopped_at, reason, note):
     # confirmed live 2026-09-27: completing what's out now and still
     # anticipating the next season are both true at once for the same
     # show -- so a progress update (completed/on_hold/suggested/wishlist) only
@@ -436,7 +589,26 @@ def _apply_watch_history_update(data, title, status, liked, stopped_at, reason, 
     else:
         _remove_from_progress_lists(data, title_norm)
 
-    entry = {"title": title_norm}
+    # bilingual resolve happens ONCE, only the first time this title is ever
+    # recorded -- an existing entry already has both languages settled (by a
+    # real TMDB lookup, or a prior guess), so a plain status update ("watched
+    # season 2") never re-resolves or overwrites them, it just carries them
+    # forward. See _resolve_bilingual_title's own comment for why this is
+    # TMDB-first, local-model-as-last-resort.
+    unconfirmed_tag = None
+    if existing and existing.get("title_en") and existing.get("title_ru"):
+        title_en, title_ru = existing["title_en"], existing["title_ru"]
+    else:
+        title_en, title_ru, confirmed = await _resolve_bilingual_title(client, title_norm)
+        if not confirmed:
+            # could mean a local-model guess was used, or that TMDB AND the
+            # local model both came up empty (network/key down) and the one
+            # known-language title just got copied into both fields --
+            # either way it's not a real confirmed translation, so flag it
+            logger.info("bilingual title for %r not confirmed via TMDB -- flagged for Eldar to double check", title_norm)
+            unconfirmed_tag = "title auto-translated, not confirmed via TMDB -- double check"
+
+    entry = {"title_en": title_en, "title_ru": title_ru}
     # liked carries over regardless of status change -- "watched season 2"
     # shouldn't erase "liked: true" recorded when season 1 was marked completed
     if liked is not None:
@@ -456,13 +628,16 @@ def _apply_watch_history_update(data, title, status, liked, stopped_at, reason, 
         entry["reason"] = existing["reason"]
     # note is general-purpose -- append the new detail onto the old one
     # instead of overwriting, so "watched season 2" on top of an earlier
-    # "slow start" note keeps both instead of losing the first
-    if note and existing and existing.get("note"):
-        entry["note"] = f"{existing['note']}; {note}"
-    elif note:
-        entry["note"] = note
-    elif existing and existing.get("note"):
-        entry["note"] = existing["note"]
+    # "slow start" note keeps both instead of losing the first. The
+    # unconfirmed-translation tag (set above, brand-new titles only) is
+    # just one more thing to append onto the same note, same pattern.
+    note_parts = [part for part in (
+        existing.get("note") if existing and existing.get("note") else None,
+        note,
+        unconfirmed_tag,
+    ) if part]
+    if note_parts:
+        entry["note"] = "; ".join(note_parts)
 
     data[status].append(entry)
     _save_watch_history(data)
@@ -597,9 +772,9 @@ async def _check_one_anticipated(client, entry):
     #   {"title": "Silo", "tmdb_id": 91363, "media_type": "tv"}
     # -- mutates entry in place to cache tmdb_id/media_type on first lookup,
     # so later checks don't need to re-search TMDB by title every time.
-    title = entry.get("title", "?")
+    title = _entry_label(entry)
     if not entry.get("tmdb_id"):
-        found = await _tmdb_search(client, title)
+        found = await _tmdb_search(client, entry.get("title_en") or entry.get("title", "?"))
         if not found:
             return f"{title}: not found on TMDB"
         entry["tmdb_id"] = found["id"]
@@ -653,8 +828,8 @@ async def ask_movies(question: str, ctx: Context) -> str:
         answer = result["answer"]
         if result["update"] and result["title"] and result["status"]:
             title_norm = _normalize_title(result["title"])
-            found_or_saved = _apply_watch_history_update(
-                watch_history, result["title"], result["status"],
+            found_or_saved = await _apply_watch_history_update(
+                client, watch_history, result["title"], result["status"],
                 result["liked"], result["stopped_at"], result["reason"], result["note"],
             )
             if result["status"] == "remove":
@@ -701,7 +876,7 @@ async def check_anticipated(title: str = None, ctx: Context = None) -> str:
     async with httpx.AsyncClient() as client:
         if title:
             title_norm = _normalize_title(title)
-            match = next((e for e in anticipated if _normalize_title(e.get("title", "")).lower() == title_norm.lower()), None)
+            match = next((e for e in anticipated if _title_matches(e, title_norm)), None)
             if match:
                 before = dict(match)
                 line = await _check_one_anticipated(client, match)
