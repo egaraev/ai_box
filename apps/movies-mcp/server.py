@@ -114,23 +114,47 @@ logger = logging.getLogger("movies-mcp")
 # same litellm-secret Secret.
 LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm.ai-models.svc.cluster.local:4000/v1")
 LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "")
-# CHANGED 2026-10-02 (was "auto"): "auto" rode LiteLLM's own busy/cloud-
-# fallback router so this call wouldn't race an in-flight ComfyUI job for
-# GPU -- but that reasoning only applies to the 5070 Ti models ComfyUI
-# actually shares with llama-swap. qwen3-1.7b-gpu runs pinned resident on
-# the 3060 instead (see llama-swap-configmap.yaml), a card ComfyUI is
-# never even given (NVIDIA_VISIBLE_DEVICES=1 only, in its own deployment)
-# -- so there's no contention to protect against here, and naming it
+# CHANGED 2026-10-02 (was "auto" for every call): naming qwen3-1.7b-gpu
 # directly (same pattern gmail_sync.py/telegram_sync.py already use for
-# THEIR internal calls) skips litellm.yaml's "auto" classifier entirely.
-# That classifier was landing this call on "reasoning" (thinking ON,
-# qwen3.8-27b-Expert) since a watch-history dump + question reads as
-# substantial, not casual -- costing ~20s of needless chain-of-thought on
-# what's really a simple structured-extraction task (temperature 0.3,
-# max_tokens 500 below, no actual reasoning needed). Found via real
-# honcho-api/movies-mcp log timing while debugging the voice assistant
-# running much slower than Telegram specifically on movie questions.
+# THEIR internal calls) skips litellm.yaml's "auto" classifier, which was
+# landing this call on "reasoning" (thinking ON, qwen3.8-27b-Expert) just
+# because a watch-history dump + question reads as substantial -- ~20s of
+# needless chain-of-thought for what's usually a simple structured-
+# extraction task (temperature 0.3, max_tokens 500 below). Safe to bypass
+# "auto" here specifically because qwen3-1.7b-gpu runs pinned resident on
+# the 3060 (see llama-swap-configmap.yaml), a card ComfyUI is never even
+# given (NVIDIA_VISIBLE_DEVICES=1 only, in its own deployment) -- the
+# busy/cloud-fallback protection "auto" provides only matters for the
+# 5070 Ti models ComfyUI actually shares with llama-swap.
+#
+# CONFIRMED LIVE the same day this isn't free, though: asked "what do you
+# recommend similar to Spider-Man" and qwen3-1.7b-gpu just pattern-matched
+# more Spider-Man entries out of the watch history instead of reasoning
+# about genre/vibe -- Hermes caught the bad tool answer and fell back to
+# its own general knowledge to actually answer. So recommendation-style
+# questions ("what should I watch", "similar to X") still need the bigger
+# model's real reasoning -- see _wants_recommendation() below, which
+# sends just those through "auto" instead. Lookups/updates ("have I
+# watched X", status changes) are plain text-matching against data
+# that's already in the prompt -- the small model handles those fine and
+# stays on the fast direct path.
 LITELLM_MODEL = "qwen3-1.7b-gpu"
+
+# A false positive here just means an ordinary lookup pays for the slower/
+# pricier "auto" path instead of the fast one -- same safe-failure-
+# direction trade-off litellm.yaml's own router hook accepts for its
+# reasoning triggers, so the list below is deliberately a bit generous
+# rather than tightly scoped.
+RECOMMENDATION_TRIGGERS = (
+    "recommend", "suggest", "similar to", "anything good", "what should i watch",
+    "what to watch", "something to watch", "посоветуй", "порекомендуй", "похож",
+    "что посмотреть",
+)
+
+
+def _wants_recommendation(question):
+    normalized = question.lower()
+    return any(trigger in normalized for trigger in RECOMMENDATION_TRIGGERS)
 
 HONCHO_URL = os.environ.get("HONCHO_URL", "http://honcho-api.ai-memory.svc.cluster.local:8000")
 HONCHO_API_KEY = os.environ.get("HONCHO_API_KEY", "")
@@ -484,8 +508,9 @@ def _parse_llm_response(raw):
 
 
 async def _ask_llm(client, question, watch_history_text, recalled):
-    # sends e.g.:
-    #   {"model": "auto", "messages": [{"role": "system", ...},
+    # sends e.g. (model is "qwen3-1.7b-gpu" for a lookup/update, "auto" for a
+    # recommendation-style question -- see RECOMMENDATION_TRIGGERS above):
+    #   {"model": "qwen3-1.7b-gpu", "messages": [{"role": "system", ...},
     #    {"role": "user", "content": "CURRENT WATCH HISTORY:\n...\n\nQUESTION:\nI stopped watching Foundation at season 2"}]}
     # returns e.g. {"choices": [{"message": {"content":
     #   "ANSWER: Got it, marked Foundation as on hold.\nUPDATE: yes\nTITLE: Foundation\n
@@ -494,23 +519,32 @@ async def _ask_llm(client, question, watch_history_text, recalled):
     if recalled:
         user_content += f"RECALLED CONTEXT (from earlier conversations):\n{recalled}\n\n"
     user_content += f"QUESTION:\n{question}"
+    # recommendation-style questions need the 27B model's real reasoning (see
+    # RECOMMENDATION_TRIGGERS comment above) -- everything else stays on the
+    # fast direct-to-3060 path
+    model = "auto" if _wants_recommendation(question) else LITELLM_MODEL
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 500,
+    }
+    if model != "auto":
+        # explicit, not just relying on qwen3-1.7b-gpu's own launch-time
+        # default -- this is a structured-extraction task, not one that
+        # benefits from a reasoning pass, and the whole point of calling
+        # this model by name is speed. Left unset for "auto" -- litellm.yaml's
+        # own router hook decides thinking on/off for that path, and a
+        # recommendation question is exactly the case it should land on
+        # "reasoning" (thinking ON).
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     resp = await client.post(
         f"{LITELLM_URL}/chat/completions",
         headers={"Authorization": f"Bearer {LITELLM_API_KEY}"} if LITELLM_API_KEY else {},
-        json={
-            "model": LITELLM_MODEL,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            "temperature": 0.3,
-            "max_tokens": 500,
-            # explicit, not just relying on qwen3-1.7b-gpu's own launch-time
-            # default -- this is a structured-extraction task, not one that
-            # benefits from a reasoning pass, and the whole point of calling
-            # this model by name (see LITELLM_MODEL comment above) is speed
-            "chat_template_kwargs": {"enable_thinking": False},
-        },
+        json=payload,
         timeout=90.0,
     )
     resp.raise_for_status()
