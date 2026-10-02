@@ -519,18 +519,42 @@ async def _translate_title_via_local_model(client, title, target_language):
         return None
 
 
+def _looks_cyrillic(text):
+    return bool(CYRILLIC_RE.search(text))
+
+
 async def _resolve_bilingual_title(client, title):
     # called ONCE per title, only the first time it's ever recorded (see
     # _apply_watch_history_update) -- returns (title_en, title_ru,
-    # confirmed). confirmed=False means at least one side came from the
-    # local-model fallback above rather than a real TMDB lookup, so the
-    # caller tags the saved entry for Eldar to spot-check later instead of
-    # silently trusting a guess.
+    # confirmed).
+    #
+    # FIXED 2026-10-02, same day, after a corrective pass over the real
+    # file turned up 40 entries silently miscounted as "resolved" by the
+    # first version of this function: it returned confirmed=True as long
+    # as BOTH title_en and title_ru came back truthy, without checking
+    # they were actually different. _tmdb_localized_title's own comment
+    # already warned about this -- TMDB falls back to the original title
+    # (no error) when no translation is registered for that language --
+    # but nothing downstream acted on the warning. Real examples caught:
+    # "2012", "65", "Адреналин", "Изгой", "Красавица и чудовище" all ended
+    # up with title_en == title_ru and no flag at all.
+    #
+    # Fix: the language Eldar/the import ALREADY gave us (title itself) is
+    # trusted and kept EXACTLY as given -- TMDB is only ever asked to fill
+    # in the missing OTHER side, never to replace the known one. Whatever
+    # TMDB hands back for that other side gets checked for actually being
+    # in the right script AND actually different from the input -- an
+    # identical echo or a wrong-script result means TMDB didn't really
+    # have a translation, so it's rejected rather than accepted at face
+    # value, same as a plain exception would be.
     already_split = BILINGUAL_PAREN_RE.match(title)
     if already_split:
         # the hand-written convention elsewhere in this file is
         # "Russian (English)" -- group 1 is the Russian half
         return already_split.group(2).strip(), already_split.group(1).strip(), True
+
+    is_cyrillic = _looks_cyrillic(title)
+    target_language = "en-US" if is_cyrillic else "ru-RU"
 
     try:
         found = await _tmdb_search(client, title)
@@ -538,26 +562,27 @@ async def _resolve_bilingual_title(client, title):
         logger.warning("TMDB search failed for %r during bilingual resolve: %s", title, exc)
         found = None
 
-    title_en = title_ru = None
+    other = None
     if found:
-        title_en = found.get("title") or found.get("name")
         try:
-            title_ru = await _tmdb_localized_title(client, found["id"], found.get("media_type", "movie"), "ru-RU")
-        except Exception as exc:  # noqa: BLE001 -- same, fall through
-            logger.warning("TMDB ru-RU detail lookup failed for %r: %s", title, exc)
-    if title_en and title_ru:
-        return title_en, title_ru, True
+            candidate = await _tmdb_localized_title(client, found["id"], found.get("media_type", "movie"), target_language)
+        except Exception as exc:  # noqa: BLE001 -- fall through to the local-model path below
+            logger.warning("TMDB %s detail lookup failed for %r: %s", target_language, title, exc)
+            candidate = None
+        if candidate and candidate != title and _looks_cyrillic(candidate) == (target_language == "ru-RU"):
+            other = candidate
 
-    # TMDB came up short -- whichever language Eldar actually said is
-    # already known for certain; only the OTHER side needs a guess
-    is_cyrillic = bool(CYRILLIC_RE.search(title))
-    known_en = title_en or (title if not is_cyrillic else None)
-    known_ru = title_ru or (title if is_cyrillic else None)
-    if not known_en:
-        known_en = await _translate_title_via_local_model(client, title, "English") or title
-    if not known_ru:
-        known_ru = await _translate_title_via_local_model(client, title, "Russian") or title
-    return known_en, known_ru, False
+    if other:
+        return (other, title, True) if is_cyrillic else (title, other, True)
+
+    # TMDB had nothing usable for the missing side -- last resort, always
+    # flagged unconfirmed since it's a guess, not a verified lookup. Some
+    # titles (a bare year like "2012", a number like "65") genuinely have
+    # no distinct translation either way -- guessed falls back to the
+    # known title itself in that case, which is honest, not wrong.
+    guessed = await _translate_title_via_local_model(client, title, "English" if is_cyrillic else "Russian")
+    guessed = guessed if guessed and guessed != title else title
+    return (guessed, title, False) if is_cyrillic else (title, guessed, False)
 
 
 async def _apply_watch_history_update(client, data, title, status, liked, stopped_at, reason, note):
