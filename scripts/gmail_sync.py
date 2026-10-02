@@ -578,6 +578,57 @@ def normalize_movie_title(title):
     return MOVIE_SEASON_SUFFIX_RE.sub("", title.strip()).strip()
 
 
+# BILINGUAL TITLES (2026-10-02, mirrors server.py's own fields/helpers of
+# the same name -- see that file's top comment, "BILINGUAL TITLES", for
+# the full history of why this is deliberately simple: title_en/title_ru
+# instead of a single "title", and this script NEVER tries to translate
+# or auto-resolve the missing side itself, only ever records whichever
+# language a candidate actually arrived in).
+MOVIE_CYRILLIC_RE = re.compile(r"[а-яА-ЯёЁ]")
+# a candidate already written as "Russian (English)" (Eldar sometimes
+# puts both in one email) -- splitting that is reading what's already
+# there, not translating anything, so it's always safe to do.
+MOVIE_BILINGUAL_PAREN_RE = re.compile(r"^(.+?)\s*\((.+)\)$")
+
+
+def movie_looks_cyrillic(text):
+    return bool(MOVIE_CYRILLIC_RE.search(text))
+
+
+def movie_title_matches(item, title_norm):
+    # mirrors server.py's own _title_matches -- compares against
+    # whichever of title_en/title_ru this entry has
+    norm_lower = title_norm.lower()
+    for candidate in (item.get("title_en"), item.get("title_ru")):
+        if candidate and normalize_movie_title(candidate).lower() == norm_lower:
+            return True
+    return False
+
+
+def store_new_movie_title(entry, title_norm):
+    # mirrors server.py's own _store_new_title -- see that function's
+    # comment for why the other language is deliberately left blank
+    already_split = MOVIE_BILINGUAL_PAREN_RE.match(title_norm)
+    if already_split:
+        ru_part, en_part = already_split.group(1).strip(), already_split.group(2).strip()
+        if movie_looks_cyrillic(ru_part) and not movie_looks_cyrillic(en_part):
+            entry["title_ru"] = ru_part
+            entry["title_en"] = en_part
+            return
+    if movie_looks_cyrillic(title_norm):
+        entry["title_ru"] = title_norm
+    else:
+        entry["title_en"] = title_norm
+
+
+def movie_entry_label(item):
+    # mirrors server.py's own _entry_label
+    title_en, title_ru = item.get("title_en"), item.get("title_ru")
+    if title_en and title_ru and title_en != title_ru:
+        return f"{title_en} / {title_ru}"
+    return title_en or title_ru or "?"
+
+
 def load_movie_watch_history():
     try:
         with open(MOVIE_WATCH_HISTORY_PATH) as f:
@@ -609,7 +660,7 @@ def movie_watch_history_text(data):
     if data["completed"]:
         parts = []
         for item in data["completed"]:
-            title = item.get("title", "?")
+            title = movie_entry_label(item)
             if item.get("liked") is True:
                 parts.append(f"{title} (liked)")
             elif item.get("liked") is False:
@@ -620,25 +671,24 @@ def movie_watch_history_text(data):
     if data["on_hold"]:
         parts = []
         for item in data["on_hold"]:
-            bit = item.get("title", "?")
+            bit = movie_entry_label(item)
             extra = [item[k] for k in ("stopped_at", "reason") if item.get(k)]
             if extra:
                 bit += f" ({', '.join(extra)})"
             parts.append(bit)
         lines.append("ON HOLD: " + "; ".join(parts))
     if data["suggested_not_yet_watched"]:
-        lines.append("SUGGESTED: " + "; ".join(item.get("title", "?") for item in data["suggested_not_yet_watched"]))
+        lines.append("SUGGESTED: " + "; ".join(movie_entry_label(item) for item in data["suggested_not_yet_watched"]))
     if data["wishlist"]:
-        lines.append("WISHLIST: " + "; ".join(item.get("title", "?") for item in data["wishlist"]))
+        lines.append("WISHLIST: " + "; ".join(movie_entry_label(item) for item in data["wishlist"]))
     if data["anticipated"]:
-        lines.append("ANTICIPATED: " + "; ".join(item.get("title", "?") for item in data["anticipated"]))
+        lines.append("ANTICIPATED: " + "; ".join(movie_entry_label(item) for item in data["anticipated"]))
     return "\n".join(lines) if lines else "(empty -- nothing recorded yet)"
 
 
 def remove_from_movie_progress_lists(data, title_norm):
     for key in MOVIE_PROGRESS_LISTS:
-        data[key] = [item for item in data[key]
-                     if normalize_movie_title(item.get("title", "")).lower() != title_norm.lower()]
+        data[key] = [item for item in data[key] if not movie_title_matches(item, title_norm)]
 
 
 # the actual dedup-reasoning call -- see the MOVIE-topic header comment for
@@ -752,7 +802,7 @@ def existing_youtube_video_ids(watch_history):
         for entry in watch_history.get(list_name, []):
             video_id = extract_youtube_video_id(extract_url_from_text(entry.get("note", "") or ""))
             if video_id:
-                found[video_id] = entry.get("title", "?")
+                found[video_id] = movie_entry_label(entry)
     return found
 
 
@@ -800,7 +850,15 @@ def _handle_movie_candidate(candidate, source, dry_run, link=None):
     if link:
         note += f" -- {link}"
     remove_from_movie_progress_lists(watch_history, title_norm)
-    watch_history["suggested_not_yet_watched"].append({"title": title_norm, "note": note})
+    # BILINGUAL TITLES -- this candidate is always genuinely NEW at this
+    # point (decide_movie_status already said so above), so there's no
+    # existing entry to merge language fields from -- just record
+    # whichever language it actually arrived in, same as server.py's own
+    # _store_new_title, and leave the other side blank rather than guess it.
+    new_entry = {}
+    store_new_movie_title(new_entry, title_norm)
+    new_entry["note"] = note
+    watch_history["suggested_not_yet_watched"].append(new_entry)
     save_movie_watch_history(watch_history)
     print(f"    ✓ added to suggested_not_yet_watched: {title_norm}  ({decision['reason']})")
     return True
