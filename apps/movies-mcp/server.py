@@ -114,10 +114,23 @@ logger = logging.getLogger("movies-mcp")
 # same litellm-secret Secret.
 LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm.ai-models.svc.cluster.local:4000/v1")
 LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "")
-# "auto" on purpose, not a specific local model name -- rides LiteLLM's
-# own busy/cloud-fallback router instead of racing an in-flight ComfyUI
-# job for the GPU the way naming a specific llama-swap model would.
-LITELLM_MODEL = "auto"
+# CHANGED 2026-10-02 (was "auto"): "auto" rode LiteLLM's own busy/cloud-
+# fallback router so this call wouldn't race an in-flight ComfyUI job for
+# GPU -- but that reasoning only applies to the 5070 Ti models ComfyUI
+# actually shares with llama-swap. qwen3-1.7b-gpu runs pinned resident on
+# the 3060 instead (see llama-swap-configmap.yaml), a card ComfyUI is
+# never even given (NVIDIA_VISIBLE_DEVICES=1 only, in its own deployment)
+# -- so there's no contention to protect against here, and naming it
+# directly (same pattern gmail_sync.py/telegram_sync.py already use for
+# THEIR internal calls) skips litellm.yaml's "auto" classifier entirely.
+# That classifier was landing this call on "reasoning" (thinking ON,
+# qwen3.8-27b-Expert) since a watch-history dump + question reads as
+# substantial, not casual -- costing ~20s of needless chain-of-thought on
+# what's really a simple structured-extraction task (temperature 0.3,
+# max_tokens 500 below, no actual reasoning needed). Found via real
+# honcho-api/movies-mcp log timing while debugging the voice assistant
+# running much slower than Telegram specifically on movie questions.
+LITELLM_MODEL = "qwen3-1.7b-gpu"
 
 HONCHO_URL = os.environ.get("HONCHO_URL", "http://honcho-api.ai-memory.svc.cluster.local:8000")
 HONCHO_API_KEY = os.environ.get("HONCHO_API_KEY", "")
@@ -492,6 +505,11 @@ async def _ask_llm(client, question, watch_history_text, recalled):
             ],
             "temperature": 0.3,
             "max_tokens": 500,
+            # explicit, not just relying on qwen3-1.7b-gpu's own launch-time
+            # default -- this is a structured-extraction task, not one that
+            # benefits from a reasoning pass, and the whole point of calling
+            # this model by name (see LITELLM_MODEL comment above) is speed
+            "chat_template_kwargs": {"enable_thinking": False},
         },
         timeout=90.0,
     )
