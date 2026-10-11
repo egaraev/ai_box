@@ -65,6 +65,24 @@ music-library.yaml and confirms with a "(added: ...)" sentinel in the
 reply -- same convention movies-mcp's ask_movies uses for its "(saved:
 ...)" confirmation, so Hermes has one reliable substring to check rather
 than trusting its own paraphrase of what happened.
+
+list_songs_by_artist (added 2026-10-11, real bug found testing live over
+Telegram): Eldar asked ask_music "what else from that band do I have"
+right after a successful single-song check. ask_music has no way to
+answer that -- it only ever checks ONE specific title -- so it came back
+empty, and Hermes filled the gap by GUESSING "it only knows Frozen from
+Within Temptation" and stating that guess as if it were a fact about the
+library. That's backwards: the library almost certainly has other
+Within Temptation songs, ask_music just was never asked a question it
+can answer. Rather than just telling Hermes to disclaim this case
+(SOUL.md could say "I can't list by artist"), Eldar chose to actually
+build the missing capability as its own tool, so "what else do I have
+from X" gets a real, correct answer instead of either a guess or a
+shrug. Deliberately NOT routed through the 27B fallback like ask_music --
+listing is a much lower-stakes operation than the duplicate-avoidance
+decision ask_music makes (getting one extra/missing song in a list isn't
+the same risk as silently skipping or double-filing a song), so a plain
+normalized-equality-then-substring match is enough.
 """
 import logging
 import os
@@ -360,6 +378,25 @@ def _find_exact(songs, artist, title):
     return next((s for s in songs if match_key(s.get("artist"), s.get("title")) == key), None)
 
 
+def _find_by_artist(songs, artist):
+    # exact normalized-artist match first (handles case/accent/spacing
+    # differences); if that finds nothing, fall back to a loose
+    # containment check either direction, so "Weeknd" still finds "The
+    # Weeknd" and vice versa. No 27B fallback here -- see this file's top
+    # comment for why a listing tool doesn't need it.
+    norm_query = normalize_for_matching(artist)
+    if not norm_query:
+        return []
+    exact = [s for s in songs if normalize_for_matching(s.get("artist") or "") == norm_query]
+    if exact:
+        return exact
+    return [
+        s for s in songs
+        if norm_query in normalize_for_matching(s.get("artist") or "")
+        or normalize_for_matching(s.get("artist") or "") in norm_query
+    ]
+
+
 @mcp.tool()
 async def ask_music(question: str, ctx: Context) -> str:
     """Ask whether a song is already in your MP3 collection, or tell it you added one -- one tool for both.
@@ -444,6 +481,31 @@ async def ask_music(question: str, ctx: Context) -> str:
 
         await _honcho_save_turn(client, question, answer)
         return answer
+
+
+@mcp.tool()
+async def list_songs_by_artist(artist: str, ctx: Context = None) -> str:
+    """List every song by a given artist/band already in your MP3 collection.
+
+    Use this for "what else do I have from X" / "what <artist> songs do I
+    have" -- NOT for checking one specific song, that's ask_music's job.
+
+    Args:
+        artist: The artist or band name, in plain language.
+
+    Returns:
+        The matching songs, one per line, or a plain statement that none were found.
+    """
+    if not artist or not artist.strip():
+        raise ValueError("artist must not be empty")
+
+    library = _load_library()
+    matches = _find_by_artist(library["songs"], artist)
+    if not matches:
+        return f"I don't see any songs by {artist} in your library."
+
+    lines = "\n".join(f"- {_song_label(s)}" for s in sorted(matches, key=lambda s: s.get("title") or ""))
+    return f"You have {len(matches)} song(s) by {artist}:\n{lines}"
 
 
 if __name__ == "__main__":

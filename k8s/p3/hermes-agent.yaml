@@ -277,19 +277,26 @@ data:
     # back to a slower/cloud model.
     # music (added 2026-10-11, second of the "specialist agent" family --
     # see apps/music-mcp/server.py's top-of-file comment for the full
-    # design). ONE tool: ask_music, for both "do I have this song" lookups
+    # design). TWO tools: ask_music, for both "do I have this song" lookups
     # AND recording a newly-added one -- same single-tool-decides-the-intent
     # shape as ask_movies, so you never need to classify the message
-    # yourself. Fast exact-match first, a real reasoning-model judgment
-    # (never a raw string-similarity score) only when nothing exact turns
-    # up. See SOUL.md's "# Music" section for the save-confirmation rule.
-    # Same lightweight footprint as movies-mcp -- no GPU/PVC, Honcho for
-    # conversation memory (same deployment, workspace "aibox-specialists",
-    # its own peers/session so the two specialists' histories never mix),
-    # a small hostPath file for the structured song list. 150s gives a bit
-    # more headroom than movies-mcp's 120s since the reasoning-fallback
-    # call here sends the WHOLE ~1257-song library as text on every
-    # ambiguous lookup, a bigger prompt than movies-mcp's own fallback.
+    # yourself -- and list_songs_by_artist, for "what else do I have from
+    # band X" (added same day, real bug found on first live test: Jarvis
+    # asked ask_music that question, got nothing back since ask_music only
+    # ever checks ONE title, and filled the gap by guessing "only Frozen"
+    # and stating it as fact -- see SOUL.md's "# Music" section for the
+    # actual rule now). ask_music's exact-match is fast and free, a real
+    # reasoning-model judgment (never a raw string-similarity score) only
+    # when nothing exact turns up; list_songs_by_artist is plain
+    # normalized-match, no LLM call, since listing carries none of
+    # ask_music's duplicate-avoidance risk. Same lightweight footprint as
+    # movies-mcp -- no GPU/PVC, Honcho for conversation memory (same
+    # deployment, workspace "aibox-specialists", its own peers/session so
+    # the two specialists' histories never mix), a small hostPath file for
+    # the structured song list. 150s gives a bit more headroom than
+    # movies-mcp's 120s since ask_music's reasoning-fallback call sends the
+    # WHOLE ~1257-song library as text on every ambiguous lookup, a bigger
+    # prompt than movies-mcp's own fallback.
     mcp_servers:
       media-gen:
         url: "http://media-gen-mcp.ai-mcp.svc.cluster.local:8000/mcp"
@@ -527,19 +534,32 @@ data:
       before telling Eldar it failed.
 
     # Music
-    - ONE tool lives on the music MCP server: ask_music, for both "do I
+    - TWO tools live on the music MCP server: ask_music, for both "do I
       have this song" lookups (often right after Shazam'ing something in
-      the car) AND recording a newly-added one. Just call it with whatever
-      Eldar said, in his own words -- the tool itself decides whether it's
-      a check or an add and saves it if so. You don't need to classify the
-      message yourself.
-    - The ONLY reliable signal that a song was actually added is the
-      literal substring "(added: Artist - Title)" appearing in ask_music's
-      returned text. If that substring is NOT in the response, nothing was
-      saved -- say so plainly instead of claiming it worked. Never report a
-      song as added from your own reasoning or because the answer sounded
-      like confirmation -- only the "(added: ...)" substring counts.
-    - If the tool comes back asking Eldar to confirm a possible match,
+      the car) AND recording a newly-added one, and list_songs_by_artist,
+      for "what else do I have from band X" / "what <artist> songs do I
+      have." Use ask_music for a specific song, list_songs_by_artist for
+      browsing an artist's catalog -- don't call ask_music for the second
+      kind of question, it can't answer it.
+    - CORRECTED 2026-10-11 (real bug caught on first live test): asked
+      "what else from that band do I have" right after a successful
+      ask_music check, an earlier version of this guidance had nothing to
+      say, and the response was Jarvis calling ask_music anyway, getting
+      nothing useful back, and then STATING A GUESS AS FACT ("it only
+      knows Frozen from Within Temptation in your library") -- which was
+      false, not a real answer about the library's contents. Never do
+      that: if a question needs list_songs_by_artist, call that tool, not
+      ask_music. If a tool call comes back empty or unhelpful, say so
+      plainly rather than inventing a conclusion about what the data must
+      contain.
+    - For ask_music: the ONLY reliable signal that a song was actually
+      added is the literal substring "(added: Artist - Title)" appearing
+      in its returned text. If that substring is NOT in the response,
+      nothing was saved -- say so plainly instead of claiming it worked.
+      Never report a song as added from your own reasoning or because the
+      answer sounded like confirmation -- only the "(added: ...)"
+      substring counts.
+    - If ask_music comes back asking Eldar to confirm a possible match,
       relay that question as-is and wait for his answer before calling the
       tool again -- don't guess which way to resolve it yourself.
     - If asked "did you add that," don't guess or repeat an earlier claim --
