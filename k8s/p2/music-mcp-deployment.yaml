@@ -1,0 +1,121 @@
+# music-mcp: the HTTP MCP server Hermes calls for "do I have this song"
+# questions (ask_music) -- third of the "specialist agent" family after
+# movies-mcp/vault-mcp. See apps/music-mcp/server.py's top-of-file comment
+# for the full design writeup (fast exact-match + 27B semantic fallback,
+# Honcho workspace/peer/session layout). Source lives in apps/music-mcp/
+# in this repo (not published anywhere) -- built and run locally on aibox,
+# same no-registry pattern as every other *-mcp service here (see
+# movies-mcp-deployment.yaml's own comment for the full reasoning).
+#
+# BUILD / DEPLOY (run on aibox -- the image has to exist as a local
+# containerd/docker image on the node before this Deployment can start):
+#   cd ~/repos/aibox-platform/apps/music-mcp
+#   docker build -t music-mcp:latest .
+#   docker save music-mcp:latest | sudo k3s ctr images import -
+# After editing server.py, repeat both, then:
+#   kubectl rollout restart deployment/music-mcp -n ai-mcp
+# When THIS FILE changes -- `kubectl apply -f` it in addition to any
+# image rebuild.
+#
+# No PVC, no GPU. Honcho (k8s/p2/honcho.yaml, already deployed) is the
+# persistent store for conversation memory -- but there IS one small
+# hostPath volume below, for music-library.yaml, the structured song list
+# ask_music reads/appends to (see server.py's DATA SOURCE comment). Same
+# reasoning as movies-mcp's watch-history.yaml: this is a precise lookup
+# list, not a fit for Honcho's fuzzy dialectic recall.
+#
+# MOUNTS THE DIRECTORY, NOT THE FILE -- same real production bug movies-
+# mcp hit (see movies-mcp-deployment.yaml's own top comment for the full
+# "Device or resource busy" story): _save_library() in server.py writes a
+# temp file next to the real one then os.replace()'s it into place, which
+# only works when both files live inside the same bind-mounted directory.
+#
+# Lives in the Obsidian vault from the start (not migrated in later like
+# movies-mcp was) -- same single-place-of-truth reasoning Eldar gave for
+# moving movies-mcp there: the vault is already backed up as one unit, so
+# every specialist agent's data goes under
+# /data/obsidian_vault/_system/specialist-agents/<name>/ from day one.
+#
+# ONE-TIME SETUP before the first `kubectl apply` of this file: the
+# hostPath below expects the DIRECTORY to already exist on aibox, with the
+# seed file inside it. No sudo needed -- the vault is eldar-owned:
+#   mkdir -p /data/obsidian_vault/_system/specialist-agents/music
+#   cat > /data/obsidian_vault/_system/specialist-agents/music/music-library.yaml <<'EOF'
+#   songs: []
+#   EOF
+# Then run music_import.py (apps/music-mcp/music_import.py) against your
+# Winamp M3U/M3U8 export to actually populate it -- see that script's own
+# top comment for usage. After that, the pod owns the file -- don't
+# overwrite it by hand again except to fix a typo; re-run music_import.py
+# (no flags) against an updated export instead, it only ever adds.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: music-mcp
+  namespace: ai-mcp
+  labels:
+    app: music-mcp
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: music-mcp
+    spec:
+      containers:
+        - name: music-mcp
+          image: music-mcp:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: LITELLM_URL
+              value: "http://litellm.ai-models.svc.cluster.local:4000/v1"
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secret
+                  key: master_key
+            - name: HONCHO_URL
+              value: "http://honcho-api.ai-memory.svc.cluster.local:8000"
+            # No HONCHO_API_KEY entry -- same as movies-mcp, honcho-config's
+            # AUTH_USE_AUTH is "false" today. If that changes, add a
+            # secretKeyRef here the same way LITELLM_API_KEY does above.
+            - name: LIBRARY_PATH
+              value: "/app/data/music-library.yaml"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          volumeMounts:
+            - name: music-library
+              mountPath: /app/data
+      volumes:
+        # DIRECTORY hostPath, not a single file -- see the top-of-file
+        # "MOUNTS THE DIRECTORY, NOT THE FILE" comment. type: Directory
+        # (not DirectoryOrCreate) so this fails fast if the ONE-TIME SETUP
+        # above wasn't done.
+        - name: music-library
+          hostPath:
+            path: /data/obsidian_vault/_system/specialist-agents/music
+            type: Directory
+  selector:
+    matchLabels:
+      app: music-mcp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: music-mcp
+  namespace: ai-mcp
+spec:
+  selector:
+    app: music-mcp
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http

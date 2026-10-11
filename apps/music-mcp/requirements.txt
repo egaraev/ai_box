@@ -1,0 +1,7 @@
+# Same floor as the other *-mcp services in this repo -- see
+# movies-mcp/requirements.txt's comment for why (mcp 2.x renamed
+# FastMCP -> MCPServer; plain `pip install mcp` already resolves to 2.x).
+mcp>=2.0
+httpx>=0.27
+# music-library.yaml read/write (_load_library / _save_library in server.py)
+pyyaml>=6.0

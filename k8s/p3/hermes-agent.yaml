@@ -275,6 +275,21 @@ data:
     # under media-gen's multi-minute renders, with real margin over
     # LiteLLM's own 90s per-call timeout in case the "auto" router falls
     # back to a slower/cloud model.
+    # music (added 2026-10-11, second of the "specialist agent" family --
+    # see apps/music-mcp/server.py's top-of-file comment for the full
+    # design). ONE tool: ask_music, for both "do I have this song" lookups
+    # AND recording a newly-added one -- same single-tool-decides-the-intent
+    # shape as ask_movies, so you never need to classify the message
+    # yourself. Fast exact-match first, a real reasoning-model judgment
+    # (never a raw string-similarity score) only when nothing exact turns
+    # up. See SOUL.md's "# Music" section for the save-confirmation rule.
+    # Same lightweight footprint as movies-mcp -- no GPU/PVC, Honcho for
+    # conversation memory (same deployment, workspace "aibox-specialists",
+    # its own peers/session so the two specialists' histories never mix),
+    # a small hostPath file for the structured song list. 150s gives a bit
+    # more headroom than movies-mcp's 120s since the reasoning-fallback
+    # call here sends the WHOLE ~1257-song library as text on every
+    # ambiguous lookup, a bigger prompt than movies-mcp's own fallback.
     mcp_servers:
       media-gen:
         url: "http://media-gen-mcp.ai-mcp.svc.cluster.local:8000/mcp"
@@ -288,6 +303,9 @@ data:
       movies:
         url: "http://movies-mcp.ai-mcp.svc.cluster.local:8000/mcp"
         timeout: 120
+      music:
+        url: "http://music-mcp.ai-mcp.svc.cluster.local:8000/mcp"
+        timeout: 150
 
     # P6 roadmap ("Specialized + family agents", see /areas/ai-box-k3s.md):
     # settled this session (2026-09-17) on a simpler design than originally
@@ -507,6 +525,26 @@ data:
       change stated more explicitly (exact title, exact status word: watched
       it/finished it, dropped it/stopped watching it, or waiting for it)
       before telling Eldar it failed.
+
+    # Music
+    - ONE tool lives on the music MCP server: ask_music, for both "do I
+      have this song" lookups (often right after Shazam'ing something in
+      the car) AND recording a newly-added one. Just call it with whatever
+      Eldar said, in his own words -- the tool itself decides whether it's
+      a check or an add and saves it if so. You don't need to classify the
+      message yourself.
+    - The ONLY reliable signal that a song was actually added is the
+      literal substring "(added: Artist - Title)" appearing in ask_music's
+      returned text. If that substring is NOT in the response, nothing was
+      saved -- say so plainly instead of claiming it worked. Never report a
+      song as added from your own reasoning or because the answer sounded
+      like confirmation -- only the "(added: ...)" substring counts.
+    - If the tool comes back asking Eldar to confirm a possible match,
+      relay that question as-is and wait for his answer before calling the
+      tool again -- don't guess which way to resolve it yourself.
+    - If asked "did you add that," don't guess or repeat an earlier claim --
+      call ask_music again with the same details (safe to repeat) and check
+      the fresh response for "(added: ...)" before answering.
 
     # Defaults
     - When something is genuinely ambiguous, ask -- don't guess on anything
