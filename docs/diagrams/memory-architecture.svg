@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 400" width="760" height="400" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+  <path d="M0,0 L10,5 L0,10 z" fill="#1c1a16"/>
+</marker>
+<marker id="arrow-dim" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+  <path d="M0,0 L10,5 L0,10 z" fill="#6b665c"/>
+</marker>
+</defs>
+<rect x="0" y="0" width="760" height="400" fill="#ffffff"/>
+<rect x="230" y="20" width="300" height="70" rx="10" fill="#f2e2cd" stroke="#a8631e" stroke-width="1.3"/>
+<text x="380.0" y="46" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13.5" font-weight="600" fill="#1c1a16">Hermes</text>
+<text x="380.0" y="66" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#6b665c">working memory = live context window,</text>
+<text x="380.0" y="82" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#6b665c">this exchange only</text>
+<rect x="40" y="160" width="320" height="110" rx="10" fill="#e3efe2" stroke="#3f7d4f" stroke-width="1.3"/>
+<text x="200.0" y="186" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13.5" font-weight="600" fill="#1c1a16">Honcho</text>
+<text x="200.0" y="206" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#6b665c">Postgres/pgvector — peers → sessions → messages</text>
+<text x="200.0" y="222" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#6b665c">+ Deriver-extracted long-term facts</text>
+<rect x="400" y="160" width="320" height="110" rx="10" fill="#dfeceb" stroke="#2b6e6a" stroke-width="1.3"/>
+<text x="560.0" y="186" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13.5" font-weight="600" fill="#1c1a16">Qdrant</text>
+<text x="560.0" y="206" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#6b665c">knowledge base — documents sent or</text>
+<text x="560.0" y="222" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#6b665c">written, not things said</text>
+<rect x="130" y="320" width="500" height="70" rx="10" fill="#ffffff" stroke="#6b665c" stroke-width="1.3"/>
+<text x="380.0" y="346" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13.5" font-weight="600" fill="#1c1a16">nomic-embed-text-v1.5</text>
+<text x="380.0" y="366" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="400" fill="#6b665c">shared embedding model, served via LiteLLM</text>
+<path d="M380.0,90 C 380.0,140 200.0,130 200.0,160" fill="none" stroke="#3f7d4f" stroke-width="1.4" marker-end="url(#arrow)"/>
+<text x="200" y="130" font-size="10.5" fill="#3f7d4f">every turn — native memory provider</text>
+<path d="M380.0,90 C 380.0,140 560.0,130 560.0,160" fill="none" stroke="#2b6e6a" stroke-width="1.4" marker-end="url(#arrow)"/>
+<text x="500" y="130" font-size="10.5" fill="#2b6e6a">search_vault — agent-initiated</text>
+<line x1="200.0" y1="270" x2="320.0" y2="320" stroke="#6b665c" stroke-width="1.4" marker-end="url(#arrow)"/>
+<line x1="560.0" y1="270" x2="440.0" y2="320" stroke="#6b665c" stroke-width="1.4" marker-end="url(#arrow)"/>
+</svg>

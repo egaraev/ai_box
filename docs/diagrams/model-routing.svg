@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 748" width="820" height="748" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+  <path d="M0,0 L10,5 L0,10 z" fill="#1c1a16"/>
+</marker>
+<marker id="arrow-dim" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+  <path d="M0,0 L10,5 L0,10 z" fill="#6b665c"/>
+</marker>
+</defs>
+<rect x="0" y="0" width="820" height="748" fill="#ffffff"/>
+<rect x="30" y="20" width="260" height="44" rx="10" fill="#f2e2cd" stroke="#a8631e" stroke-width="1.3"/>
+<text x="160.0" y="42" text-anchor="middle" font-family="'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace" font-size="12.5" font-weight="600" fill="#1c1a16">chat request</text>
+<text x="160.0" y="60" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" font-weight="400" fill="#6b665c">model: "auto"</text>
+<rect x="30" y="92" width="260" height="46" rx="10" fill="#ffffff" stroke="#dcd8d0" stroke-width="1.3"/>
+<text x="160.0" y="120.0" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#1c1a16">1 · cloud-alias phrase?</text>
+<rect x="30" y="158" width="260" height="46" rx="10" fill="#ffffff" stroke="#dcd8d0" stroke-width="1.3"/>
+<text x="160.0" y="186.0" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#1c1a16">2 · media-gen busy?</text>
+<rect x="30" y="224" width="260" height="46" rx="10" fill="#ffffff" stroke="#dcd8d0" stroke-width="1.3"/>
+<text x="160.0" y="252.0" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#1c1a16">3 · image attached?</text>
+<rect x="30" y="290" width="260" height="46" rx="10" fill="#ffffff" stroke="#dcd8d0" stroke-width="1.3"/>
+<text x="160.0" y="318.0" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#1c1a16">4 · image-cache marker?</text>
+<rect x="30" y="356" width="260" height="46" rx="10" fill="#ffffff" stroke="#dcd8d0" stroke-width="1.3"/>
+<text x="160.0" y="384.0" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#1c1a16">5 · deep-reasoning keyword?</text>
+<rect x="30" y="422" width="260" height="46" rx="10" fill="#ffffff" stroke="#dcd8d0" stroke-width="1.3"/>
+<text x="160.0" y="450.0" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#1c1a16">6 · tool-use verb + noun?</text>
+<rect x="30" y="488" width="260" height="46" rx="10" fill="#ffffff" stroke="#dcd8d0" stroke-width="1.3"/>
+<text x="160.0" y="516.0" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#1c1a16">7 · casual whole-message match?</text>
+<line x1="160.0" y1="64" x2="160.0" y2="92" stroke="#6b665c" stroke-width="1.4" marker-end="url(#arrow)"/>
+<line x1="160.0" y1="138" x2="160.0" y2="158" stroke="#6b665c" stroke-width="1.4" marker-end="url(#arrow)"/>
+<line x1="160.0" y1="204" x2="160.0" y2="224" stroke="#6b665c" stroke-width="1.4" marker-end="url(#arrow)"/>
+<line x1="160.0" y1="270" x2="160.0" y2="290" stroke="#6b665c" stroke-width="1.4" marker-end="url(#arrow)"/>
+<line x1="160.0" y1="336" x2="160.0" y2="356" stroke="#6b665c" stroke-width="1.4" marker-end="url(#arrow)"/>
+<line x1="160.0" y1="402" x2="160.0" y2="422" stroke="#6b665c" stroke-width="1.4" marker-end="url(#arrow)"/>
+<line x1="160.0" y1="468" x2="160.0" y2="488" stroke="#6b665c" stroke-width="1.4" marker-end="url(#arrow)"/>
+<rect x="30" y="554" width="260" height="50" rx="10" fill="#ffffff" stroke="#6b665c" stroke-width="1.3"/>
+<text x="160.0" y="576" text-anchor="middle" font-family="'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace" font-size="12.5" font-weight="600" fill="#1c1a16">else → Arch-Router-1.5B</text>
+<text x="160.0" y="594" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" font-weight="400" fill="#6b665c">classifies: vision · medical · casual · reasoning</text>
+<line x1="160.0" y1="534" x2="160.0" y2="554" stroke="#6b665c" stroke-width="1.4" marker-end="url(#arrow)"/>
+<rect x="500" y="92" width="290" height="50" rx="10" fill="#f4e1e1" stroke="#a13d3d" stroke-width="1.3"/>
+<text x="645.0" y="114" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#1c1a16">cloud alias</text>
+<text x="645.0" y="132" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" font-weight="400" fill="#6b665c">manual escape hatch</text>
+<rect x="500" y="158" width="290" height="50" rx="10" fill="#f4e1e1" stroke="#a13d3d" stroke-width="1.3"/>
+<text x="645.0" y="180" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#1c1a16">cloud fallback</text>
+<text x="645.0" y="198" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" font-weight="400" fill="#6b665c">OpenRouter, GPU busy</text>
+<rect x="500" y="224" width="290" height="50" rx="10" fill="#ece5f5" stroke="#6c4fa1" stroke-width="1.3"/>
+<text x="645.0" y="246" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#1c1a16">vision route</text>
+<text x="645.0" y="264" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" font-weight="400" fill="#6b665c">qwen3.8-27b-Expert-Vision</text>
+<rect x="500" y="356" width="290" height="50" rx="10" fill="#dfeceb" stroke="#2b6e6a" stroke-width="1.3"/>
+<text x="645.0" y="378" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#1c1a16">reasoning route</text>
+<text x="645.0" y="396" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" font-weight="400" fill="#6b665c">qwen3.8-27b-Expert, thinking on</text>
+<rect x="500" y="488" width="290" height="50" rx="10" fill="#f4ebd6" stroke="#a6790a" stroke-width="1.3"/>
+<text x="645.0" y="510" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#1c1a16">casual route</text>
+<text x="645.0" y="528" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" font-weight="400" fill="#6b665c">qwen3.8-27b-Expert, thinking off</text>
+<rect x="500" y="618" width="290" height="50" rx="10" fill="#e3efe2" stroke="#3f7d4f" stroke-width="1.3"/>
+<text x="645.0" y="640" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#1c1a16">medical route</text>
+<text x="645.0" y="658" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" font-weight="400" fill="#6b665c">llama3.1-aloe-beta-8b</text>
+<line x1="290" y1="115.0" x2="500" y2="117.0" stroke="#6b665c" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="290" y1="181.0" x2="500" y2="183.0" stroke="#6b665c" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="290" y1="247.0" x2="500" y2="249.0" stroke="#6b665c" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="290" y1="313.0" x2="500" y2="249.0" stroke="#6b665c" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="290" y1="379.0" x2="500" y2="381.0" stroke="#6b665c" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="290" y1="445.0" x2="500" y2="381.0" stroke="#6b665c" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="290" y1="511.0" x2="500" y2="513.0" stroke="#6b665c" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M290,579.0 C 380,579.0 410,249.0 500,249.0" fill="none" stroke="#a8631e" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#arrow)"/>
+<path d="M290,579.0 C 380,579.0 410,643.0 500,643.0" fill="none" stroke="#a8631e" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#arrow)"/>
+<path d="M290,579.0 C 380,579.0 410,513.0 500,513.0" fill="none" stroke="#a8631e" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#arrow)"/>
+<path d="M290,579.0 C 380,579.0 410,381.0 500,381.0" fill="none" stroke="#a8631e" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#arrow)"/>
+<text x="410.0" y="718" text-anchor="middle" font-size="11.5" fill="#6b665c">Checks 1–7 run in order and return on first match — the classifier only ever sees what none of them caught.</text>
+</svg>
