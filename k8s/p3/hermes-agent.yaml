@@ -409,13 +409,14 @@ data:
   # just Eldar.
   #
   # FIXED 2026-09-18: two real bugs found live once the P6 "family profiles"
-  # rollout put a --clone-from copy of this exact file into Sevinj's own
-  # profile. First: the old Identity/Style text named Eldar by name as the
-  # default person being talked to ("Eldar's home server" / "Eldar and his
-  # family" / "With Eldar, be direct..."). That was harmless with only one
-  # profile, but once a second profile cloned this file verbatim, Hermes
-  # opened Sevinj's very first message -- before she'd said who she was --
-  # with "Привет, Eldar!"; it had nothing else to go on, so it pattern-
+  # rollout put a --clone-from copy of this exact file into a second family
+  # member's own profile. First: the old Identity/Style text named Eldar by
+  # name as the default person being talked to ("Eldar's home server" /
+  # "Eldar and his family" / "With Eldar, be direct..."). That was harmless
+  # with only one profile, but once a second profile cloned this file
+  # verbatim, Hermes opened that family member's very first message --
+  # before they'd said who they were -- with "Привет, Eldar!"; it had
+  # nothing else to go on, so it pattern-
   # matched the most salient name in its own system prompt. Rewritten below
   # to never assume an identity. Second: this file had detailed guidance
   # for SAVING to the vault (folder selection) but nothing at all for
